@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>RecipKeeper</title>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet"/>
+
+  <!-- Google Identity Services (GIS) -->
+  <script src="https://accounts.google.com/gsi/client" async
+          onload="window.gisReady=true;window.dispatchEvent(new Event('gis-ready'))"></script>
+
+  <link rel="stylesheet" href="styles.css"/>
+
+  <!-- App config — set your Google Client ID and Worker URL here -->
+  <script>
+    // ── Configuration ──────────────────────────────────────────────
+    // Replace these with your actual values before deploying.
+    window.RK_GOOGLE_CLIENT_ID = 'YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com';
+    // The worker URL is stored per-user in their account data (entered during setup).
+  </script>
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ── Header ──────────────────────────────────────────────── -->
+  <header class="app-header">
+    <img src="logo.png" alt="RecipKeeper" class="app-logo"/>
+    <div class="app-name">Recip<span>Keeper</span></div>
+    <div class="header-right">
+      <button class="btn btn-ghost btn-sm" id="btn-import-mealie" title="Import from Mealie">📥 Import</button>
+      <button class="btn btn-ghost btn-sm" id="btn-settings" title="Settings">⚙️</button>
+    </div>
+  </header>
+
+  <!-- ── Navigation ──────────────────────────────────────────── -->
+  <nav class="app-nav">
+    <button class="nav-btn active" data-section="recipes">
+      <span class="nav-icon">📖</span>Recipes
+    </button>
+    <button class="nav-btn" data-section="planner">
+      <span class="nav-icon">📅</span>Planner
+    </button>
+    <button class="nav-btn" data-section="shopping">
+      <span class="nav-icon">🛒</span>Shopping
+    </button>
+  </nav>
+
+  <!-- ── Main content ────────────────────────────────────────── -->
+  <main class="app-main">
+
+    <!-- ── Recipes section ─────────────────────────────────── -->
+    <section id="section-recipes" class="section active">
+      <div class="section-header">
+        <h1 class="section-title">Recipes</h1>
+        <div class="search-bar">
+          <span class="search-icon">🔍</span>
+          <input class="input" id="recipe-search" placeholder="Search recipes…" type="search"/>
+        </div>
+        <button class="btn btn-primary" id="btn-new-recipe">+ New Recipe</button>
+      </div>
+      <div id="tag-filter-bar" class="tag-filter-bar"></div>
+      <div id="recipe-grid"></div>
+      <div id="recipe-empty" class="empty-state" style="display:none;">
+        <div class="empty-icon">🌿</div>
+        <div class="empty-title">No recipes yet</div>
+        <div class="empty-sub">Add your first recipe or import from Mealie to get started.</div>
+        <div style="display:flex;gap:.75rem;justify-content:center;">
+          <button class="btn btn-primary" onclick="openRecipeEditor(null)">+ New Recipe</button>
+          <button class="btn btn-ghost" onclick="openMealieImport()">📥 Import from Mealie</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Planner section ─────────────────────────────────── -->
+    <section id="section-planner" class="section">
+      <div class="section-header">
+        <h1 class="section-title">Meal Planner</h1>
+      </div>
+      <div class="planner-controls">
+        <button class="btn btn-ghost btn-sm" id="planner-prev">← Prev</button>
+        <span id="planner-week-label"></span>
+        <button class="btn btn-ghost btn-sm" id="planner-next">Next →</button>
+        <button class="btn btn-outline btn-sm" id="planner-today">This Week</button>
+      </div>
+      <div class="planner-table-wrap">
+        <table id="planner-table"></table>
+      </div>
+    </section>
+
+    <!-- ── Shopping section ────────────────────────────────── -->
+    <section id="section-shopping" class="section">
+      <div class="section-header">
+        <h1 class="section-title">Shopping List</h1>
+      </div>
+      <div id="shopping-list-content"></div>
+    </section>
+
+  </main>
+</div><!-- /app -->
+
+<!-- ════════════════════════════════════════════════════════════
+     MODALS
+     ════════════════════════════════════════════════════════════ -->
+
+<!-- ── Account setup wizard (used by Auth module) ─────────── -->
+<div class="modal-overlay" id="modal-account-setup" role="dialog" aria-modal="true"
+     aria-labelledby="account-setup-title">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <h2 class="modal-title" id="account-setup-title"></h2>
+    </div>
+    <div class="modal-body" id="account-setup-body"></div>
+  </div>
+</div>
+
+<!-- ── Recipe detail modal ─────────────────────────────────── -->
+<div class="modal-overlay" id="modal-recipe-detail" role="dialog" aria-modal="true">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <h2 class="modal-title" id="detail-title"></h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="detail-image-wrap">
+        <img id="detail-image" src="" alt="" style="display:none;"/>
+      </div>
+      <div class="detail-meta">
+        <span id="detail-servings"></span>
+        <span id="detail-tags"></span>
+        <span id="detail-source"></span>
+      </div>
+      <div class="detail-desc" id="detail-description"></div>
+
+      <div class="detail-scale-row">
+        <label id="detail-scale-label">Servings</label>
+        <input class="input" id="detail-scale" type="number" min="1" max="100" style="width:70px;"/>
+      </div>
+
+      <div class="detail-section-title">Ingredients</div>
+      <ul id="detail-ingredients"></ul>
+
+      <div class="detail-section-title">Instructions</div>
+      <ol id="detail-steps"></ol>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" id="detail-plan-btn">📅 Add to Plan</button>
+      <button class="btn btn-ghost btn-sm" id="detail-edit-btn">✏️ Edit</button>
+      <button class="btn btn-ghost btn-sm" id="detail-delete-btn" style="color:var(--red)">🗑️ Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Recipe editor modal ─────────────────────────────────── -->
+<div class="modal-overlay" id="modal-recipe-editor" role="dialog" aria-modal="true">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <h2 class="modal-title" id="modal-editor-title">New Recipe</h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body editor-scroll">
+      <form id="recipe-editor-form" onsubmit="return false;">
+
+        <div class="editor-two-col">
+          <div class="form-group" style="grid-column:1/-1">
+            <label class="form-label">Recipe Name *</label>
+            <input class="input" id="editor-title" placeholder="e.g. Roasted Butternut Squash Soup" required/>
+          </div>
+          <div class="form-group" style="grid-column:1/-1">
+            <label class="form-label">Description</label>
+            <textarea class="input" id="editor-description" rows="2"
+                      placeholder="A short note about this dish…"></textarea>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Servings</label>
+            <input class="input" id="editor-servings" type="number" min="1" placeholder="4"/>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Tags <span class="muted">(comma separated)</span></label>
+            <input class="input" id="editor-tags" placeholder="soup, vegetarian, winter…"/>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Source</label>
+            <input class="input" id="editor-source" placeholder="Grandma, NYT Cooking…"/>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Source URL</label>
+            <input class="input" id="editor-source-url" type="url" placeholder="https://…"/>
+          </div>
+          <div class="form-group" style="grid-column:1/-1">
+            <label class="form-label">Image URL</label>
+            <input class="input" id="editor-image-url" type="url" placeholder="https://… or leave blank"/>
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-top:.5rem;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.5rem;">
+            <label class="form-label" style="margin:0;">Ingredients</label>
+            <button class="btn btn-ghost btn-sm" type="button" id="btn-add-ingredient">+ Add</button>
+          </div>
+          <div id="editor-ingredients-list"></div>
+        </div>
+
+        <div class="form-group">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.5rem;">
+            <label class="form-label" style="margin:0;">Instructions</label>
+            <button class="btn btn-ghost btn-sm" type="button" id="btn-add-step">+ Add Step</button>
+          </div>
+          <div id="editor-steps-list"></div>
+        </div>
+
+      </form>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modal-recipe-editor')">Cancel</button>
+      <button class="btn btn-primary" id="btn-save-recipe">Save Recipe</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Pick recipe modal (for planner) ────────────────────── -->
+<div class="modal-overlay" id="modal-pick-recipe" role="dialog" aria-modal="true">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <h2 class="modal-title">Choose a Recipe</h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <input class="input" id="pick-recipe-search" placeholder="Search recipes…" type="search"/>
+      </div>
+      <div id="pick-recipe-grid" class="pick-recipe-grid"></div>
+      <p id="pick-recipe-empty" class="muted" style="display:none;text-align:center;padding:2rem 0;">
+        No recipes yet — add some first!
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Mealie import modal ─────────────────────────────────── -->
+<div class="modal-overlay" id="modal-mealie-import" role="dialog" aria-modal="true">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <h2 class="modal-title">Import from Mealie</h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="tab-bar">
+        <button class="tab-btn active" id="mealie-tab-json">Paste JSON</button>
+        <button class="tab-btn" id="mealie-tab-api">Connect via API</button>
+      </div>
+
+      <!-- JSON paste panel -->
+      <div id="mealie-json-panel">
+        <p class="f13 lh muted" style="margin-bottom:.75rem;">
+          In Mealie, go to <strong>Settings → Backups</strong> or export individual recipes as JSON, then paste below.
+        </p>
+        <div class="form-group">
+          <label class="form-label">Mealie JSON export</label>
+          <textarea class="input input-mono" id="mealie-json-input" rows="8"
+                    placeholder='[{"name":"...", "recipeIngredient":[...], "recipeInstructions":[...]}]'></textarea>
+        </div>
+        <button class="btn btn-primary w100" id="mealie-import-json-btn">Import Recipes</button>
+      </div>
+
+      <!-- API panel -->
+      <div id="mealie-api-panel" style="display:none;">
+        <p class="f13 lh muted" style="margin-bottom:.75rem;">
+          Enter your Mealie instance URL and an API key (Profile → API Tokens in Mealie).
+          RecipKeeper will import all your recipes automatically.
+        </p>
+        <div class="form-group">
+          <label class="form-label">Mealie URL</label>
+          <input class="input" id="mealie-url-input" placeholder="https://mealie.yourdomain.com" type="url"/>
+        </div>
+        <div class="form-group">
+          <label class="form-label">API Key</label>
+          <input class="input input-mono" id="mealie-api-key" type="password" placeholder="Your Mealie API token…"/>
+        </div>
+        <button class="btn btn-primary w100" id="mealie-import-api-btn">Import from Mealie</button>
+      </div>
+
+      <div id="mealie-import-status" style="min-height:1.5rem;font-size:.85rem;margin-top:.75rem;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Settings modal ──────────────────────────────────────── -->
+<div class="modal-overlay" id="modal-settings" role="dialog" aria-modal="true">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <h2 class="modal-title">Settings</h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body">
+
+      <!-- Profile -->
+      <div class="settings-section">
+        <div class="settings-section-header">Profile</div>
+        <div class="settings-section-body">
+          <div class="form-group" style="margin:0;">
+            <label class="form-label">Your Name</label>
+            <input class="input" id="settings-name-input" placeholder="How should we address you?"/>
+          </div>
+        </div>
+      </div>
+
+      <!-- Account — populated by Auth.renderSettingsSection() -->
+      <div class="settings-section">
+        <div class="settings-section-header">
+          Account &nbsp; <span id="settings-auth-badge" class="auth-badge auth-badge-guest">Guest</span>
+        </div>
+        <div class="settings-section-body">
+
+          <!-- Guest section -->
+          <div id="settings-guest-section">
+            <p class="f13 lh muted">You're using RecipKeeper as a guest. Create a free account to sync your recipes across devices.</p>
+          </div>
+
+          <!-- Token section -->
+          <div id="settings-token-group" style="display:none;">
+            <div class="settings-row">
+              <div>
+                <div class="settings-row-label">Token account</div>
+                <div class="settings-row-sub">Your recipes sync via your secret token.</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Google section -->
+          <div id="settings-google-info" style="display:none;"></div>
+
+          <!-- Worker URL (token & google) -->
+          <div id="settings-worker-group" style="display:none;">
+            <div class="form-group" style="margin:0;">
+              <label class="form-label">Worker URL</label>
+              <input class="input" id="settings-worker-url" placeholder="https://your-worker.workers.dev"/>
+              <div class="form-hint">Your Cloudflare Worker endpoint for syncing.</div>
+            </div>
+          </div>
+
+          <!-- Sync controls -->
+          <div id="settings-sync-controls" style="display:none;">
+            <div class="settings-row">
+              <span class="settings-row-label">Sync now</span>
+              <button class="btn btn-outline btn-sm" onclick="syncToWorker().then(()=>showToast('Synced ✓'))">Sync</button>
+            </div>
+          </div>
+
+          <!-- Upgrade to Google (token accounts only) -->
+          <div id="settings-upgrade-google" style="display:none;">
+            <button class="btn btn-ghost btn-sm" onclick="Auth.showGoogleUpgradeFlow()">
+              Upgrade to Google sign-in →
+            </button>
+          </div>
+
+          <!-- Account action button -->
+          <div style="margin-top:.25rem;">
+            <button class="btn btn-ghost btn-sm" id="settings-account-btn">
+              Switch / Create Account
+            </button>
+          </div>
+
+        </div>
+      </div>
+
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modal-settings')">Cancel</button>
+      <button class="btn btn-primary" id="settings-save-btn">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Toast ───────────────────────────────────────────────── -->
+<div id="toast"></div>
+
+<!-- ── Scripts ────────────────────────────────────────────── -->
+<script src="auth.js"></script>
+<script src="app.js"></script>
+
+</body>
+</html>
