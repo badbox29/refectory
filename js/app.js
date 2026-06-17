@@ -72,12 +72,18 @@ function mergeData(raw) {
 
 const ls = {
   get:    k => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch { return null; } },
-  set:    (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+  set:    (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch(e) { console.error('[Refectory] localStorage.set failed:', e); } },
   remove: k => { try { localStorage.removeItem(k); } catch {} },
 };
 
 function saveLocal() {
-  ls.set(STORAGE_KEY, App.data);
+  try {
+    const json = JSON.stringify(App.data);
+    localStorage.setItem(STORAGE_KEY, json);
+  } catch(e) {
+    console.error('[Refectory] saveLocal failed — data NOT persisted:', e);
+    showToast('⚠️ Could not save — storage may be full or unavailable', 'error');
+  }
 }
 
 // ─── Worker sync ──────────────────────────────────────────────────
@@ -917,9 +923,15 @@ async function triggerMealieZipImport(file) {
   if (btn) { btn.disabled = false; btn.textContent = 'Import from Backup'; }
 
   if (result.ok) {
+    // Explicitly save after import — belt and suspenders
+    saveLocal();
     renderAll();
     closeModal('modal-mealie-import');
     showToast(`✅ Imported ${result.count} recipes from Mealie backup`);
+    // Confirm to console that data was persisted
+    const saved = localStorage.getItem(STORAGE_KEY);
+    const recipeCount = saved ? Object.keys(JSON.parse(saved).recipes || {}).length : 0;
+    console.log(`[Refectory] Saved. localStorage has ${recipeCount} recipes.`);
   } else {
     if (status) { status.textContent = result.error; status.style.color = 'var(--red)'; }
   }
@@ -1177,7 +1189,14 @@ function saveSettings() {
 // ─── Auth callbacks ───────────────────────────────────────────────
 
 function onSignedIn(data, isNew) {
-  App.data = mergeData(data);
+  // Preserve any locally-accumulated recipes when upgrading from guest
+  const existing = App.data || {};
+  const merged = mergeData(data);
+  App.data = {
+    ...merged,
+    recipes:  { ...(existing.recipes || {}), ...(merged.recipes || {}) },
+    mealplan: Object.keys(existing.mealplan || {}).length ? existing.mealplan : (merged.mealplan || {}),
+  };
   saveLocal();
   renderAll();
   if (isNew) showToast(`Welcome to Refectory 🌿`);
@@ -1186,7 +1205,14 @@ function onSignedIn(data, isNew) {
 }
 
 function onGuestReady(data) {
-  App.data = mergeData(data);
+  // Merge incoming auth data (authMethod, name fields) with whatever is
+  // already in App.data — preserving any recipes imported before this fires.
+  const existing = App.data || {};
+  App.data = {
+    ...mergeData(data),
+    recipes:  Object.keys(existing.recipes  || {}).length ? existing.recipes  : (data.recipes  || {}),
+    mealplan: Object.keys(existing.mealplan || {}).length ? existing.mealplan : (data.mealplan || {}),
+  };
   saveLocal();
   renderAll();
 }
@@ -1427,6 +1453,14 @@ document.addEventListener('DOMContentLoaded', () => {
   // Close modals on ✕ button
   document.querySelectorAll('.modal-close').forEach(btn => {
     btn.addEventListener('click', () => closeModal(btn.closest('.modal-overlay').id));
+  });
+
+  // Safety save when tab is hidden or page is closing
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && App.data) saveLocal();
+  });
+  window.addEventListener('pagehide', () => {
+    if (App.data) saveLocal();
   });
 
   boot();
