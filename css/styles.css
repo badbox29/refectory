@@ -343,13 +343,67 @@ textarea.input { resize: vertical; min-height: 80px; }
 
 /* ── Tag filter bar ──────────────────────────────────────────── */
 .tag-filter-bar {
+  margin-bottom: .75rem;
+}
+
+/* Row shown when collapsed: active pills + "N tags ▾" toggle */
+.tag-filter-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .35rem;
+  min-height: 2rem;
+}
+
+.tag-filter-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  padding: .2rem .75rem;
+  font-size: .78rem;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all .12s;
+  flex-shrink: 0;
+}
+.tag-filter-toggle:hover { border-color: var(--green-soft); color: var(--green-deep); }
+
+/* Expanded panel */
+.tag-filter-panel {
+  display: none;
+  margin-top: .5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: .65rem .75rem .75rem;
+  background: var(--cream-dark);
+}
+.tag-filter-panel.open { display: block; }
+
+.tag-filter-search {
+  width: 100%;
+  margin-bottom: .6rem;
+  padding: .3rem .65rem;
+  font-size: .82rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--white);
+  color: var(--ink);
+  outline: none;
+  box-sizing: border-box;
+}
+.tag-filter-search:focus { border-color: var(--green-soft); }
+
+.tag-filter-pills {
   display: flex;
   flex-wrap: wrap;
-  gap: .4rem;
-  margin-bottom: 1rem;
+  gap: .35rem;
+  max-height: 160px;
+  overflow-y: auto;
 }
+
 .tag-filter-btn {
-  background: var(--cream-dark);
+  background: var(--white);
   border: 1px solid var(--border);
   border-radius: 99px;
   padding: .2rem .7rem;
@@ -357,9 +411,37 @@ textarea.input { resize: vertical; min-height: 80px; }
   color: var(--ink-mid);
   cursor: pointer;
   transition: all .12s;
+  white-space: nowrap;
 }
 .tag-filter-btn:hover  { border-color: var(--green-soft); color: var(--green-deep); }
 .tag-filter-btn.active { background: var(--green-deep); color: var(--cream); border-color: var(--green-deep); }
+
+/* Active pills shown in summary row */
+.tag-active-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: .25rem;
+  background: var(--green-deep);
+  color: var(--cream);
+  border: 1px solid var(--green-deep);
+  border-radius: 99px;
+  padding: .2rem .6rem .2rem .75rem;
+  font-size: .78rem;
+  cursor: default;
+}
+.tag-active-pill button {
+  background: none;
+  border: none;
+  color: var(--cream);
+  opacity: .7;
+  cursor: pointer;
+  padding: 0;
+  font-size: .8rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+}
+.tag-active-pill button:hover { opacity: 1; }
 
 .tag {
   display: inline-block;
