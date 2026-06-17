@@ -318,17 +318,84 @@ function getAllTags() {
 function renderTagFilter() {
   const bar = document.getElementById('tag-filter-bar');
   if (!bar) return;
-  const tags = getAllTags();
-  if (!tags.length) { bar.innerHTML = ''; return; }
-  bar.innerHTML = tags.map(t =>
-    `<button class="tag-filter-btn ${View.recipeTags.includes(t) ? 'active' : ''}" data-tag="${esc(t)}">${esc(t)}</button>`
+  const allTags = getAllTags();
+  if (!allTags.length) { bar.innerHTML = ''; return; }
+
+  const active  = View.recipeTags;
+  const isOpen  = bar.dataset.open === '1';
+  const search  = bar.dataset.search || '';
+
+  // ── Summary row (always visible) ────────────────────────────────
+  const activePills = active.map(t => `
+    <span class="tag-active-pill" data-tag="${esc(t)}">
+      ${esc(t)}<button title="Remove" data-remove="${esc(t)}">✕</button>
+    </span>`).join('');
+
+  const toggleLabel = isOpen
+    ? '▴ Hide tags'
+    : `${allTags.length} tags ▾${active.length ? ` (${active.length} active)` : ''}`;
+
+  // ── Expanded panel ───────────────────────────────────────────────
+  const visibleTags = search
+    ? allTags.filter(t => t.toLowerCase().includes(search.toLowerCase()))
+    : allTags;
+
+  const pills = visibleTags.map(t =>
+    `<button class="tag-filter-btn${active.includes(t) ? ' active' : ''}" data-tag="${esc(t)}">${esc(t)}</button>`
   ).join('');
+
+  bar.innerHTML = `
+    <div class="tag-filter-summary">
+      ${activePills}
+      <button class="tag-filter-toggle" id="tag-filter-toggle-btn">${toggleLabel}</button>
+      ${active.length ? `<button class="tag-filter-toggle" id="tag-filter-clear" style="color:var(--red);border-color:var(--red);">Clear all</button>` : ''}
+    </div>
+    <div class="tag-filter-panel${isOpen ? ' open' : ''}">
+      <input class="tag-filter-search" id="tag-filter-search" placeholder="Search tags…" value="${esc(search)}" autocomplete="off"/>
+      <div class="tag-filter-pills">${pills}</div>
+    </div>
+  `;
+
+  // Toggle open/close
+  bar.querySelector('#tag-filter-toggle-btn')?.addEventListener('click', () => {
+    bar.dataset.open = bar.dataset.open === '1' ? '0' : '1';
+    renderTagFilter();
+  });
+
+  // Clear all active tags
+  bar.querySelector('#tag-filter-clear')?.addEventListener('click', () => {
+    View.recipeTags = [];
+    renderRecipes();
+    renderTagFilter();
+  });
+
+  // Remove individual active tag from summary pills
+  bar.querySelectorAll('[data-remove]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const t = btn.dataset.remove;
+      View.recipeTags = View.recipeTags.filter(x => x !== t);
+      renderRecipes();
+      renderTagFilter();
+    });
+  });
+
+  // Tag search filter
+  bar.querySelector('#tag-filter-search')?.addEventListener('input', e => {
+    bar.dataset.search = e.target.value;
+    renderTagFilter();
+    // Keep focus inside the search box after re-render
+    bar.querySelector('#tag-filter-search')?.focus();
+  });
+
+  // Tag pill clicks
   bar.querySelectorAll('.tag-filter-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const t = btn.dataset.tag;
       if (View.recipeTags.includes(t)) View.recipeTags = View.recipeTags.filter(x => x !== t);
       else View.recipeTags.push(t);
       renderRecipes();
+      renderTagFilter();
     });
   });
 }
