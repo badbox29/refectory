@@ -1,16 +1,17 @@
 /**
- * RecipKeeper — Cloudflare Worker
+ * Refectory — Cloudflare Worker
  *
  * Environment variables (Cloudflare dashboard):
  *   GOOGLE_CLIENT_ID   — Google OAuth Client ID
  *   ALLOWED_ORIGINS    — Comma-separated allowed origins
  *
  * KV Namespace binding:
- *   RECIPKEEPER_KV     — KV namespace for user data
+ *   REFECTORY_KV       — KV namespace for user data
  *
  * Routes:
  *   GET    /                    — Health check (open CORS)
  *   GET    /ping                — Health check (open CORS)
+ *   GET    /auth/config         — Return Google Client ID for GIS bootstrap
  *   POST   /auth/google         — Verify Google ID token
  *   POST   /auth/verify         — Re-verify stored Google credential at boot
  *   POST   /auth/migrate        — Token → Google migration (HMAC-authenticated)
@@ -20,9 +21,9 @@
  *   GET    /storage/:token      — List all keys for token
  */
 
-const KV_BINDING          = 'RECIPKEEPER_KV';
+const KV_BINDING          = 'REFECTORY_KV';
 const KV_TTL              = 60 * 60 * 24 * 1825; // 5 years, resets on every write
-const HMAC_SALT           = 'recipkeeper-hmac-v1'; // must never change after deployment
+const HMAC_SALT           = 'refectory-hmac-v1'; // must never change after deployment
 const MAX_BODY_SIZE       = 512 * 1024;            // 512 KB (recipes can include base64 images)
 const AUTH_RATE_LIMIT     = 20;
 const AUTH_RATE_LIMIT_WIN = 3600;
@@ -159,6 +160,13 @@ async function verifyGoogleJWT(idToken, clientId) {
 async function handleAuth(url, method, request, env, cors, ip) {
   const kv = env[KV_BINDING];
 
+  // GET /auth/config — return Google Client ID so the frontend never stores it
+  if (url.pathname === '/auth/config' && method === 'GET') {
+    return respond(JSON.stringify({
+      googleClientId: env.GOOGLE_CLIENT_ID || '',
+    }), 200, cors);
+  }
+
   // All /auth/* routes are IP rate-limited
   if (!(await checkIpRateLimit(env, ip))) {
     return respond(JSON.stringify({ error: 'Too many requests — try again later' }), 429, cors);
@@ -208,7 +216,7 @@ async function handleAuth(url, method, request, env, cors, ip) {
 
     // One Google identity = one account
     const existingGoogle = await kv.get(`user:${kvKey}:profile`, { type: 'text' });
-    if (existingGoogle) return respond(JSON.stringify({ error: 'A RecipKeeper account already exists for this Google account. Sign in with Google instead.' }), 409, cors);
+    if (existingGoogle) return respond(JSON.stringify({ error: 'A Refectory account already exists for this Google account. Sign in with Google instead.' }), 409, cors);
 
     const existingRaw = await kv.get(`user:${oldToken}:profile`, { type: 'text' });
     if (!existingRaw) return respond(JSON.stringify({ error: 'Source account not found' }), 404, cors);
@@ -400,7 +408,7 @@ export default {
 
     // Health check — open CORS, no auth (needed by Auth.testWorkerUrl)
     if (method === 'GET' && (url.pathname === '/' || url.pathname === '/ping')) {
-      return new Response(JSON.stringify({ ok: true, ts: Date.now(), app: 'RecipKeeper' }), {
+      return new Response(JSON.stringify({ ok: true, ts: Date.now(), app: 'Refectory' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' },
       });
