@@ -200,8 +200,7 @@ function plainText(str) {
     .replace(/[*][*](.+?)[*][*]/g, '$1')
     .replace(/[*](.+?)[*]/g, '$1')
     .replace(/#+\s*/g, '')
-    .replace(/
-+/g, ' ')
+    .replace(/[\r\n]+/g, ' ')
     .trim();
 }
 
@@ -500,7 +499,7 @@ function updateScaledIngredients() {
   document.getElementById('detail-ingredients').innerHTML =
     (recipe.ingredients || []).map(i => {
       if (typeof i === 'string') {
-        const m = i.match(/^([\d.\s\/]+)(.*)/);
+        const m = i.match(/^([0-9.\/\s]+)(.*)/);
         if (m && !isNaN(parseFloat(m[1]))) {
           const scaled = parseFloat(m[1]) * ratio;
           const num = Number.isInteger(scaled) ? scaled : scaled.toFixed(2).replace(/\.?0+$/, '');
