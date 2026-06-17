@@ -26,7 +26,9 @@ function defaultData() {
     userToken:   Auth.generateToken(),
     workerUrl:   '',
     linkedGoogle: null,
-    userName:    '',
+    firstName:   '',
+    lastName:    '',
+    username:    '',
     // Recipes: { [id]: { id, title, description, servings, ingredients, steps, tags, source, sourceUrl, importedFrom, createdAt, updatedAt, image } }
     recipes:     {},
     // Meal plan: { [weekKey]: { [dayIndex]: { [slot]: recipeId } } }
@@ -797,12 +799,16 @@ async function importFromMealieApi(baseUrl, apiKey) {
 function openSettings() {
   Auth.renderSettingsSection();
   const d = App.data;
-  document.getElementById('settings-name-input').value = d.userName || '';
+  document.getElementById('settings-firstname-input').value = d.firstName || '';
+  document.getElementById('settings-lastname-input').value  = d.lastName  || '';
+  document.getElementById('settings-username-input').value   = d.username  || '';
   openModal('modal-settings');
 }
 
 function saveSettings() {
-  App.data.userName = document.getElementById('settings-name-input').value.trim();
+  App.data.firstName = document.getElementById('settings-firstname-input').value.trim();
+  App.data.lastName  = document.getElementById('settings-lastname-input').value.trim();
+  App.data.username  = document.getElementById('settings-username-input').value.trim();
   scheduleSave();
   closeModal('modal-settings');
   showToast('Settings saved ✓');

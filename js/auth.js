@@ -483,7 +483,7 @@ const Auth = (() => {
   // HOST APP INTERFACE: calls getData(), startSyncPing(), closeModal()
   function showGoogleReauth() {
     const d       = getData();
-    const name    = d.linkedGoogle?.name    || d.userName || '';
+    const name    = d.linkedGoogle?.name    || [d.firstName, d.lastName].filter(Boolean).join(' ') || '';
     const email   = d.linkedGoogle?.email   || '';
     const picture = d.linkedGoogle?.picture || '';
 
@@ -631,8 +631,8 @@ const Auth = (() => {
   // Screen flow:
   //   S1  Welcome
   //        ├─ "Yes, load existing" → S2A (choose token or Google)
-  //        ├─ "No, start fresh"    → S2B (name + studio + worker + auth)
-  //        └─ "Try as guest"       → SG  (optional name + studio)
+  //        ├─ "No, start fresh"    → S2B (firstName/lastName/username + worker + auth)
+  //        └─ "Try as guest"       → SG  (optional firstName/lastName/username)
   //
   //   S2A  Load existing
   //        ├─ "Token"  → S3B (worker URL + token entry)
@@ -684,8 +684,8 @@ const Auth = (() => {
   }
 
   // ── SG: Guest intro ─────────────────────────────────────────────
-  // Optional name + studio before entering as guest.
-  // Both fields are optional — "skip and jump straight in" is valid.
+  // Optional firstName, lastName, username before entering as guest.
+  // All fields are optional — "skip and jump straight in" is valid.
   // HOST APP INTERFACE: calls getData(), setData(), onGuestReady()
   function showSetupGuest() {
     setupScreen('Just Exploring?', `
@@ -694,12 +694,16 @@ const Auth = (() => {
         You can always fill this in later from Settings.
       </p>
       <div class="form-group">
-        <label class="form-label">Your Name <span class="muted" style="font-size:.78rem;">(optional)</span></label>
-        <input class="input" id="auth-guest-name" placeholder="First name, last name, or username…"/>
+        <label class="form-label">First Name <span class="muted" style="font-size:.78rem;">(optional)</span></label>
+        <input class="input" id="auth-guest-firstname" placeholder="First name…"/>
       </div>
       <div class="form-group">
-        <label class="form-label">Studio Name <span class="muted" style="font-size:.78rem;">(optional)</span></label>
-        <input class="input" id="auth-guest-studio" placeholder="Your studio or organization…"/>
+        <label class="form-label">Last Name <span class="muted" style="font-size:.78rem;">(optional)</span></label>
+        <input class="input" id="auth-guest-lastname" placeholder="Last name…"/>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Username <span class="muted" style="font-size:.78rem;">(optional)</span></label>
+        <input class="input" id="auth-guest-username" placeholder="Choose a username…"/>
       </div>
       <div class="form-actions" style="flex-direction:column;gap:.65rem;margin-top:.5rem;">
         <button class="btn btn-primary w100" id="auth-btn-guest-continue" style="justify-content:center;">
@@ -710,12 +714,14 @@ const Auth = (() => {
     `);
     document.getElementById('auth-btn-back').addEventListener('click', showAccountSetup);
     document.getElementById('auth-btn-guest-continue').addEventListener('click', () => {
-      const name   = document.getElementById('auth-guest-name').value.trim();
-      const studio = document.getElementById('auth-guest-studio').value.trim();
+      const firstName = document.getElementById('auth-guest-firstname').value.trim();
+      const lastName  = document.getElementById('auth-guest-lastname').value.trim();
+      const username  = document.getElementById('auth-guest-username').value.trim();
       const d = getData();
       d.authMethod = 'guest';
-      if(name)   d.userName   = name;
-      if(studio) d.studioName = studio;
+      if(firstName) d.firstName = firstName;
+      if(lastName)  d.lastName  = lastName;
+      if(username)  d.username  = username;
       C.setData(d);
       C.closeModal('modal-account-setup');
       C.onGuestReady(d);
@@ -903,14 +909,15 @@ const Auth = (() => {
   }
 
   // ── S2B: Start fresh (also used for guest → account conversion) ──
-  // Name required, studio optional, worker URL required.
+  // Name fields optional, worker URL required.
   // Auth method chosen via buttons at bottom.
   // HOST APP INTERFACE: calls getData(), setData(), onSignedIn(),
   //                     pushToWorker(), startSyncPing()
   function showSetupFresh() {
     const d             = getData();
-    const existingName  = d?.userName   || '';
-    const existingStudio= d?.studioName || '';
+    const existingFirst = d?.firstName || '';
+    const existingLast  = d?.lastName  || '';
+    const existingUser  = d?.username  || '';
     const title = isGuest() ? 'Create Your Account' : 'Start Fresh';
     const intro = isGuest()
       ? `Set up your account to save your data across devices. Everything you've done as a guest comes with you.`
@@ -925,18 +932,22 @@ const Auth = (() => {
     setupScreen(title, `
       <p class="f13 lh muted" style="margin-bottom:1rem;">${intro}</p>
       <div class="form-group">
-        <label class="form-label">Your Name</label>
-        <input class="input" id="auth-fresh-name"
-               placeholder="First name, last name, or username…"
-               value="${_esc(existingName)}"/>
+        <label class="form-label">First Name <span class="muted" style="font-size:.78rem;">(optional)</span></label>
+        <input class="input" id="auth-fresh-firstname"
+               placeholder="First name…"
+               value="${_esc(existingFirst)}"/>
       </div>
       <div class="form-group">
-        <label class="form-label">Studio / Organization
-          <span class="muted" style="font-size:.78rem;">(optional)</span>
-        </label>
-        <input class="input" id="auth-fresh-studio"
-               placeholder="Your studio or organization…"
-               value="${_esc(existingStudio)}"/>
+        <label class="form-label">Last Name <span class="muted" style="font-size:.78rem;">(optional)</span></label>
+        <input class="input" id="auth-fresh-lastname"
+               placeholder="Last name…"
+               value="${_esc(existingLast)}"/>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Username <span class="muted" style="font-size:.78rem;">(optional)</span></label>
+        <input class="input" id="auth-fresh-username"
+               placeholder="Choose a username…"
+               value="${_esc(existingUser)}"/>
       </div>
       <div class="form-group">
         <label class="form-label">Worker URL</label>
@@ -962,13 +973,13 @@ const Auth = (() => {
       if(isGuest()) { C.closeModal('modal-account-setup'); } else { showAccountSetup(); }
     });
 
-    const nameInput   = document.getElementById('auth-fresh-name');
-    const studioInput = document.getElementById('auth-fresh-studio');
+    const firstInput  = document.getElementById('auth-fresh-firstname');
+    const lastInput   = document.getElementById('auth-fresh-lastname');
+    const userInput   = document.getElementById('auth-fresh-username');
     const workerInput = document.getElementById('auth-fresh-worker');
     const statusEl    = document.getElementById('auth-fresh-status');
 
     function validate() {
-      if(!nameInput.value.trim())   { statusEl.textContent = 'Please enter your name.';       return false; }
       if(!workerInput.value.trim()) { statusEl.textContent = 'Please enter your Worker URL.'; return false; }
       statusEl.textContent = '';
       return true;
@@ -977,15 +988,17 @@ const Auth = (() => {
     // ── Token path ─────────────────────────────────────────────
     document.getElementById('auth-btn-fresh-token').addEventListener('click', async () => {
       if(!validate()) return;
-      const name   = nameInput.value.trim();
-      const studio = studioInput.value.trim();
-      const worker = workerInput.value.trim();
+      const firstName = firstInput.value.trim();
+      const lastName  = lastInput.value.trim();
+      const username  = userInput.value.trim();
+      const worker    = workerInput.value.trim();
       statusEl.style.color = 'var(--gold2, #b8985a)';
       statusEl.textContent = 'Creating account…';
 
       const d = getData();
-      d.userName   = name;
-      d.studioName = studio;
+      if(firstName) d.firstName = firstName;
+      if(lastName)  d.lastName  = lastName;
+      if(username)  d.username  = username;
       d.workerUrl  = worker.replace(/\/+$/, '');
       d.authMethod = 'token';
       C.setData(d);
@@ -1002,22 +1015,24 @@ const Auth = (() => {
       C.closeModal('modal-account-setup');
       C.startSyncPing();
       C.onSignedIn(d, true);
-      C.toast(`Welcome${name ? ', ' + name : ''} ${appEmoji()}`);
+      C.toast(`Welcome${firstName ? ', ' + firstName : ''} ${appEmoji()}`);
     });
 
     // ── Google path ─────────────────────────────────────────────
     if(isGoogleAuthAvailable()) {
       document.getElementById('auth-btn-fresh-google')?.addEventListener('click', async () => {
         if(!validate()) return;
-        const name   = nameInput.value.trim();
-        const studio = studioInput.value.trim();
-        const worker = workerInput.value.trim();
+        const firstName = firstInput.value.trim();
+        const lastName  = lastInput.value.trim();
+        const username  = userInput.value.trim();
+        const worker    = workerInput.value.trim();
         statusEl.style.color = 'var(--gold2, #b8985a)';
         statusEl.textContent = 'Testing connection…';
 
         const d = getData();
-        d.userName   = name;
-        d.studioName = studio;
+        if(firstName) d.firstName = firstName;
+        if(lastName)  d.lastName  = lastName;
+        if(username)  d.username  = username;
         d.workerUrl  = worker.replace(/\/+$/, '');
         C.setData(d);
 
@@ -1031,7 +1046,7 @@ const Auth = (() => {
         }
 
         statusEl.textContent = 'Connected — opening Google sign-in…';
-        showSetupFreshGoogle(name, worker, studio);
+        showSetupFreshGoogle(firstName, lastName, username, worker);
       });
     }
   }
@@ -1040,7 +1055,7 @@ const Auth = (() => {
   // Final step for "start fresh with Google". Data already set on D
   // before this screen is shown. Google button renders immediately.
   // HOST APP INTERFACE: calls getData(), setData(), startSyncPing()
-  function showSetupFreshGoogle(name, workerUrl, studio) {
+  function showSetupFreshGoogle(firstName, lastName, username, workerUrl) {
     setupScreen('Link Google Account', `
       <p class="f13 lh muted" style="margin-bottom:1rem;">
         Sign in with Google to secure your new account.
@@ -1058,15 +1073,16 @@ const Auth = (() => {
     const statusEl  = document.getElementById('auth-fresh-status');
 
     const d = getData();
-    d.userName   = name;
-    d.studioName = studio || '';
+    if(firstName) d.firstName = firstName;
+    if(lastName)  d.lastName  = lastName;
+    if(username)  d.username  = username;
     d.workerUrl  = workerUrl.replace(/\/+$/, '');
     C.setData(d);
 
     signInWithGoogle(container).then(result => {
       if(result?.ok) {
         C.closeModal('modal-account-setup');
-        C.toast(`Welcome${name ? ', ' + name : ''} ${appEmoji()}`);
+        C.toast(`Welcome${firstName ? ', ' + firstName : ''} ${appEmoji()}`);
         C.startSyncPing();
       } else {
         statusEl.style.color = 'var(--red, #c07070)';
