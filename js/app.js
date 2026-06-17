@@ -178,6 +178,18 @@ function closeModal(id) {
 
 // ─── Render helpers ───────────────────────────────────────────────
 
+// Strip markdown and collapse whitespace for plain-text card previews
+function plainText(str) {
+  if (!str) return '';
+  return str
+    .replace(/[*][*](.+?)[*][*]/g, '$1')
+    .replace(/[*](.+?)[*]/g, '$1')
+    .replace(/#+\s*/g, '')
+    .replace(/
++/g, ' ')
+    .trim();
+}
+
 function esc(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
@@ -299,7 +311,7 @@ function renderRecipes() {
       </div>
       <div class="recipe-card-body">
         <div class="recipe-card-title">${esc(r.title)}</div>
-        ${r.description ? `<div class="recipe-card-desc">${esc(r.description)}</div>` : ''}
+        ${r.description ? `<div class="recipe-card-desc">${esc(plainText(r.description))}</div>` : ''}
         <div class="recipe-card-meta">
           ${r.servings ? `<span>Serves ${esc(String(r.servings))}</span>` : ''}
           ${r.tags?.length ? `<span>${r.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</span>` : ''}
