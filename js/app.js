@@ -11,6 +11,25 @@ const STORAGE_AUTH_KEY   = 'ref_google_id_token';
 const STORAGE_DISMISS_KEY= 'ref_token_upgrade_dismissed';
 const SYNC_INTERVAL_MS   = 60_000; // 1 minute
 
+// ─── Theme ────────────────────────────────────────────────────
+
+const THEME_KEY = 'ref_theme';
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const lightBtn = document.getElementById('theme-light');
+  const darkBtn  = document.getElementById('theme-dark');
+  if (lightBtn) lightBtn.classList.toggle('active', theme === 'light');
+  if (darkBtn)  darkBtn.classList.toggle('active',  theme === 'dark');
+  localStorage.setItem(THEME_KEY, theme);
+}
+
+function initTheme() {
+  const saved = localStorage.getItem(THEME_KEY);
+  const preferred = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  applyTheme(saved || preferred);
+}
+
 // ─── State ────────────────────────────────────────────────────────
 
 const App = {
@@ -852,6 +871,9 @@ async function fetchGoogleClientId() {
 }
 
 async function boot() {
+  // Apply saved/preferred theme immediately (before any render)
+  initTheme();
+
   // Load from localStorage first (instant)
   const stored = ls.get(STORAGE_KEY);
   App.data     = stored ? mergeData(stored) : defaultData();
@@ -977,6 +999,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Recipe detail scale
   document.getElementById('detail-scale')?.addEventListener('input', updateScaledIngredients);
+
+  // Theme toggle
+  document.getElementById('theme-light')?.addEventListener('click', () => applyTheme('light'));
+  document.getElementById('theme-dark')?.addEventListener('click',  () => applyTheme('dark'));
 
   // Settings
   document.getElementById('btn-settings')?.addEventListener('click', openSettings);
