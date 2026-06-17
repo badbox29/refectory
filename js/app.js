@@ -1,3 +1,18 @@
+// Normalise an ingredient — accepts either a plain string or {name,amount,unit}
+function ingredientText(i) {
+  if (!i) return '';
+  if (typeof i === 'string') return i;
+  const parts = [i.amount, i.unit, i.name].filter(Boolean);
+  return parts.join(' ').trim();
+}
+
+// Normalise a step — accepts either a plain string or {text} object
+function stepText(s) {
+  if (!s) return '';
+  if (typeof s === 'string') return s;
+  return (s.text || s.title || '').trim();
+}
+
 /* ─────────────────────────────────────────────────────────────────
    Refectory — app.js
    LocalStorage + Cloudflare KV sync, three auth tiers.
@@ -439,13 +454,13 @@ function openRecipeDetail(id) {
   // Ingredients
   document.getElementById('detail-ingredients').innerHTML =
     (r.ingredients || []).map(i =>
-      `<li>${esc(i.amount ? `${i.amount} ${i.unit || ''} ${i.name}`.trim() : i.name)}</li>`
+      `<li>${esc(ingredientText(i))}</li>`
     ).join('');
 
   // Steps
   document.getElementById('detail-steps').innerHTML =
     (r.steps || []).map((s, idx) =>
-      `<li><span class="step-num">${idx + 1}</span>${esc(typeof s === 'string' ? s : s.text || '')}</li>`
+      `<li><span class="step-num">${idx + 1}</span>${esc(stepText(s))}</li>`
     ).join('');
 
   // Scaling
@@ -484,6 +499,15 @@ function updateScaledIngredients() {
   if (!recipe) return;
   document.getElementById('detail-ingredients').innerHTML =
     (recipe.ingredients || []).map(i => {
+      if (typeof i === 'string') {
+        const m = i.match(/^([\d.\s\/]+)(.*)/);
+        if (m && !isNaN(parseFloat(m[1]))) {
+          const scaled = parseFloat(m[1]) * ratio;
+          const num = Number.isInteger(scaled) ? scaled : scaled.toFixed(2).replace(/\.?0+$/, '');
+          return `<li>${esc((num + m[2]).trim())}</li>`;
+        }
+        return `<li>${esc(i)}</li>`;
+      }
       let amount = i.amount;
       if (amount && !isNaN(parseFloat(amount))) {
         const scaled = parseFloat(amount) * ratio;
@@ -518,8 +542,12 @@ function openRecipeEditor(id = null) {
 }
 
 function renderEditorIngredients(ingredients) {
+  // Normalise string ingredients (from Mealie import) to objects for the editor
+  const normalised = (ingredients || []).map(i =>
+    typeof i === 'string' ? { name: i, amount: '', unit: '' } : i
+  );
   const list = document.getElementById('editor-ingredients-list');
-  list.innerHTML = ingredients.map((ing, i) => `
+  list.innerHTML = normalised.map((ing, i) => `
     <div class="ingredient-row" data-idx="${i}">
       <input class="input ing-amount" placeholder="Amount" value="${esc(String(ing.amount || ''))}"/>
       <input class="input ing-unit"   placeholder="Unit"   value="${esc(ing.unit || '')}"/>
@@ -767,7 +795,10 @@ function renderShoppingList() {
   for (const rid of recipeIds) {
     const r = getRecipe(rid);
     if (!r) continue;
-    for (const ing of (r.ingredients || [])) {
+    for (const rawIng of (r.ingredients || [])) {
+      const ing = typeof rawIng === 'string'
+        ? { name: rawIng, amount: '', unit: '' }
+        : rawIng;
       if (!ing.name) continue;
       const key = ing.name.toLowerCase().trim();
       if (!agg[key]) agg[key] = { name: ing.name, entries: [] };
