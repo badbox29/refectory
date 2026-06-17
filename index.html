@@ -12,6 +12,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet"/>
 
   <!-- Google Identity Services (GIS) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://accounts.google.com/gsi/client" async
           onload="window.gisReady=true;window.dispatchEvent(new Event('gis-ready'))"></script>
 
@@ -251,14 +252,41 @@
     </div>
     <div class="modal-body">
       <div class="tab-bar">
+        <button class="tab-btn" id="mealie-tab-backup">Backup File</button>
         <button class="tab-btn active" id="mealie-tab-json">Paste JSON</button>
         <button class="tab-btn" id="mealie-tab-api">Connect via API</button>
+      </div>
+
+      <!-- Backup zip panel -->
+      <div id="mealie-backup-panel" style="display:none;">
+        <p class="f13 lh muted" style="margin-bottom:.75rem;">
+          In Mealie, go to <strong>Admin → Backups</strong> and download a backup <code>.zip</code> file.
+          Drop it below — everything is parsed locally, nothing is uploaded.
+        </p>
+        <div id="mealie-drop-zone" style="
+            border: 2px dashed var(--border);
+            border-radius: var(--r-md);
+            padding: 2rem 1rem;
+            text-align: center;
+            color: var(--muted);
+            cursor: pointer;
+            transition: border-color .2s, background .2s;
+            margin-bottom: .75rem;">
+          <div style="font-size:2rem;margin-bottom:.5rem;">📦</div>
+          <div style="font-size:.9rem;">Drop your <strong>mealie_*.zip</strong> here</div>
+          <div style="font-size:.8rem;margin-top:.35rem;">or <span style="color:var(--green-mid);text-decoration:underline;cursor:pointer;" id="mealie-browse-link">browse to select</span></div>
+        </div>
+        <input type="file" id="mealie-zip-input" accept=".zip" style="display:none;"/>
+        <label class="form-label" style="margin-bottom:.3rem;display:flex;align-items:center;gap:.5rem;">
+          <input type="checkbox" id="mealie-import-images" checked/>
+          Embed recipe images (base64) — skippable if you want faster import
+        </label>
       </div>
 
       <!-- JSON paste panel -->
       <div id="mealie-json-panel">
         <p class="f13 lh muted" style="margin-bottom:.75rem;">
-          In Mealie, go to <strong>Settings → Backups</strong> or export individual recipes as JSON, then paste below.
+          Export individual recipes from Mealie as JSON, then paste below.
         </p>
         <div class="form-group">
           <label class="form-label">Mealie JSON export</label>
