@@ -725,8 +725,41 @@ function openMealieImport() {
   document.getElementById('mealie-url-input').value  = '';
   document.getElementById('mealie-api-key').value    = '';
   document.getElementById('mealie-import-status').textContent = '';
-  document.getElementById('mealie-tab-json').click();
+  document.getElementById('mealie-zip-input').value  = '';
+  // Remove any lingering import button from previous session
+  document.getElementById('mealie-import-zip-btn')?.remove();
+  setMealieDropZoneIdle();
+  // Default to backup tab — most common full-import path
+  switchMealieTab('backup');
   openModal('modal-mealie-import');
+}
+
+function switchMealieTab(tab) {
+  const panels = { backup: 'mealie-backup-panel', json: 'mealie-json-panel', api: 'mealie-api-panel' };
+  const btns   = { backup: 'mealie-tab-backup',   json: 'mealie-tab-json',   api: 'mealie-tab-api'   };
+  Object.entries(panels).forEach(([key, id]) => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = key === tab ? '' : 'none';
+  });
+  Object.entries(btns).forEach(([key, id]) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('active', key === tab);
+  });
+}
+
+function setMealieDropZoneIdle() {
+  const dz = document.getElementById('mealie-drop-zone');
+  if (!dz) return;
+  dz.style.borderColor = '';
+  dz.style.background  = '';
+  dz.innerHTML = `
+    <div style="font-size:2rem;margin-bottom:.5rem;">📦</div>
+    <div style="font-size:.9rem;">Drop your <strong>mealie_*.zip</strong> here</div>
+    <div style="font-size:.8rem;margin-top:.35rem;">or <span style="color:var(--green-mid);text-decoration:underline;cursor:pointer;" id="mealie-browse-link">browse to select</span></div>
+  `;
+  document.getElementById('mealie-browse-link')?.addEventListener('click', () =>
+    document.getElementById('mealie-zip-input')?.click()
+  );
 }
 
 function parseMealieRecipe(raw) {
@@ -768,6 +801,247 @@ function parseMealieRecipe(raw) {
     createdAt:   Date.now(),
     updatedAt:   Date.now(),
   };
+}
+
+
+// Called when user drops or selects a zip file
+async function handleMealieZipFile(file) {
+  const dz     = document.getElementById('mealie-drop-zone');
+  const status = document.getElementById('mealie-import-status');
+
+  if (!file.name.endsWith('.zip')) {
+    if (status) { status.textContent = 'Please select a .zip file.'; status.style.color = 'var(--red)'; }
+    return;
+  }
+
+  // Show selected filename in drop zone
+  if (dz) {
+    dz.style.borderColor = 'var(--green-mid)';
+    dz.innerHTML = `<div style="font-size:1.5rem;margin-bottom:.5rem;">✅</div>
+      <div style="font-size:.9rem;font-weight:600;">${file.name}</div>
+      <div style="font-size:.8rem;margin-top:.35rem;color:var(--muted);">${(file.size/1024/1024).toFixed(1)} MB — click Import to continue</div>`;
+  }
+  if (status) { status.textContent = ''; status.style.color = ''; }
+
+  // Auto-trigger import button if not yet present; otherwise show it
+  const existingBtn = document.getElementById('mealie-import-zip-btn');
+  if (!existingBtn && dz) {
+    const btn = document.createElement('button');
+    btn.id        = 'mealie-import-zip-btn';
+    btn.className = 'btn btn-primary w100';
+    btn.textContent = 'Import from Backup';
+    btn.style.marginTop = '.75rem';
+    dz.parentElement.insertBefore(btn, dz.nextSibling);
+    btn.addEventListener('click', () => triggerMealieZipImport(file));
+  } else if (existingBtn) {
+    existingBtn.onclick = () => triggerMealieZipImport(file);
+  }
+}
+
+async function triggerMealieZipImport(file) {
+  const btn         = document.getElementById('mealie-import-zip-btn');
+  const embedImages = document.getElementById('mealie-import-images')?.checked ?? true;
+  const status      = document.getElementById('mealie-import-status');
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
+
+  const result = await importFromMealieBackup(file, embedImages);
+
+  if (btn) { btn.disabled = false; btn.textContent = 'Import from Backup'; }
+
+  if (result.ok) {
+    renderAll();
+    closeModal('modal-mealie-import');
+    showToast(`✅ Imported ${result.count} recipes from Mealie backup`);
+  } else {
+    if (status) { status.textContent = result.error; status.style.color = 'var(--red)'; }
+  }
+}
+
+// ─── Mealie backup zip parser ─────────────────────────────────────
+
+async function importFromMealieBackup(file, embedImages) {
+  const status = (msg, err) => {
+    const el = document.getElementById('mealie-import-status');
+    if (el) { el.textContent = msg; el.style.color = err ? 'var(--red)' : ''; }
+  };
+
+  status('Reading zip file…');
+  let zip;
+  try {
+    zip = await JSZip.loadAsync(file);
+  } catch (e) {
+    return { ok: false, error: `Could not read zip: ${e.message}` };
+  }
+
+  const dbFile = zip.file('database.json');
+  if (!dbFile) return { ok: false, error: 'No database.json found — is this a Mealie backup zip?' };
+
+  status('Parsing database…');
+  let data;
+  try {
+    const text = await dbFile.async('string');
+    data = JSON.parse(text);
+  } catch (e) {
+    return { ok: false, error: `database.json is not valid JSON: ${e.message}` };
+  }
+
+  // Build lookup tables
+  const units = {};
+  (data.ingredient_units || []).forEach(u => { units[u.id] = u; });
+  const foods = {};
+  (data.ingredient_foods || []).forEach(f => { foods[f.id] = f; });
+  const tagMap = {};
+  (data.tags || []).forEach(t => { tagMap[t.id] = t.name; });
+  const catMap = {};
+  (data.categories || []).forEach(c => { catMap[c.id] = c.name; });
+
+  // Group relational tables by recipe_id
+  const ingrByRecipe = {}, instrByRecipe = {}, notesByRecipe = {};
+  const r2t = {}, r2c = {};
+
+  (data.recipes_ingredients || []).forEach(i => {
+    (ingrByRecipe[i.recipe_id] = ingrByRecipe[i.recipe_id] || []).push(i);
+  });
+  Object.values(ingrByRecipe).forEach(arr => arr.sort((a, b) => a.position - b.position));
+
+  (data.recipe_instructions || []).forEach(i => {
+    (instrByRecipe[i.recipe_id] = instrByRecipe[i.recipe_id] || []).push(i);
+  });
+  Object.values(instrByRecipe).forEach(arr => arr.sort((a, b) => a.position - b.position));
+
+  (data.notes || []).forEach(n => {
+    (notesByRecipe[n.recipe_id] = notesByRecipe[n.recipe_id] || []).push(n);
+  });
+  (data.recipes_to_tags || []).forEach(x => {
+    (r2t[x.recipe_id] = r2t[x.recipe_id] || []).push(x.tag_id);
+  });
+  (data.recipes_to_categories || []).forEach(x => {
+    (r2c[x.recipe_id] = r2c[x.recipe_id] || []).push(x.category_id);
+  });
+
+  function buildIngredientStr(i) {
+    if (i.original_text) return i.original_text;
+    if (i.note)          return i.note;
+    const parts = [];
+    if (i.quantity && i.quantity !== 1) parts.push(String(i.quantity));
+    if (i.unit_id && units[i.unit_id]) {
+      const u = units[i.unit_id];
+      parts.push(u.use_abbreviation && u.abbreviation ? u.abbreviation : u.name);
+    }
+    if (i.food_id && foods[i.food_id]) parts.push(foods[i.food_id].name);
+    return parts.join(' ') || null;
+  }
+
+  function toUUID(id) {
+    return `${id.slice(0,8)}-${id.slice(8,12)}-${id.slice(12,16)}-${id.slice(16,20)}-${id.slice(20)}`;
+  }
+
+  const recipes = data.recipes || [];
+  let count = 0, skipped = 0;
+  const total = recipes.length;
+
+  for (let idx = 0; idx < recipes.length; idx++) {
+    const r   = recipes[idx];
+    const rid = r.id;
+    status(`Importing recipe ${idx + 1} of ${total}: ${r.name || '?'}…`);
+
+    // Ingredients
+    const ingredients = (ingrByRecipe[rid] || [])
+      .map(buildIngredientStr).filter(Boolean);
+
+    // Steps
+    const steps = (instrByRecipe[rid] || [])
+      .map(i => {
+        const text  = (i.text  || '').trim();
+        const title = (i.title || '').trim();
+        return text ? (title ? `${title}: ${text}` : text) : null;
+      }).filter(Boolean);
+
+    // Tags from both tags and categories tables
+    const recipeTags = [];
+    (r2t[rid] || []).forEach(tid => { if (tagMap[tid]) recipeTags.push(tagMap[tid]); });
+    (r2c[rid] || []).forEach(cid => { if (catMap[cid]) recipeTags.push(catMap[cid]); });
+    const tags = [...new Set(recipeTags)];
+
+    // Description + notes
+    let description = (r.description || '').trim();
+    (notesByRecipe[rid] || []).forEach(n => {
+      const t = (n.text  || '').trim();
+      const h = (n.title || '').trim();
+      if (t) description += h ? `
+
+**${h}**
+${t}` : `
+
+${t}`;
+    });
+
+    // Image — read the tiny-original webp from zip and encode as base64
+    let image = '';
+    if (embedImages) {
+      try {
+        const uuid     = toUUID(rid);
+        // Prefer tiny for storage efficiency; fall back to original
+        const imgPaths = [
+          `data/recipes/${uuid}/images/tiny-original.webp`,
+          `data/recipes/${uuid}/images/original.webp`,
+        ];
+        for (const p of imgPaths) {
+          const imgFile = zip.file(p);
+          if (imgFile) {
+            const b64 = await imgFile.async('base64');
+            image = `data:image/webp;base64,${b64}`;
+            break;
+          }
+        }
+      } catch { /* skip image */ }
+    }
+
+    const newId = genId();
+    const existing = Object.values(App.data.recipes)
+      .find(ex => ex.importedFrom === 'mealie-backup' && ex.title === r.name);
+
+    if (existing) {
+      // Update in place, preserve our own id
+      Object.assign(existing, {
+        title: r.name || existing.title,
+        description: description.trim(),
+        servings:    r.recipe_yield || existing.servings,
+        prepTime:    r.prep_time    || '',
+        cookTime:    r.cook_time    || r.perform_time || '',
+        totalTime:   r.total_time   || '',
+        source:      r.org_url      || '',
+        sourceUrl:   r.org_url      || '',
+        tags, ingredients, steps,
+        image:       image || existing.image,
+        importedFrom: 'mealie-backup',
+        updatedAt:   Date.now(),
+      });
+      count++;
+    } else {
+      App.data.recipes[newId] = {
+        id:          newId,
+        title:       r.name || '',
+        description: description.trim(),
+        servings:    r.recipe_yield || '',
+        prepTime:    r.prep_time    || '',
+        cookTime:    r.cook_time    || r.perform_time || '',
+        totalTime:   r.total_time   || '',
+        source:      r.org_url      || '',
+        sourceUrl:   r.org_url      || '',
+        tags, ingredients, steps, image,
+        importedFrom: 'mealie-backup',
+        createdAt:   Date.now(),
+        updatedAt:   Date.now(),
+      };
+      count++;
+    }
+  }
+
+  if (!count) return { ok: false, error: 'No recipes were found in the backup.' };
+  scheduleSave();
+  return { ok: true, count, skipped };
 }
 
 async function importFromMealieJson(jsonText) {
@@ -1015,18 +1289,31 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Mealie import tabs
-  document.getElementById('mealie-tab-json')?.addEventListener('click', () => {
-    document.getElementById('mealie-json-panel').style.display = '';
-    document.getElementById('mealie-api-panel').style.display  = 'none';
-    document.getElementById('mealie-tab-json').classList.add('active');
-    document.getElementById('mealie-tab-api').classList.remove('active');
-  });
-  document.getElementById('mealie-tab-api')?.addEventListener('click', () => {
-    document.getElementById('mealie-json-panel').style.display = 'none';
-    document.getElementById('mealie-api-panel').style.display  = '';
-    document.getElementById('mealie-tab-json').classList.remove('active');
-    document.getElementById('mealie-tab-api').classList.add('active');
-  });
+  // Mealie import tabs
+  document.getElementById('mealie-tab-backup')?.addEventListener('click', () => switchMealieTab('backup'));
+  document.getElementById('mealie-tab-json')?.addEventListener('click',   () => switchMealieTab('json'));
+  document.getElementById('mealie-tab-api')?.addEventListener('click',    () => switchMealieTab('api'));
+
+  // Drop zone
+  const dropZone = document.getElementById('mealie-drop-zone');
+  const zipInput = document.getElementById('mealie-zip-input');
+  if (dropZone && zipInput) {
+    dropZone.addEventListener('dragover', e => {
+      e.preventDefault();
+      dropZone.style.borderColor = 'var(--green-mid)';
+      dropZone.style.background  = 'rgba(var(--green-mid-rgb, 107,140,90),.07)';
+    });
+    dropZone.addEventListener('dragleave', () => setMealieDropZoneIdle());
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault();
+      const file = e.dataTransfer.files[0];
+      if (file) handleMealieZipFile(file);
+    });
+    dropZone.addEventListener('click', () => zipInput.click());
+    zipInput.addEventListener('change', () => {
+      if (zipInput.files[0]) handleMealieZipFile(zipInput.files[0]);
+    });
+  }
 
   document.getElementById('mealie-import-json-btn')?.addEventListener('click', async () => {
     const txt    = document.getElementById('mealie-json-input').value.trim();
