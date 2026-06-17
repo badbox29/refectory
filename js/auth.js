@@ -135,7 +135,7 @@ const Auth = (() => {
     );
     return crypto.subtle.deriveKey(
       { name: 'HKDF', hash: 'SHA-256',
-        salt: enc.encode('recipkeeper-hmac-v1'),
+        salt: enc.encode('refectory-hmac-v1'),
         info: enc.encode('request-signing') },
       keyMat,
       { name: 'HMAC', hash: 'SHA-256' },

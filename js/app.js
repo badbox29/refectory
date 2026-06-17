@@ -1,14 +1,14 @@
 /* ─────────────────────────────────────────────────────────────────
-   RecipKeeper — app.js
+   Refectory — app.js
    LocalStorage + Cloudflare KV sync, three auth tiers.
    ───────────────────────────────────────────────────────────────── */
 'use strict';
 
 // ─── Constants ────────────────────────────────────────────────────
 
-const STORAGE_KEY        = 'rk_appdata';
-const STORAGE_AUTH_KEY   = 'rk_google_id_token';
-const STORAGE_DISMISS_KEY= 'rk_token_upgrade_dismissed';
+const STORAGE_KEY        = 'ref_appdata';
+const STORAGE_AUTH_KEY   = 'ref_google_id_token';
+const STORAGE_DISMISS_KEY= 'ref_token_upgrade_dismissed';
 const SYNC_INTERVAL_MS   = 60_000; // 1 minute
 
 // ─── State ────────────────────────────────────────────────────────
@@ -814,7 +814,7 @@ function onSignedIn(data, isNew) {
   App.data = mergeData(data);
   saveLocal();
   renderAll();
-  if (isNew) showToast(`Welcome to RecipKeeper 🌿`);
+  if (isNew) showToast(`Welcome to Refectory 🌿`);
   else showToast(`Welcome back! Syncing your recipes…`);
   syncToWorker();
 }
@@ -833,14 +833,30 @@ function renderAll() {
 
 // ─── Boot ─────────────────────────────────────────────────────────
 
+// Fetch Google Client ID from the worker (never stored in frontend source)
+async function fetchGoogleClientId() {
+  const base = getWorkerUrl().replace(/\/+$/, '');
+  if (!base) return '';
+  try {
+    const res = await fetch(`${base}/auth/config`);
+    if (!res.ok) return '';
+    const data = await res.json();
+    return data.googleClientId || '';
+  } catch { return ''; }
+}
+
 async function boot() {
   // Load from localStorage first (instant)
   const stored = ls.get(STORAGE_KEY);
   App.data     = stored ? mergeData(stored) : defaultData();
 
+  // Fetch Google Client ID from worker if we have a worker URL configured.
+  // Falls back to empty string (disables Google sign-in) until URL is set.
+  const googleClientId = await fetchGoogleClientId();
+
   // Init auth module
   Auth.init({
-    googleClientId:   window.RK_GOOGLE_CLIENT_ID || '',
+    googleClientId,
     storageKey:       STORAGE_KEY,
     storageAuthKey:   STORAGE_AUTH_KEY,
     storageDismissKey: STORAGE_DISMISS_KEY,
@@ -856,7 +872,7 @@ async function boot() {
     openModal,
     closeModal,
     toast:            showToast,
-    appName:          'RecipKeeper',
+    appName:          'Refectory',
     appEmoji:         '🌿',
   });
 
