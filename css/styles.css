@@ -42,6 +42,37 @@
   --shadow-lg:  0 8px 32px rgba(42,42,34,.16);
 }
 
+/* ── Dark mode token overrides ──────────────────────────────── */
+[data-theme="dark"] {
+  --cream:       #1e1e16;
+  --cream-dark:  #2a2a20;
+  --field-tan:   #35352a;
+  --border:      #3a3a2e;
+  --ink:         #e8e4d8;
+  --ink-mid:     #c8c4b0;
+  --muted:       #8a8878;
+  --white:       #252520;
+  /* header/nav stay the same deep green — no overrides needed */
+}
+
+/* Dark mode specifics that can't be handled by tokens alone */
+[data-theme="dark"] .recipe-card,
+[data-theme="dark"] .modal,
+[data-theme="dark"] .shopping-list,
+[data-theme="dark"] #planner-table {
+  background: #252520;
+}
+[data-theme="dark"] .input {
+  background: #2a2a20;
+  color: var(--ink);
+}
+[data-theme="dark"] #planner-table thead {
+  background: var(--green-deep); /* always stays same */
+}
+[data-theme="dark"] #detail-ingredients li:nth-child(even) {
+  background: var(--cream-dark);
+}
+
 /* ── Reset ───────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html { font-size: 16px; scroll-behavior: smooth; }
@@ -105,6 +136,55 @@ a:hover { text-decoration: underline; }
   display: flex;
   align-items: center;
   gap: .5rem;
+}
+
+/* Buttons that live inside the dark header — always cream on transparent */
+.btn-header {
+  background: rgba(255,255,255,.12);
+  color: var(--cream);
+  border: 1px solid rgba(255,255,255,.28);
+  border-radius: var(--r-sm);
+  font-size: .8rem;
+  font-weight: 500;
+  padding: .4rem .85rem;
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s, border-color .15s;
+}
+.btn-header:hover { background: rgba(255,255,255,.22); border-color: rgba(255,255,255,.5); }
+.btn-header.icon-only { padding: .4rem .6rem; }
+
+/* Dark mode toggle pill */
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  background: rgba(255,255,255,.12);
+  border: 1px solid rgba(255,255,255,.28);
+  border-radius: 99px;
+  padding: .25rem .3rem;
+  gap: .2rem;
+  cursor: pointer;
+}
+.theme-toggle-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: rgba(255,255,255,.55);
+  font-size: .85rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.theme-toggle-btn.active {
+  background: rgba(255,255,255,.25);
+  color: var(--cream);
 }
 
 /* ── Nav ─────────────────────────────────────────────────────── */
