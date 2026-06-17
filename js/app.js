@@ -464,9 +464,12 @@ function openRecipeDetail(id) {
 
   // Scaling
   const scaleInput = document.getElementById('detail-scale');
-  scaleInput.value = r.servings || 1;
-  scaleInput.dataset.base = r.servings || 1;
-  document.getElementById('detail-scale-label').textContent = `Servings (base: ${r.servings || 1})`;
+  const servingsRaw = String(r.servings || '').trim();
+  const servingsNum = parseFloat(servingsRaw) || 1;
+  scaleInput.value = servingsNum;
+  scaleInput.dataset.base = servingsNum;
+  const servingsLabel = servingsRaw || String(servingsNum);
+  document.getElementById('detail-scale-label').textContent = `Servings (base: ${servingsLabel})`;
 
   document.getElementById('detail-edit-btn').onclick = () => { closeModal('modal-recipe-detail'); openRecipeEditor(id); };
   document.getElementById('detail-delete-btn').onclick = () => {
@@ -1045,7 +1048,7 @@ async function importFromMealieBackup(file, embedImages) {
     if (i.original_text) return i.original_text;
     if (i.note)          return i.note;
     const parts = [];
-    if (i.quantity && i.quantity !== 1) parts.push(String(i.quantity));
+    if (i.quantity != null && i.quantity !== 0) parts.push(String(i.quantity));
     if (i.unit_id && units[i.unit_id]) {
       const u = units[i.unit_id];
       parts.push(u.use_abbreviation && u.abbreviation ? u.abbreviation : u.name);
