@@ -484,6 +484,8 @@ textarea.input { resize: vertical; min-height: 80px; }
 
 .recipe-card-body {
   padding: .85rem 1rem;
+  overflow: hidden;       /* nothing escapes the card */
+  min-width: 0;           /* flex/grid children need this to respect overflow */
 }
 .recipe-card-title {
   font-family: var(--font-body);
@@ -505,10 +507,18 @@ textarea.input { resize: vertical; min-height: 80px; }
 .recipe-card-meta {
   display: flex;
   align-items: center;
-  gap: .5rem;
-  flex-wrap: wrap;
+  gap: .35rem;
+  flex-wrap: nowrap;      /* single row — don't push card taller */
+  overflow: hidden;
   font-size: .75rem;
   color: var(--muted);
+}
+.recipe-card-meta > span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+  min-width: 0;
 }
 
 /* Empty state */
