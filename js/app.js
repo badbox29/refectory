@@ -639,8 +639,8 @@ function updateScaledIngredients() {
 
 // ─── Recipe editor modal ──────────────────────────────────────────
 
-function openRecipeEditor(id = null) {
-  const recipe = id ? (getRecipe(id) || {}) : {};
+function openRecipeEditor(id = null, prefill = null) {
+  const recipe = id ? (getRecipe(id) || {}) : (prefill || {});
   View.editingId = id;
 
   const form = document.getElementById('recipe-editor-form');
@@ -1101,6 +1101,203 @@ function renderShoppingList() {
   document.getElementById('shopping-print-btn')?.addEventListener('click', () => window.print());
 }
 
+
+
+// ─── URL Recipe Scraper ───────────────────────────────────────────
+
+function openNewRecipeChoice() {
+  openModal('modal-new-recipe-choice');
+}
+
+function openUrlImport() {
+  closeModal('modal-new-recipe-choice');
+  document.getElementById('url-import-input').value = '';
+  document.getElementById('url-import-status').textContent = '';
+  document.getElementById('url-import-status').style.color = '';
+  openModal('modal-url-import');
+  setTimeout(() => document.getElementById('url-import-input')?.focus(), 100);
+}
+
+async function fetchAndScrapeUrl() {
+  const input    = document.getElementById('url-import-input');
+  const statusEl = document.getElementById('url-import-status');
+  const btn      = document.getElementById('url-import-fetch-btn');
+  const url      = input?.value.trim();
+
+  if (!url) { input?.focus(); return; }
+
+  // Basic URL check
+  try { new URL(url); } catch {
+    statusEl.style.color = 'var(--red)';
+    statusEl.textContent = 'Please enter a valid URL.';
+    return;
+  }
+
+  const base = getWorkerUrl().replace(/\/+$/, '');
+  if (!base) {
+    statusEl.style.color = 'var(--red)';
+    statusEl.textContent = 'No worker URL configured — go to Settings first.';
+    return;
+  }
+
+  btn.disabled = true;
+  statusEl.style.color = 'var(--muted)';
+  statusEl.textContent = 'Fetching recipe…';
+
+  try {
+    const res  = await fetch(`${base}/scrape?url=${encodeURIComponent(url)}`);
+    const data = await res.json();
+    if (!res.ok || !data.html) throw new Error(data.error || 'Could not fetch that page.');
+
+    statusEl.textContent = 'Parsing recipe data…';
+    const recipe = parseRecipeFromHtml(data.html, data.finalUrl || url);
+
+    if (!recipe) {
+      statusEl.style.color = 'var(--red)';
+      statusEl.textContent = 'No recipe found on that page. Try a different URL or create manually.';
+      btn.disabled = false;
+      return;
+    }
+
+    // Success — open editor pre-filled
+    closeModal('modal-url-import');
+    openRecipeEditor(null, recipe);
+
+  } catch(e) {
+    statusEl.style.color = 'var(--red)';
+    statusEl.textContent = e.message || 'Something went wrong fetching that page.';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── HTML parser — JSON-LD first, Open Graph fallback ─────────────
+
+function parseRecipeFromHtml(html, sourceUrl) {
+  const parser = new DOMParser();
+  const doc    = parser.parseFromString(html, 'text/html');
+
+  // 1. Try JSON-LD structured data
+  const scripts = doc.querySelectorAll('script[type="application/ld+json"]');
+  for (const script of scripts) {
+    try {
+      const raw = JSON.parse(script.textContent);
+      // May be a single object or an array or a @graph
+      const candidates = [];
+      if (Array.isArray(raw)) candidates.push(...raw);
+      else if (raw['@graph']) candidates.push(...raw['@graph']);
+      else candidates.push(raw);
+
+      for (const obj of candidates) {
+        const type = obj['@type'];
+        const types = Array.isArray(type) ? type : [type];
+        if (types.some(t => String(t).toLowerCase().includes('recipe'))) {
+          const recipe = extractFromJsonLd(obj, sourceUrl);
+          if (recipe?.title) return recipe;
+        }
+      }
+    } catch { /* malformed JSON-LD — skip */ }
+  }
+
+  // 2. Open Graph / meta fallback
+  return extractFromMeta(doc, sourceUrl);
+}
+
+function extractFromJsonLd(obj, sourceUrl) {
+  // Ingredients
+  const rawIngredients = obj.recipeIngredient || obj.ingredients || [];
+  const ingredients = rawIngredients.map(i => typeof i === 'string' ? i : String(i)).filter(Boolean);
+
+  // Instructions — can be string, array of strings, or array of HowToStep
+  const rawInstructions = obj.recipeInstructions || obj.instructions || [];
+  const steps = [];
+  const processInstructions = (items) => {
+    if (typeof items === 'string') {
+      // Sometimes a big block of text — split on newlines
+      items.split(/\n+/).map(s => s.trim()).filter(Boolean).forEach(s => steps.push(s));
+      return;
+    }
+    for (const item of (Array.isArray(items) ? items : [items])) {
+      if (typeof item === 'string') { if (item.trim()) steps.push(item.trim()); }
+      else if (item['@type'] === 'HowToSection') {
+        processInstructions(item.itemListElement || item.steps || []);
+      } else {
+        const text = item.text || item.name || '';
+        if (text.trim()) steps.push(text.trim());
+      }
+    }
+  };
+  processInstructions(rawInstructions);
+
+  // Tags — from keywords and recipeCategory
+  const tags = [];
+  const addTags = (val) => {
+    if (!val) return;
+    const str = Array.isArray(val) ? val.join(',') : String(val);
+    str.split(/[,;]+/).map(t => t.trim()).filter(Boolean).forEach(t => tags.push(t));
+  };
+  addTags(obj.keywords);
+  addTags(obj.recipeCategory);
+  addTags(obj.recipeCuisine);
+
+  // Times — ISO 8601 duration → human readable
+  const parseDuration = (iso) => {
+    if (!iso) return '';
+    const m = String(iso).match(/PT(?:(\d+)H)?(?:(\d+)M)?/i);
+    if (!m) return iso;
+    const h = parseInt(m[1] || 0), min = parseInt(m[2] || 0);
+    if (h && min) return `${h} hr ${min} min`;
+    if (h) return `${h} hour${h !== 1 ? 's' : ''}`;
+    if (min) return `${min} minute${min !== 1 ? 's' : ''}`;
+    return '';
+  };
+
+  // Image — may be string, array, or ImageObject
+  let image = obj.image;
+  if (Array.isArray(image)) image = image[0];
+  if (image && typeof image === 'object') image = image.url || image.contentUrl || '';
+
+  return {
+    title:       obj.name || '',
+    description: obj.description || '',
+    servings:    obj.recipeYield ? String(Array.isArray(obj.recipeYield) ? obj.recipeYield[0] : obj.recipeYield) : '',
+    prepTime:    parseDuration(obj.prepTime),
+    cookTime:    parseDuration(obj.cookTime || obj.performTime),
+    totalTime:   parseDuration(obj.totalTime),
+    ingredients,
+    steps,
+    tags:        [...new Set(tags)],
+    source:      new URL(sourceUrl).hostname,
+    sourceUrl,
+    image:       typeof image === 'string' ? image : '',
+    importedFrom: 'url',
+  };
+}
+
+function extractFromMeta(doc, sourceUrl) {
+  const meta = (name) =>
+    doc.querySelector(`meta[property="${name}"]`)?.content ||
+    doc.querySelector(`meta[name="${name}"]`)?.content || '';
+
+  const title = meta('og:title') || doc.title || '';
+  if (!title) return null;
+
+  return {
+    title:       title.trim(),
+    description: meta('og:description') || meta('description') || '',
+    servings:    '',
+    prepTime:    '',
+    cookTime:    '',
+    totalTime:   '',
+    ingredients: [],
+    steps:       [],
+    tags:        [],
+    source:      new URL(sourceUrl).hostname,
+    sourceUrl,
+    image:       meta('og:image') || '',
+    importedFrom: 'url',
+  };
+}
 
 // ─── Cookbooks ────────────────────────────────────────────────────
 
@@ -2207,7 +2404,24 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // New recipe button
-  document.getElementById('btn-new-recipe')?.addEventListener('click', () => openRecipeEditor(null));
+  document.getElementById('btn-new-recipe')?.addEventListener('click', openNewRecipeChoice);
+
+  // New recipe choice modal
+  document.getElementById('choice-import-url')?.addEventListener('click', openUrlImport);
+  document.getElementById('choice-create-manual')?.addEventListener('click', () => {
+    closeModal('modal-new-recipe-choice');
+    openRecipeEditor(null);
+  });
+  document.getElementById('modal-new-recipe-choice')?.querySelector('.modal-close')
+    ?.addEventListener('click', () => closeModal('modal-new-recipe-choice'));
+
+  // URL import modal
+  document.getElementById('url-import-fetch-btn')?.addEventListener('click', fetchAndScrapeUrl);
+  document.getElementById('url-import-input')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') fetchAndScrapeUrl();
+  });
+  document.getElementById('modal-url-import')?.querySelector('.modal-close')
+    ?.addEventListener('click', () => closeModal('modal-url-import'));
 
   // Import button
   document.getElementById('btn-import-mealie')?.addEventListener('click', openMealieImport);
