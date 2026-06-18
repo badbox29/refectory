@@ -942,7 +942,7 @@ function renderShoppingList() {
         <input class="input" id="shopping-add-input" placeholder="Add an item…" autocomplete="off"/>
         <button class="btn btn-outline btn-sm" id="shopping-add-btn">Add</button>
       </div>
-      <p class="muted" style="margin-top:.75rem;">Add recipes to your meal plan to generate a shopping list.</p>
+      <p class="muted" style="margin-top:.75rem;">Add recipes to your meal plan to generate a shopping list automatically. You can also add items manually above.</p>
     `;
     wireShoppingAddInput();
     return;
