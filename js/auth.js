@@ -734,11 +734,6 @@ const Auth = (() => {
 
   // ── S2A: Load existing — choose auth method ──────────────────────
   function showSetupLoadChoice() {
-    const googleOption = isGoogleAuthAvailable()
-      ? `<button class="btn btn-ghost w100" id="auth-btn-load-google" style="justify-content:center;">
-           Sign in with Google
-         </button>`
-      : '';
     setupScreen('Load Existing Account', `
       <p class="f13 lh muted" style="margin-bottom:1.25rem;">
         How is your account secured?
@@ -747,16 +742,16 @@ const Auth = (() => {
         <button class="btn btn-primary w100" id="auth-btn-load-token" style="justify-content:center;">
           Continue with token
         </button>
-        ${googleOption}
+        <button class="btn btn-ghost w100" id="auth-btn-load-google" style="justify-content:center;">
+          Sign in with Google
+        </button>
         <div class="auth-divider" style="margin:.1rem 0;"></div>
         <button class="btn btn-ghost btn-sm" id="auth-btn-back" style="justify-content:center;">← Back</button>
       </div>
     `);
     document.getElementById('auth-btn-back').addEventListener('click', showAccountSetup);
     document.getElementById('auth-btn-load-token').addEventListener('click', showSetupLoadToken);
-    if(isGoogleAuthAvailable()) {
-      document.getElementById('auth-btn-load-google')?.addEventListener('click', showSetupLoadGoogle);
-    }
+    document.getElementById('auth-btn-load-google').addEventListener('click', showSetupLoadGoogle);
   }
 
   // ── S3A: Load via Google — worker URL first, then Google button ──
