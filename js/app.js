@@ -314,7 +314,8 @@ const View = {
   recipeTags:    [],          // selected tag filters
   editingId:     null,        // recipe id being edited
   checkedItems:  new Set(),   // shopping list checked item keys (session only)
-  recipeSort:    'updated',     // 'updated' | 'alpha' | 'rating'
+  recipeSort:    'updated',   // 'updated' | 'alpha' | 'rating'
+  manualItems:   [],          // [{id, name, checked}] — manually added shopping items
 };
 
 // ─── Navigation ───────────────────────────────────────────────────
@@ -947,24 +948,49 @@ function renderShoppingList() {
   const sorted    = [...unchecked, ...checked];
   const checkedCount = checked.length;
 
+  // Manual items — split into checked/unchecked
+  const manualUnchecked = View.manualItems.filter(i => !i.checked);
+  const manualChecked   = View.manualItems.filter(i =>  i.checked);
+  const totalChecked    = checkedCount + manualChecked.length;
+
   container.innerHTML = `
     <div class="shopping-header">
       <p class="muted shopping-note">Based on meals planned for ${formatWeekLabel(weeks[0])} and the following week.</p>
       <div style="display:flex;gap:.5rem;align-items:center;">
-        ${checkedCount ? `<button class="btn btn-ghost btn-sm" id="shopping-clear-checked">Clear checked (${checkedCount})</button>` : ''}
+        ${totalChecked ? `<button class="btn btn-ghost btn-sm" id="shopping-clear-checked">Clear checked (${totalChecked})</button>` : ''}
         <button class="btn btn-ghost btn-sm" id="shopping-print-btn">Print / Save PDF</button>
       </div>
     </div>
+
+    <!-- Add item input -->
+    <div class="shopping-add-row">
+      <input class="input" id="shopping-add-input" placeholder="Add an item…" autocomplete="off"/>
+      <button class="btn btn-outline btn-sm" id="shopping-add-btn">Add</button>
+    </div>
+
     <ul class="shopping-list">
-      ${sorted.map(item => {
-        const isChecked = View.checkedItems.has(item.key);
-        const summary   = item.entries.map(e =>
+      <!-- Manual unchecked items first -->
+      ${manualUnchecked.map(item => `
+        <li class="shopping-item shopping-item-manual" data-manual-id="${esc(item.id)}">
+          <label class="shopping-check">
+            <input type="checkbox" class="shopping-cb-manual"/>
+            <span class="shopping-ing">
+              <span class="shopping-name">${esc(item.name)}</span>
+              <span class="shopping-detail muted">Added manually</span>
+            </span>
+          </label>
+          <button class="shopping-remove-manual" data-manual-id="${esc(item.id)}" title="Remove">✕</button>
+        </li>`).join('')}
+
+      <!-- Recipe items: unchecked -->
+      ${unchecked.map(item => {
+        const summary = item.entries.map(e =>
           [e.amount, e.unit, e.name].filter(Boolean).join(' ')
         ).join(' + ');
         return `
-          <li class="shopping-item${isChecked ? ' is-checked' : ''}" data-key="${esc(item.key)}">
+          <li class="shopping-item" data-key="${esc(item.key)}">
             <label class="shopping-check">
-              <input type="checkbox" class="shopping-cb"${isChecked ? ' checked' : ''}/>
+              <input type="checkbox" class="shopping-cb"/>
               <span class="shopping-ing">
                 <span class="shopping-name">${esc(item.name)}</span>
                 <span class="shopping-detail muted">${esc(summary)}</span>
@@ -972,10 +998,57 @@ function renderShoppingList() {
             </label>
           </li>`;
       }).join('')}
+
+      <!-- Divider if anything is checked -->
+      ${totalChecked ? '<li class="shopping-divider"></li>' : ''}
+
+      <!-- Recipe items: checked -->
+      ${checked.map(item => {
+        const summary = item.entries.map(e =>
+          [e.amount, e.unit, e.name].filter(Boolean).join(' ')
+        ).join(' + ');
+        return `
+          <li class="shopping-item is-checked" data-key="${esc(item.key)}">
+            <label class="shopping-check">
+              <input type="checkbox" class="shopping-cb" checked/>
+              <span class="shopping-ing">
+                <span class="shopping-name">${esc(item.name)}</span>
+                <span class="shopping-detail muted">${esc(summary)}</span>
+              </span>
+            </label>
+          </li>`;
+      }).join('')}
+
+      <!-- Manual checked items last -->
+      ${manualChecked.map(item => `
+        <li class="shopping-item shopping-item-manual is-checked" data-manual-id="${esc(item.id)}">
+          <label class="shopping-check">
+            <input type="checkbox" class="shopping-cb-manual" checked/>
+            <span class="shopping-ing">
+              <span class="shopping-name">${esc(item.name)}</span>
+              <span class="shopping-detail muted">Added manually</span>
+            </span>
+          </label>
+          <button class="shopping-remove-manual" data-manual-id="${esc(item.id)}" title="Remove">✕</button>
+        </li>`).join('')}
     </ul>
   `;
 
-  // Checkbox interactions
+  // Add item
+  const addInput = document.getElementById('shopping-add-input');
+  const addBtn   = document.getElementById('shopping-add-btn');
+  function addManualItem() {
+    const name = addInput.value.trim();
+    if (!name) return;
+    View.manualItems.push({ id: genId(), name, checked: false });
+    addInput.value = '';
+    renderShoppingList();
+    document.getElementById('shopping-add-input')?.focus();
+  }
+  addBtn?.addEventListener('click', addManualItem);
+  addInput?.addEventListener('keydown', e => { if (e.key === 'Enter') addManualItem(); });
+
+  // Recipe item checkboxes
   container.querySelectorAll('.shopping-cb').forEach(cb => {
     cb.addEventListener('change', () => {
       const key = cb.closest('.shopping-item').dataset.key;
@@ -985,8 +1058,27 @@ function renderShoppingList() {
     });
   });
 
+  // Manual item checkboxes
+  container.querySelectorAll('.shopping-cb-manual').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const id   = cb.closest('.shopping-item-manual').dataset.manualId;
+      const item = View.manualItems.find(i => i.id === id);
+      if (item) { item.checked = cb.checked; renderShoppingList(); }
+    });
+  });
+
+  // Manual item remove buttons
+  container.querySelectorAll('.shopping-remove-manual').forEach(btn => {
+    btn.addEventListener('click', () => {
+      View.manualItems = View.manualItems.filter(i => i.id !== btn.dataset.manualId);
+      renderShoppingList();
+    });
+  });
+
+  // Clear all checked
   document.getElementById('shopping-clear-checked')?.addEventListener('click', () => {
     View.checkedItems.clear();
+    View.manualItems = View.manualItems.filter(i => !i.checked);
     renderShoppingList();
   });
 
