@@ -694,6 +694,10 @@ textarea.input { resize: vertical; min-height: 80px; }
   padding: 1.5rem 1rem;
   overflow-y: auto;
 }
+/* Auth wizard always on top — can be triggered from within other modals */
+#modal-account-setup {
+  z-index: 300;
+}
 .modal-overlay.open { display: flex; }
 
 .modal {
