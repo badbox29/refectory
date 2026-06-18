@@ -619,14 +619,25 @@ function openRecipeDetail(id) {
       const isNotes = tab.dataset.tab === 'notes';
       if (panelRecipe) panelRecipe.style.display = isNotes ? 'none' : '';
       if (panelNotes)  panelNotes.style.display  = isNotes ? '' : 'none';
-      if (isNotes) notesArea?.focus();
+      if (isNotes) {
+        notesArea?.focus();
+        if (notesArea) {
+          notesArea.style.height = 'auto';
+          notesArea.style.height = Math.max(420, notesArea.scrollHeight) + 'px';
+        }
+      }
     };
   });
 
-  // Auto-save notes on input (debounced 600ms)
+  // Auto-save notes on input (debounced 600ms) + auto-expand textarea
   let _notesSaveTimer = null;
   if (notesArea) {
+    const autoExpand = () => {
+      notesArea.style.height = 'auto';
+      notesArea.style.height = Math.max(420, notesArea.scrollHeight) + 'px';
+    };
     notesArea.oninput = () => {
+      autoExpand();
       clearTimeout(_notesSaveTimer);
       _notesSaveTimer = setTimeout(() => {
         const recipe = getRecipe(id);
@@ -636,6 +647,8 @@ function openRecipeDetail(id) {
         }
       }, 600);
     };
+    // Expand on initial load if notes already exist
+    setTimeout(autoExpand, 0);
   }
 
   openModal('modal-recipe-detail');
