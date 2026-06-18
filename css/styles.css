@@ -1520,3 +1520,30 @@ body.modal-open { overflow: hidden; }
   max-height: 400px;
   overflow-y: auto;
 }
+
+/* ── New Recipe choice modal ─────────────────────────────────── */
+.new-recipe-option {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  width: 100%;
+  background: var(--cream-dark);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: .9rem 1.1rem;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color .15s, background .15s;
+  font-size: .95rem;
+  color: var(--ink);
+}
+.new-recipe-option:hover {
+  border-color: var(--green-soft);
+  background: var(--cream);
+}
+.new-recipe-option-icon {
+  font-size: 1.6rem;
+  flex-shrink: 0;
+  width: 2.2rem;
+  text-align: center;
+}
