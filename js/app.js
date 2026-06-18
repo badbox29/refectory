@@ -521,6 +521,7 @@ function openRecipeDetail(id) {
   const servingsLabel = servingsRaw || String(servingsNum);
   document.getElementById('detail-scale-label').textContent = `Servings (base: ${servingsLabel})`;
 
+  document.getElementById('detail-print-btn').onclick = () => printRecipe(id);
   document.getElementById('detail-edit-btn').onclick = () => { closeModal('modal-recipe-detail'); openRecipeEditor(id); };
   document.getElementById('detail-delete-btn').onclick = () => {
     if (confirm(`Delete "${r.title}"? This cannot be undone.`)) {
@@ -1487,6 +1488,74 @@ async function importFromMealieApi(baseUrl, apiKey) {
 }
 
 // ─── Settings modal ───────────────────────────────────────────────
+
+// ─── Print ───────────────────────────────────────────────────────
+
+async function printRecipe(id) {
+  const r = getRecipe(id);
+  if (!r) return;
+
+  // Title
+  document.getElementById('print-title').textContent = r.title || '';
+
+  // Tags
+  const tagsEl = document.getElementById('print-tags');
+  tagsEl.textContent = (r.tags || []).join(' · ');
+
+  // Source
+  const srcEl = document.getElementById('print-source');
+  if (r.sourceUrl) {
+    try {
+      const u = new URL(r.sourceUrl);
+      srcEl.textContent = u.hostname + u.pathname;
+    } catch { srcEl.textContent = r.sourceUrl; }
+  } else {
+    srcEl.textContent = r.source || '';
+  }
+
+  // Image
+  const imgEl = document.getElementById('print-image');
+  const dataUrl = await ImageStore.get(id);
+  if (dataUrl) {
+    imgEl.src = dataUrl;
+    imgEl.style.display = '';
+  } else {
+    imgEl.style.display = 'none';
+  }
+
+  // Meta chips — servings, prep, cook, total
+  const metaEl = document.getElementById('print-meta');
+  const chips = [];
+  const chip = (label, val) => val
+    ? `<div class="print-meta-chip"><span class="print-meta-chip-label">${label}</span><span>${esc(val)}</span></div>`
+    : '';
+  const servingsRaw = String(r.servings || '').trim();
+  if (servingsRaw) chips.push(chip('Serves', servingsRaw));
+  if (r.prepTime)  chips.push(chip('Prep',   r.prepTime));
+  if (r.cookTime)  chips.push(chip('Cook',   r.cookTime));
+  if (r.totalTime) chips.push(chip('Total',  r.totalTime));
+  metaEl.innerHTML = chips.join('');
+
+  // Description (strip markdown)
+  const descEl = document.getElementById('print-desc');
+  const desc = plainText(r.description || '');
+  descEl.textContent = desc;
+  descEl.style.display = desc ? '' : 'none';
+
+  // Ingredients
+  document.getElementById('print-ingredients').innerHTML =
+    (r.ingredients || []).map(i =>
+      `<li>${esc(ingredientText(i))}</li>`
+    ).join('');
+
+  // Steps
+  document.getElementById('print-steps').innerHTML =
+    (r.steps || []).map(s =>
+      `<li>${esc(plainText(stepText(s)))}</li>`
+    ).join('');
+
+  window.print();
+}
 
 function openSettings() {
   Auth.renderSettingsSection();
