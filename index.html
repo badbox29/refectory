@@ -31,6 +31,7 @@
     <div class="app-name">Re<span>fectory</span></div>
     <div class="header-right">
       <button class="btn-header" id="btn-import-mealie" title="Import from Mealie">📥 Import</button>
+      <button class="btn-header" id="btn-export" title="Export recipes">📤 Export</button>
       <div class="theme-toggle" id="theme-toggle" title="Toggle light/dark mode">
         <button class="theme-toggle-btn active" id="theme-light" title="Light">☀️</button>
         <button class="theme-toggle-btn" id="theme-dark" title="Dark">🌙</button>
@@ -252,9 +253,10 @@
     </div>
     <div class="modal-body">
       <div class="tab-bar">
-        <button class="tab-btn" id="mealie-tab-backup">Backup File</button>
+        <button class="tab-btn" id="mealie-tab-backup">Mealie Backup</button>
         <button class="tab-btn active" id="mealie-tab-json">Paste JSON</button>
         <button class="tab-btn" id="mealie-tab-api">Connect via API</button>
+        <button class="tab-btn" id="mealie-tab-refectory">Refectory Backup</button>
       </div>
 
       <!-- Backup zip panel -->
@@ -313,7 +315,76 @@
         <button class="btn btn-primary w100" id="mealie-import-api-btn">Import from Mealie</button>
       </div>
 
+      <!-- Refectory backup import panel -->
+      <div id="mealie-refectory-panel" style="display:none;">
+        <p class="f13 lh muted" style="margin-bottom:.75rem;">
+          Import a previously exported <strong>Refectory backup</strong> (.zip). Restores
+          recipe data and/or images depending on which export type you used.
+        </p>
+        <div id="refectory-drop-zone" style="
+            border: 2px dashed var(--border);
+            border-radius: var(--r-md);
+            padding: 2rem 1rem;
+            text-align: center;
+            color: var(--muted);
+            cursor: pointer;
+            transition: border-color .2s, background .2s;
+            margin-bottom: .75rem;">
+          <div style="font-size:2rem;margin-bottom:.5rem;">📦</div>
+          <div style="font-size:.9rem;">Drop your <strong>refectory-backup-*.zip</strong> here</div>
+          <div style="font-size:.8rem;margin-top:.35rem;">or <span style="color:var(--green-mid);text-decoration:underline;cursor:pointer;" id="refectory-browse-link">browse to select</span></div>
+        </div>
+        <input type="file" id="refectory-zip-input" accept=".zip" style="display:none;"/>
+      </div>
+
       <div id="mealie-import-status" style="min-height:1.5rem;font-size:.85rem;margin-top:.75rem;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Export modal ────────────────────────────────────────────── -->
+<div class="modal-overlay" id="modal-export" role="dialog" aria-modal="true">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <h2 class="modal-title">Export Recipes</h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body">
+
+      <div class="export-option" id="export-opt-full" style="
+          border: 2px solid var(--border); border-radius: var(--r-md);
+          padding: 1rem 1.1rem; margin-bottom: .75rem; cursor: pointer;
+          transition: border-color .15s, background .15s;">
+        <div style="display:flex;align-items:center;gap:.6rem;margin-bottom:.3rem;">
+          <span style="font-size:1.4rem;">🗂️</span>
+          <strong style="font-size:.95rem;">Full Backup</strong>
+        </div>
+        <p class="f13 lh muted" style="margin:0;">
+          All recipe data (title, ingredients, steps, tags, etc.) plus any images
+          stored on this device. Import this on any browser to fully restore your recipes.
+        </p>
+      </div>
+
+      <div class="export-option" id="export-opt-images" style="
+          border: 2px solid var(--border); border-radius: var(--r-md);
+          padding: 1rem 1.1rem; margin-bottom: 1rem; cursor: pointer;
+          transition: border-color .15s, background .15s;">
+        <div style="display:flex;align-items:center;gap:.6rem;margin-bottom:.3rem;">
+          <span style="font-size:1.4rem;">🖼️</span>
+          <strong style="font-size:.95rem;">Images Only</strong>
+        </div>
+        <p class="f13 lh muted" style="margin:0;">
+          Just the images from this device's local storage. Use this to transfer images
+          to a second device that already has your recipes synced from the worker.
+        </p>
+      </div>
+
+      <div id="export-status" style="min-height:1.5rem;font-size:.85rem;color:var(--muted);"></div>
+
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modal-export')">Cancel</button>
+      <button class="btn btn-primary" id="btn-export-go" disabled>Download</button>
     </div>
   </div>
 </div>
