@@ -1273,9 +1273,10 @@ body.modal-open { overflow: hidden; }
   .theme-toggle { padding: .2rem .25rem; gap: .1rem; }
   .theme-toggle-btn { width: 20px; height: 20px; font-size: .7rem; }
 
-  /* Nav — icon only */
-  .nav-btn { font-size: 0; padding: .5rem .3rem; }
-  .nav-icon { font-size: 1.2rem; display: block; }
+  /* Nav — icon only, fill full width evenly */
+  .app-nav { justify-content: space-around; overflow-x: hidden; }
+  .nav-btn { font-size: 0; padding: .5rem 0; flex: 1; min-width: 0; justify-content: center; }
+  .nav-icon { font-size: 1.3rem; display: block; }
 
   /* Recipe grid — single column */
   #recipe-grid { grid-template-columns: 1fr; }
