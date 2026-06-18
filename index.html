@@ -431,11 +431,35 @@
 
           <!-- Token section -->
           <div id="settings-token-group" style="display:none;">
-            <div class="settings-row">
-              <div>
-                <div class="settings-row-label">Token account</div>
-                <div class="settings-row-sub">Your recipes sync via your secret token.</div>
+            <div class="settings-row" style="align-items:flex-start;gap:.75rem;">
+              <div style="min-width:0;flex:1;">
+                <div class="settings-row-label">Sync Token</div>
+                <div class="settings-row-sub" style="margin-bottom:.4rem;">
+                  Copy this token to sign in on another device.
+                </div>
+                <div style="display:flex;align-items:center;gap:.4rem;">
+                  <code id="settings-token-display" style="
+                    font-size:.72rem; background:var(--cream-dark);
+                    border:1px solid var(--border); border-radius:var(--r-sm);
+                    padding:.25rem .5rem; overflow:hidden; text-overflow:ellipsis;
+                    white-space:nowrap; flex:1; min-width:0; cursor:pointer;
+                    user-select:all;" title="Click to select">—</code>
+                  <button class="btn btn-sm btn-outline" id="settings-token-copy"
+                          style="flex-shrink:0;font-size:.75rem;padding:.25rem .6rem;">
+                    Copy
+                  </button>
+                </div>
               </div>
+            </div>
+            <div class="settings-row" style="margin-top:.5rem;">
+              <div>
+                <div class="settings-row-label">Use existing token</div>
+                <div class="settings-row-sub">Sign in with a token from another device.</div>
+              </div>
+              <button class="btn btn-sm btn-outline" id="settings-token-change"
+                      style="flex-shrink:0;font-size:.75rem;">
+                Enter Token
+              </button>
             </div>
           </div>
 
