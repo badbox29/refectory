@@ -74,7 +74,7 @@
         <div class="empty-sub">Add your first recipe or import from Mealie to get started.</div>
         <div style="display:flex;gap:.75rem;justify-content:center;">
           <button class="btn btn-primary" onclick="openRecipeEditor(null)">+ New Recipe</button>
-          <button class="btn btn-ghost" onclick="openMealieImport()">📥 Import from Mealie</button>
+          <button class="btn btn-ghost" onclick="openMealieImport()">📥 Import Recipes</button>
         </div>
       </div>
     </section>
@@ -248,15 +248,15 @@
 <div class="modal-overlay" id="modal-mealie-import" role="dialog" aria-modal="true">
   <div class="modal modal-md">
     <div class="modal-header">
-      <h2 class="modal-title">Import from Mealie</h2>
+      <h2 class="modal-title">Import Options</h2>
       <button class="modal-close" title="Close">✕</button>
     </div>
     <div class="modal-body">
       <div class="tab-bar">
+        <button class="tab-btn active" id="mealie-tab-refectory">Refectory Backup</button>
         <button class="tab-btn" id="mealie-tab-backup">Mealie Backup</button>
-        <button class="tab-btn active" id="mealie-tab-json">Paste JSON</button>
+        <button class="tab-btn" id="mealie-tab-json">Paste JSON</button>
         <button class="tab-btn" id="mealie-tab-api">Connect via API</button>
-        <button class="tab-btn" id="mealie-tab-refectory">Refectory Backup</button>
       </div>
 
       <!-- Backup zip panel -->
@@ -286,7 +286,7 @@
       </div>
 
       <!-- JSON paste panel -->
-      <div id="mealie-json-panel">
+      <div id="mealie-json-panel" style="display:none;">
         <p class="f13 lh muted" style="margin-bottom:.75rem;">
           Export individual recipes from Mealie as JSON, then paste below.
         </p>
@@ -316,7 +316,7 @@
       </div>
 
       <!-- Refectory backup import panel -->
-      <div id="mealie-refectory-panel" style="display:none;">
+      <div id="mealie-refectory-panel">
         <p class="f13 lh muted" style="margin-bottom:.75rem;">
           Import a previously exported <strong>Refectory backup</strong> (.zip). Restores
           recipe data and/or images depending on which export type you used.
