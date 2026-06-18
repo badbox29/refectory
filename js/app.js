@@ -1042,8 +1042,8 @@ function openMealieImport() {
   document.getElementById('mealie-import-zip-btn')?.remove();
   document.getElementById('refectory-import-btn')?.remove();
   setMealieDropZoneIdle();
-  // Default to backup tab — most common full-import path
-  switchMealieTab('backup');
+  // Default to refectory tab — most common import path for returning users
+  switchMealieTab('refectory');
   openModal('modal-mealie-import');
 }
 
