@@ -527,11 +527,8 @@ function openRecipeDetail(id) {
   document.getElementById('detail-servings').textContent    = r.servings ? `Serves ${r.servings}` : '';
   const ratingEl = document.getElementById('detail-rating');
   if (ratingEl) {
-    if (r.rating) {
-      ratingEl.innerHTML = `<span class="detail-stars" title="${r.rating} out of 5">${starsDisplay(r.rating)}</span>`;
-    } else {
-      ratingEl.textContent = '';
-    }
+    const rating = r.rating || 0;
+    ratingEl.innerHTML = `<span class="detail-stars${rating ? '' : ' detail-stars-empty'}" title="${rating ? rating + ' out of 5' : 'Not yet rated — click Edit to rate'}">${starsDisplay(rating)}</span>`;
   }
 
   // Time chips — only shown when data present
