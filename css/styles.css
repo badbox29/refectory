@@ -57,14 +57,28 @@
 
 /* Dark mode specifics that can't be handled by tokens alone */
 [data-theme="dark"] .recipe-card,
-[data-theme="dark"] .modal,
 [data-theme="dark"] .shopping-list,
 [data-theme="dark"] #planner-table {
   background: #252520;
 }
+/* Modal gets a noticeably lighter background than the page so it stands out */
+[data-theme="dark"] .modal {
+  background: #32322a;
+  border: 1px solid #4a4a3a;
+  box-shadow: 0 8px 40px rgba(0,0,0,.6);
+}
+/* Overlay darker so it creates clear separation from page content */
+[data-theme="dark"] .modal-overlay {
+  background: rgba(0,0,0,.65);
+}
 [data-theme="dark"] .input {
   background: #2a2a20;
   color: var(--ink);
+}
+/* Inside dark modals, inputs need a slightly different shade to pop against modal bg */
+[data-theme="dark"] .modal .input {
+  background: #28281f;
+  border-color: #4a4a3a;
 }
 [data-theme="dark"] #planner-table thead {
   background: var(--green-deep); /* always stays same */
