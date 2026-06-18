@@ -12,6 +12,7 @@
  *   GET    /                    — Health check (open CORS)
  *   GET    /ping                — Health check (open CORS)
  *   GET    /auth/config         — Return Google Client ID for GIS bootstrap
+ *   GET    /scrape              — Proxy-fetch a URL and return HTML for recipe scraping
  *   POST   /auth/google         — Verify Google ID token
  *   POST   /auth/verify         — Re-verify stored Google credential at boot
  *   POST   /auth/migrate        — Token → Google migration (HMAC-authenticated)
@@ -430,6 +431,42 @@ export default {
 
       if (url.pathname.startsWith('/storage')) {
         return await handleStorage(request, env, url.pathname.replace(/\/$/, ''), cors);
+      }
+
+      // GET /scrape?url=... — server-side fetch to bypass CORS for recipe scraping
+      if (url.pathname === '/scrape' && method === 'GET') {
+        const targetUrl = url.searchParams.get('url');
+        if (!targetUrl) return respond(JSON.stringify({ error: 'url param required' }), 400, cors);
+        // Basic URL validation
+        let parsed;
+        try { parsed = new URL(targetUrl); } catch { return respond(JSON.stringify({ error: 'Invalid URL' }), 400, cors); }
+        if (!['http:', 'https:'].includes(parsed.protocol)) return respond(JSON.stringify({ error: 'Only http/https URLs allowed' }), 400, cors);
+        // Rate-limit by IP (reuse existing mechanism, 10 req/min bucket)
+        const rlKey = `scrape:${ip}`;
+        const rlRaw = await env.REFECTORY_KV.get(rlKey);
+        const rlCount = rlRaw ? parseInt(rlRaw) : 0;
+        if (rlCount >= 10) return respond(JSON.stringify({ error: 'Rate limit — try again shortly' }), 429, cors);
+        await env.REFECTORY_KV.put(rlKey, String(rlCount + 1), { expirationTtl: 60 });
+        try {
+          const res = await fetch(targetUrl, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (compatible; Refectory/1.0; recipe scraper)',
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              'Accept-Language': 'en-US,en;q=0.9',
+            },
+            redirect: 'follow',
+            cf: { cacheTtl: 300, cacheEverything: false },
+          });
+          if (!res.ok) return respond(JSON.stringify({ error: `Fetch failed: ${res.status}` }), 502, cors);
+          const html = await res.text();
+          // Return HTML — client does all the parsing
+          return new Response(JSON.stringify({ ok: true, html, finalUrl: res.url }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json', ...cors },
+          });
+        } catch(e) {
+          return respond(JSON.stringify({ error: `Could not fetch URL: ${e.message}` }), 502, cors);
+        }
       }
 
       return respond(JSON.stringify({ error: 'Not found' }), 404, cors);
