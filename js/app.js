@@ -721,7 +721,9 @@ function renderPlanner() {
               <td class="plan-cell" data-day="${di}" data-slot="${slot}">
                 ${r
                   ? `<div class="plan-recipe" data-id="${esc(rid)}">
-                       <span class="plan-recipe-title">${esc(r.title)}</span>
+                       <div class="plan-recipe-img" data-plan-img="${esc(rid)}"></div>
+                       <div class="plan-recipe-img-placeholder">🍽️</div>
+                       <div class="plan-recipe-title">${esc(r.title)}</div>
                        <button class="plan-remove" data-day="${di}" data-slot="${slot}" title="Remove">✕</button>
                      </div>`
                   : `<button class="plan-add" data-day="${di}" data-slot="${slot}" title="Add recipe">+</button>`
@@ -749,9 +751,18 @@ function renderPlanner() {
     });
   });
 
-  // Click recipe name to view
+  // Click card to view recipe
   table.querySelectorAll('.plan-recipe').forEach(el => {
-    el.querySelector('.plan-recipe-title').addEventListener('click', () => openRecipeDetail(el.dataset.id));
+    el.addEventListener('click', () => openRecipeDetail(el.dataset.id));
+  });
+
+  // Async-load plan card images from IndexedDB
+  table.querySelectorAll('[data-plan-img]').forEach(async imgEl => {
+    const dataUrl = await ImageStore.get(imgEl.dataset.planImg);
+    if (dataUrl) {
+      imgEl.style.backgroundImage = `url('${dataUrl}')`;
+      imgEl.closest('.plan-recipe')?.querySelector('.plan-recipe-img-placeholder')?.remove();
+    }
   });
 }
 
