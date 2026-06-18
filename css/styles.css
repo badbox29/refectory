@@ -1189,6 +1189,10 @@ body.modal-open { overflow: hidden; }
   color: var(--saffron, #d4a832);
   letter-spacing: .05em;
 }
+.detail-stars-empty {
+  color: var(--border);
+  opacity: .6;
+}
 /* ── Print styles ────────────────────────────────────────────── */
 
 /* Hide print area on screen */
