@@ -767,19 +767,30 @@ function collectEditorData() {
 }
 
 function saveEditorRecipe() {
-  const data = collectEditorData();
-  if (!data.title) { showToast('Please enter a recipe title.'); return; }
+  const btn = document.getElementById('btn-save-recipe');
+  if (btn?.disabled) return;  // prevent double-fire
+  if (btn) btn.disabled = true;
 
-  const id       = View.editingId || genId();
+  const data = collectEditorData();
+  if (!data.title) {
+    showToast('Please enter a recipe title.');
+    if (btn) btn.disabled = false;
+    return;
+  }
+
+  // Lock in the ID — use editingId for existing, generate once for new
+  if (!View.editingId) View.editingId = genId();
+  const id       = View.editingId;
   const existing = getRecipe(id) || {};
   saveRecipe({ ...existing, ...data, id });
 
   // Save image URL to IndexedDB — kept out of recipe data / localStorage
-  const form     = document.getElementById('recipe-editor-form');
-  const imgUrl   = form?.querySelector('#editor-image-url')?.value.trim();
+  const form   = document.getElementById('recipe-editor-form');
+  const imgUrl = form?.querySelector('#editor-image-url')?.value.trim();
   if (imgUrl) ImageStore.set(id, imgUrl);
   closeModal('modal-recipe-editor');
   View.editingId = null;
+  if (btn) btn.disabled = false;
   renderRecipes();
   showToast(existing.id ? 'Recipe updated ✓' : 'Recipe saved ✓');
   if (View.activeSection !== 'recipes') showSection('recipes');
@@ -2531,7 +2542,7 @@ document.addEventListener('DOMContentLoaded', () => {
     list.appendChild(div);
   });
 
-  document.getElementById('btn-save-recipe')?.addEventListener('click', saveEditorRecipe);
+  document.getElementById('btn-save-recipe').onclick = saveEditorRecipe;
 
   // Planner nav
   document.getElementById('planner-prev')?.addEventListener('click', () => {
