@@ -218,6 +218,8 @@ function closeModal(id) {
 function plainText(str) {
   if (!str) return '';
   return str
+    .replace(/<[^>]*>/g, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
     .replace(/[*][*](.+?)[*][*]/g, '$1')
     .replace(/[*](.+?)[*]/g, '$1')
     .replace(/#+\s*/g, '')
@@ -495,7 +497,7 @@ function openRecipeDetail(id) {
   // Steps
   document.getElementById('detail-steps').innerHTML =
     (r.steps || []).map((s, idx) =>
-      `<li><span class="step-num">${idx + 1}</span>${esc(stepText(s))}</li>`
+      `<li><span class="step-num">${idx + 1}</span><span class="step-text">${esc(plainText(stepText(s)))}</span></li>`
     ).join('');
 
   // Scaling
