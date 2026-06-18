@@ -904,6 +904,21 @@ function filterPickRecipes(q) {
 
 // ─── Shopping list ────────────────────────────────────────────────
 
+function wireShoppingAddInput() {
+  const addInput = document.getElementById('shopping-add-input');
+  const addBtn   = document.getElementById('shopping-add-btn');
+  function addManualItem() {
+    const name = addInput?.value.trim();
+    if (!name) return;
+    View.manualItems.push({ id: genId(), name, checked: false });
+    if (addInput) addInput.value = '';
+    renderShoppingList();
+    document.getElementById('shopping-add-input')?.focus();
+  }
+  addBtn?.addEventListener('click', addManualItem);
+  addInput?.addEventListener('keydown', e => { if (e.key === 'Enter') addManualItem(); });
+}
+
 function renderShoppingList() {
   const container = document.getElementById('shopping-list-content');
   if (!container) return;
@@ -920,8 +935,16 @@ function renderShoppingList() {
     }
   }
 
-  if (!recipeIds.size) {
-    container.innerHTML = `<p class="muted">Add recipes to your meal plan to generate a shopping list.</p>`;
+  if (!recipeIds.size && !View.manualItems.length) {
+    // Show add row + placeholder — no plan recipes and no manual items yet
+    container.innerHTML = `
+      <div class="shopping-add-row">
+        <input class="input" id="shopping-add-input" placeholder="Add an item…" autocomplete="off"/>
+        <button class="btn btn-outline btn-sm" id="shopping-add-btn">Add</button>
+      </div>
+      <p class="muted" style="margin-top:.75rem;">Add recipes to your meal plan to generate a shopping list.</p>
+    `;
+    wireShoppingAddInput();
     return;
   }
 
@@ -1035,18 +1058,7 @@ function renderShoppingList() {
   `;
 
   // Add item
-  const addInput = document.getElementById('shopping-add-input');
-  const addBtn   = document.getElementById('shopping-add-btn');
-  function addManualItem() {
-    const name = addInput.value.trim();
-    if (!name) return;
-    View.manualItems.push({ id: genId(), name, checked: false });
-    addInput.value = '';
-    renderShoppingList();
-    document.getElementById('shopping-add-input')?.focus();
-  }
-  addBtn?.addEventListener('click', addManualItem);
-  addInput?.addEventListener('keydown', e => { if (e.key === 'Enter') addManualItem(); });
+  wireShoppingAddInput();
 
   // Recipe item checkboxes
   container.querySelectorAll('.shopping-cb').forEach(cb => {
