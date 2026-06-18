@@ -1554,7 +1554,9 @@ async function printRecipe(id) {
       `<li>${esc(plainText(stepText(s)))}</li>`
     ).join('');
 
+  document.body.classList.add('printing-recipe');
   window.print();
+  document.body.classList.remove('printing-recipe');
 }
 
 function openSettings() {
