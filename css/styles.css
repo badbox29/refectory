@@ -706,8 +706,9 @@ textarea.input { resize: vertical; min-height: 80px; }
   transition: background .12s;
 }
 .shopping-item:last-child { border-bottom: none; }
-.shopping-item:has(.shopping-cb:checked) { background: var(--cream); }
-.shopping-item:has(.shopping-cb:checked) .shopping-name { text-decoration: line-through; opacity: .5; }
+.shopping-item.is-checked { opacity: .55; }
+.shopping-item.is-checked .shopping-name { text-decoration: line-through; }
+.shopping-item:has(.shopping-cb:checked) .shopping-name { text-decoration: line-through; }
 
 .shopping-check {
   display: flex;
