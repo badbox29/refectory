@@ -489,7 +489,9 @@ const Auth = (() => {
 
     setupScreen('Welcome Back', `
       <p class="f13 lh muted" style="margin-bottom:1.25rem;">
-        Your session has expired. Sign in again to continue.
+        ${picture || name
+          ? 'Your session has expired. Sign in again to continue.'
+          : 'This account has been upgraded to Google sign-in. Sign in with Google to continue.'}
       </p>
       ${picture || name ? `
         <div class="auth-google-info" style="margin-bottom:1.25rem;">

@@ -151,7 +151,13 @@ async function pullFromWorker() {
   const headers = await Auth._authHeaders('GET', token, '');
   try {
     const res = await fetch(`${base}/storage/${encodeURIComponent(token)}/profile`, { headers });
-    if (res.status === 410) { showToast('Account migrated to Google — please sign in again.'); return null; }
+    if (res.status === 410) {
+      // This token was migrated to a Google account on another device.
+      // Update local state so bootCheck triggers Google reauth.
+      App.data.authMethod = 'google';
+      saveLocal();
+      return null;
+    }
 
     const migratedTo = res.headers.get('X-Token-Migrated');
     if (migratedTo) {
