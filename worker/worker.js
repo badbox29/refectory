@@ -24,7 +24,7 @@
 const KV_BINDING          = 'REFECTORY_KV';
 const KV_TTL              = 60 * 60 * 24 * 1825; // 5 years, resets on every write
 const HMAC_SALT           = 'refectory-hmac-v1'; // must never change after deployment
-const MAX_BODY_SIZE       = 512 * 1024;            // 512 KB (recipes can include base64 images)
+const MAX_BODY_SIZE       = 5 * 1024 * 1024;      // 5 MB — recipe collections can be large
 const AUTH_RATE_LIMIT     = 20;
 const AUTH_RATE_LIMIT_WIN = 3600;
 const RATE_LIMIT          = 120;
