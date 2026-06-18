@@ -68,6 +68,8 @@ function defaultData() {
     // Meal plan: { [weekKey]: { [dayIndex]: { [slot]: recipeId } } }
     // weekKey = ISO week "2025-W03", dayIndex 0-6, slot = "breakfast"|"lunch"|"dinner"|"snack"
     mealplan:    {},
+    // Cookbooks: { [id]: { id, name, description, recipeIds: [] } }
+    cookbooks:   {},
     lastModified: Date.now(),
   };
 }
@@ -78,8 +80,9 @@ function mergeData(raw) {
   return {
     ...d,
     ...raw,
-    recipes:  (raw.recipes  && typeof raw.recipes  === 'object') ? raw.recipes  : d.recipes,
-    mealplan: (raw.mealplan && typeof raw.mealplan === 'object') ? raw.mealplan : d.mealplan,
+    recipes:   (raw.recipes   && typeof raw.recipes   === 'object') ? raw.recipes   : d.recipes,
+    mealplan:  (raw.mealplan  && typeof raw.mealplan  === 'object') ? raw.mealplan  : d.mealplan,
+    cookbooks: (raw.cookbooks && typeof raw.cookbooks === 'object') ? raw.cookbooks : d.cookbooks,
   };
 }
 
@@ -309,7 +312,7 @@ const MEAL_SLOTS = ['breakfast', 'lunch', 'dinner', 'snack'];
 
 const View = {
   currentWeek:   getISOWeekKey(),
-  activeSection: 'recipes',  // 'recipes' | 'planner' | 'shopping'
+  activeSection: 'recipes',  // 'recipes' | 'planner' | 'shopping' | 'cookbooks'
   recipeSearch:  '',
   recipeTags:    [],          // selected tag filters
   editingId:     null,        // recipe id being edited
@@ -324,9 +327,10 @@ function showSection(name) {
   View.activeSection = name;
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.section === name));
   document.querySelectorAll('.section').forEach(s => s.classList.toggle('active', s.id === `section-${name}`));
-  if (name === 'recipes')  renderRecipes();
-  if (name === 'planner')  renderPlanner();
-  if (name === 'shopping') renderShoppingList();
+  if (name === 'recipes')   renderRecipes();
+  if (name === 'planner')   renderPlanner();
+  if (name === 'shopping')  renderShoppingList();
+  if (name === 'cookbooks') renderCookbooks();
 }
 
 // ─── Recipe CRUD ──────────────────────────────────────────────────
@@ -1097,6 +1101,234 @@ function renderShoppingList() {
   document.getElementById('shopping-print-btn')?.addEventListener('click', () => window.print());
 }
 
+
+// ─── Cookbooks ────────────────────────────────────────────────────
+
+function getCookbooks() {
+  return Object.values(App.data.cookbooks || {})
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+}
+
+function getCookbook(id) {
+  return App.data.cookbooks?.[id] || null;
+}
+
+function renderCookbooks() {
+  const grid    = document.getElementById('cookbooks-grid');
+  const empty   = document.getElementById('cookbooks-empty');
+  if (!grid) return;
+
+  const books = getCookbooks();
+  if (!books.length) {
+    grid.innerHTML = '';
+    if (empty) empty.style.display = '';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+
+  grid.innerHTML = books.map(cb => {
+    const count    = (cb.recipeIds || []).length;
+    const previews = (cb.recipeIds || []).slice(0, 4);
+    return `
+      <div class="cookbook-card" data-id="${esc(cb.id)}">
+        <div class="cookbook-card-mosaic">
+          ${previews.map(rid => `<div class="cookbook-mosaic-cell" data-mosaic-img="${esc(rid)}">🍽️</div>`).join('')}
+          ${previews.length === 0 ? '<div class="cookbook-mosaic-empty">📚</div>' : ''}
+        </div>
+        <div class="cookbook-card-body">
+          <div class="cookbook-card-name">${esc(cb.name)}</div>
+          <div class="cookbook-card-count muted">${count} recipe${count !== 1 ? 's' : ''}</div>
+          ${cb.description ? `<div class="cookbook-card-desc muted">${esc(cb.description)}</div>` : ''}
+        </div>
+      </div>`;
+  }).join('');
+
+  // Async-load mosaic images
+  grid.querySelectorAll('[data-mosaic-img]').forEach(async cell => {
+    const dataUrl = await ImageStore.get(cell.dataset.mosaicImg);
+    if (dataUrl) {
+      cell.style.backgroundImage = `url('${dataUrl}')`;
+      cell.textContent = '';
+    }
+  });
+
+  grid.querySelectorAll('.cookbook-card').forEach(card => {
+    card.addEventListener('click', () => openCookbookDetail(card.dataset.id));
+  });
+}
+
+// ── Cookbook editor ───────────────────────────────────────────────
+
+let _editingCookbookId = null;
+
+function openCookbookEditor(id) {
+  _editingCookbookId = id;
+  const cb = id ? getCookbook(id) : null;
+  document.getElementById('cookbook-editor-title').textContent = id ? 'Edit Cookbook' : 'New Cookbook';
+  document.getElementById('cookbook-name').value = cb?.name || '';
+  document.getElementById('cookbook-desc').value = cb?.description || '';
+  openModal('modal-cookbook-editor');
+  document.getElementById('cookbook-name').focus();
+}
+
+function saveCookbook() {
+  const name = document.getElementById('cookbook-name').value.trim();
+  if (!name) { document.getElementById('cookbook-name').focus(); return; }
+  const desc = document.getElementById('cookbook-desc').value.trim();
+
+  if (_editingCookbookId) {
+    const cb = getCookbook(_editingCookbookId);
+    if (cb) { cb.name = name; cb.description = desc; }
+  } else {
+    const id = genId();
+    App.data.cookbooks[id] = { id, name, description: desc, recipeIds: [], createdAt: Date.now() };
+  }
+  scheduleSave();
+  closeModal('modal-cookbook-editor');
+  renderCookbooks();
+  if (_editingCookbookId) renderCookbookDetail(_editingCookbookId);
+}
+
+function deleteCookbook(id) {
+  if (!confirm('Delete this cookbook? The recipes themselves will not be affected.')) return;
+  delete App.data.cookbooks[id];
+  scheduleSave();
+  closeModal('modal-cookbook-detail');
+  renderCookbooks();
+}
+
+// ── Cookbook detail ───────────────────────────────────────────────
+
+let _openCookbookId = null;
+
+function openCookbookDetail(id) {
+  _openCookbookId = id;
+  renderCookbookDetail(id);
+  openModal('modal-cookbook-detail');
+}
+
+function renderCookbookDetail(id) {
+  const cb = getCookbook(id);
+  if (!cb) return;
+
+  document.getElementById('cookbook-detail-title').textContent = cb.name;
+  const descEl = document.getElementById('cookbook-detail-desc');
+  descEl.textContent = cb.description || '';
+  descEl.style.display = cb.description ? '' : 'none';
+
+  const recipeIds = cb.recipeIds || [];
+  const grid      = document.getElementById('cookbook-recipes-grid');
+  const empty     = document.getElementById('cookbook-recipes-empty');
+
+  if (!recipeIds.length) {
+    grid.innerHTML = '';
+    if (empty) empty.style.display = '';
+  } else {
+    if (empty) empty.style.display = 'none';
+    grid.innerHTML = recipeIds.map(rid => {
+      const r = getRecipe(rid);
+      if (!r) return '';
+      return `
+        <div class="recipe-card" data-id="${esc(rid)}">
+          <div class="recipe-card-img" data-img-id="${esc(rid)}">
+            <div class="recipe-card-placeholder">🍽️</div>
+          </div>
+          <div class="recipe-card-body">
+            <div class="recipe-card-title">${esc(r.title)}</div>
+            <div class="recipe-card-meta">
+              ${r.rating ? `<span class="card-stars">${starsDisplay(r.rating)}</span>` : ''}
+              ${r.servings ? `<span>Serves ${esc(String(r.servings))}</span>` : ''}
+            </div>
+            <button class="cookbook-remove-recipe btn btn-ghost btn-sm"
+                    data-rid="${esc(rid)}" style="margin-top:.35rem;font-size:.72rem;color:var(--muted);">
+              Remove from cookbook
+            </button>
+          </div>
+        </div>`;
+    }).filter(Boolean).join('');
+
+    // Async-load images
+    grid.querySelectorAll('[data-img-id]').forEach(async imgEl => {
+      const dataUrl = await ImageStore.get(imgEl.dataset.imgId);
+      if (dataUrl) {
+        imgEl.style.backgroundImage = `url('${dataUrl}')`;
+        imgEl.querySelector('.recipe-card-placeholder')?.remove();
+      }
+    });
+
+    // Open recipe detail on card click (not on remove button)
+    grid.querySelectorAll('.recipe-card').forEach(card => {
+      card.addEventListener('click', e => {
+        if (e.target.closest('.cookbook-remove-recipe')) return;
+        openRecipeDetail(card.dataset.id);
+      });
+    });
+
+    // Remove recipe from cookbook
+    grid.querySelectorAll('.cookbook-remove-recipe').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        const cb = getCookbook(id);
+        if (cb) {
+          cb.recipeIds = cb.recipeIds.filter(r => r !== btn.dataset.rid);
+          scheduleSave();
+          renderCookbookDetail(id);
+          renderCookbooks();
+        }
+      });
+    });
+  }
+
+  // Wire footer buttons
+  document.getElementById('cookbook-detail-edit').onclick   = () => openCookbookEditor(id);
+  document.getElementById('cookbook-detail-delete').onclick = () => deleteCookbook(id);
+}
+
+// ── Add recipe to cookbook picker ────────────────────────────────
+
+function openCookbookPick(cookbookId) {
+  const cb       = getCookbook(cookbookId);
+  const existing = new Set(cb?.recipeIds || []);
+  const grid     = document.getElementById('cookbook-pick-grid');
+  const search   = document.getElementById('cookbook-pick-search');
+  if (!grid) return;
+
+  function renderPick(q) {
+    const recipes = getRecipes().filter(r =>
+      !existing.has(r.id) &&
+      (!q || r.title.toLowerCase().includes(q.toLowerCase()))
+    );
+    grid.innerHTML = recipes.map(r => `
+      <div class="pick-recipe-item" data-id="${esc(r.id)}">
+        <div class="pick-img" data-pick-img="${esc(r.id)}">🍽️</div>
+        <div class="pick-title">${esc(r.title)}</div>
+      </div>`).join('');
+
+    grid.querySelectorAll('[data-pick-img]').forEach(async imgEl => {
+      const dataUrl = await ImageStore.get(imgEl.dataset.pickImg);
+      if (dataUrl) { imgEl.style.backgroundImage = `url('${dataUrl}')`; imgEl.textContent = ''; }
+    });
+
+    grid.querySelectorAll('.pick-recipe-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const cb = getCookbook(cookbookId);
+        if (cb && !cb.recipeIds.includes(item.dataset.id)) {
+          cb.recipeIds.push(item.dataset.id);
+          existing.add(item.dataset.id);
+          scheduleSave();
+          renderCookbookDetail(cookbookId);
+          renderCookbooks();
+          renderPick(search?.value || '');
+        }
+      });
+    });
+  }
+
+  if (search) { search.value = ''; search.addEventListener('input', e => renderPick(e.target.value)); }
+  renderPick('');
+  openModal('modal-cookbook-pick');
+}
+
 // ─── Mealie import ────────────────────────────────────────────────
 
 
@@ -1841,8 +2073,9 @@ function onGuestReady(data) {
 
 function renderAll() {
   renderRecipes();
-  if (View.activeSection === 'planner')  renderPlanner();
-  if (View.activeSection === 'shopping') renderShoppingList();
+  if (View.activeSection === 'planner')   renderPlanner();
+  if (View.activeSection === 'shopping')  renderShoppingList();
+  if (View.activeSection === 'cookbooks') renderCookbooks();
 }
 
 // ─── Boot ─────────────────────────────────────────────────────────
@@ -2024,6 +2257,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Settings
   document.getElementById('btn-settings')?.addEventListener('click', openSettings);
+
+  // Cookbooks
+  document.getElementById('btn-new-cookbook')?.addEventListener('click', () => openCookbookEditor(null));
+  document.getElementById('cookbook-editor-save')?.addEventListener('click', saveCookbook);
+  document.getElementById('cookbook-editor-cancel')?.addEventListener('click', () => closeModal('modal-cookbook-editor'));
+  document.getElementById('modal-cookbook-editor')?.querySelector('.modal-close')?.addEventListener('click', () => closeModal('modal-cookbook-editor'));
+  document.getElementById('modal-cookbook-detail')?.querySelector('.modal-close')?.addEventListener('click', () => closeModal('modal-cookbook-detail'));
+  document.getElementById('modal-cookbook-pick')?.querySelector('.modal-close')?.addEventListener('click', () => closeModal('modal-cookbook-pick'));
+  document.getElementById('cookbook-add-recipe-btn')?.addEventListener('click', () => {
+    if (_openCookbookId) openCookbookPick(_openCookbookId);
+  });
+  document.getElementById('cookbook-name')?.addEventListener('keydown', e => { if (e.key === 'Enter') saveCookbook(); });
 
   // Token copy button
   document.getElementById('settings-token-copy')?.addEventListener('click', () => {
