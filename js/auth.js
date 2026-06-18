@@ -615,6 +615,9 @@ const Auth = (() => {
       hide(guestEl); show(tokenEl); hide(googleInfoEl);
       show(workerEl); show(syncEl);
       if(upgradeEl) upgradeEl.style.display = isGoogleAuthAvailable() ? '' : 'none';
+      // Populate token display
+      const tokenDisplay = document.getElementById('settings-token-display');
+      if(tokenDisplay) tokenDisplay.textContent = d.userToken || '—';
     }
   }
 
@@ -1392,6 +1395,7 @@ const Auth = (() => {
     // Wizard entry points
     showAccountSetup,       // S1 welcome screen
     showSetupFresh,         // S2B start fresh (also guest → account conversion)
+    showSetupLoadToken,     // S3B enter existing token (call from Settings)
     showGoogleUpgradeFlow,  // token → Google upgrade (call from Settings)
     showGoogleReauth,       // re-auth after session expiry (called automatically by bootCheck)
     showGuestSwitchConfirm, // guest switch/reset (call from Settings)

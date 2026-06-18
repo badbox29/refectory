@@ -1583,12 +1583,28 @@ async function boot() {
     return;
   }
 
-  // Existing session — try to pull from worker, then boot check
+  // Existing session — pull from worker and merge with local data
+  // Local recipes win if they are newer (updatedAt), so a large import
+  // right before a reload doesn't get clobbered by a stale worker copy.
   const tokenBeforePull = App.data.userToken;
+  const localRecipes    = { ...(App.data.recipes || {}) };
   const remote          = await pullFromWorker();
   if (remote) {
-    App.data = mergeData(remote);
+    const remoteRecipes = remote.recipes || {};
+    // Merge: for each recipe take whichever copy has the later updatedAt
+    const merged = { ...remoteRecipes };
+    for (const [id, localR] of Object.entries(localRecipes)) {
+      const remoteR = remoteRecipes[id];
+      if (!remoteR || (localR.updatedAt || 0) >= (remoteR.updatedAt || 0)) {
+        merged[id] = localR;
+      }
+    }
+    App.data = mergeData({ ...remote, recipes: merged });
     saveLocal();
+    // Push merged result back to worker so it stays in sync
+    if (Object.keys(localRecipes).length > Object.keys(remoteRecipes).length) {
+      pushToWorker();
+    }
   }
 
   const ok = await Auth.bootCheck(tokenBeforePull);
@@ -1686,6 +1702,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Settings
   document.getElementById('btn-settings')?.addEventListener('click', openSettings);
+
+  // Token copy button
+  document.getElementById('settings-token-copy')?.addEventListener('click', () => {
+    const token = App.data?.userToken || '';
+    if (!token) return;
+    navigator.clipboard.writeText(token).then(() => showToast('Token copied to clipboard ✓'));
+  });
+
+  // Enter-token button — opens the auth wizard at the token-entry screen
+  document.getElementById('settings-token-change')?.addEventListener('click', () => {
+    closeModal('modal-settings');
+    Auth.showSetupLoadToken();
+  });
 
   // Danger zone buttons (wired fresh each time settings opens via delegation)
   document.getElementById('modal-settings')?.addEventListener('click', e => {
