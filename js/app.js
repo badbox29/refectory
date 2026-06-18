@@ -273,11 +273,14 @@ function saveRecipe(recipe) {
   recipe.updatedAt = Date.now();
   if (!recipe.createdAt) recipe.createdAt = recipe.updatedAt;
   App.data.recipes[recipe.id] = recipe;
+  const editorImg = form.querySelector('#editor-image-url')?.value.trim();
+  if (editorImg) ImageStore.set(recipe.id, editorImg);
   scheduleSave();
 }
 
 function deleteRecipe(id) {
   delete App.data.recipes[id];
+  ImageStore.delete(id);
   // Remove from meal plan too
   for (const wk of Object.keys(App.data.mealplan)) {
     for (const day of Object.keys(App.data.mealplan[wk])) {
@@ -320,8 +323,8 @@ function renderRecipes() {
 
   grid.innerHTML = recipes.map(r => `
     <div class="recipe-card" data-id="${esc(r.id)}">
-      <div class="recipe-card-img" style="${r.image ? `background-image:url('${esc(r.image)}')` : ''}">
-        ${!r.image ? `<div class="recipe-card-placeholder">🍽️</div>` : ''}
+      <div class="recipe-card-img" data-img-id="${esc(r.id)}">
+        <div class="recipe-card-placeholder">🍽️</div>
       </div>
       <div class="recipe-card-body">
         <div class="recipe-card-title">${esc(r.title)}</div>
@@ -336,6 +339,15 @@ function renderRecipes() {
 
   grid.querySelectorAll('.recipe-card').forEach(card => {
     card.addEventListener('click', () => openRecipeDetail(card.dataset.id));
+  });
+
+  // Async-load card images from IndexedDB (non-blocking)
+  grid.querySelectorAll('[data-img-id]').forEach(async imgEl => {
+    const dataUrl = await ImageStore.get(imgEl.dataset.imgId);
+    if (dataUrl) {
+      imgEl.style.backgroundImage = `url('${dataUrl}')`;
+      imgEl.querySelector('.recipe-card-placeholder')?.remove();
+    }
   });
 }
 
@@ -447,8 +459,11 @@ function openRecipeDetail(id) {
     : (r.source ? esc(r.source) : '');
 
   const imgEl = document.getElementById('detail-image');
-  if (r.image) { imgEl.src = r.image; imgEl.style.display = ''; }
-  else imgEl.style.display = 'none';
+  imgEl.style.display = 'none';
+  imgEl.src = '';
+  ImageStore.get(id).then(dataUrl => {
+    if (dataUrl) { imgEl.src = dataUrl; imgEl.style.display = ''; }
+  });
 
   // Ingredients
   document.getElementById('detail-ingredients').innerHTML =
@@ -603,7 +618,6 @@ function collectEditorData() {
     tags,
     source:      form.querySelector('#editor-source').value.trim(),
     sourceUrl:   form.querySelector('#editor-source-url').value.trim(),
-    image:       form.querySelector('#editor-image-url').value.trim(),
     ingredients,
     steps,
   };
@@ -732,12 +746,19 @@ function openPickRecipeModal(weekKey, dayIdx, slot) {
     emptyMsg.style.display = 'none';
     grid.innerHTML = recipes.map(r => `
       <div class="pick-recipe-item" data-id="${esc(r.id)}">
-        <div class="pick-img" style="${r.image ? `background-image:url('${esc(r.image)}')` : ''}">
-          ${!r.image ? '🍽️' : ''}
-        </div>
+        <div class="pick-img" data-pick-img="${esc(r.id)}">🍽️</div>
         <div class="pick-title">${esc(r.title)}</div>
       </div>
     `).join('');
+
+    // Async-load pick grid images from IndexedDB
+    grid.querySelectorAll('[data-pick-img]').forEach(async imgEl => {
+      const dataUrl = await ImageStore.get(imgEl.dataset.pickImg);
+      if (dataUrl) {
+        imgEl.style.backgroundImage = `url('${dataUrl}')`;
+        imgEl.textContent = '';
+      }
+    });
     grid.querySelectorAll('.pick-recipe-item').forEach(item => {
       item.addEventListener('click', () => {
         if (_pickTarget) {
@@ -904,15 +925,20 @@ function parseMealieRecipe(raw) {
     ...(raw.categories || []).map(c => typeof c === 'string' ? c : c.name || ''),
   ].filter(Boolean);
 
+  const recipeId = genId();
+  const imageUrl = raw.image || '';
+
+  // Store image in IndexedDB if present — keeps it out of localStorage
+  if (imageUrl) ImageStore.set(recipeId, imageUrl);
+
   return {
-    id:          genId(),
+    id:          recipeId,
     title,
     description: raw.description || raw.summary || '',
     servings:    parseInt(raw.recipeYield || raw.servings) || null,
     tags,
     source:      raw.orgURL ? 'Web' : (raw.source || ''),
     sourceUrl:   raw.orgURL || raw.sourceUrl || '',
-    image:       raw.image || '',
     ingredients,
     steps,
     importedFrom: 'mealie',
@@ -1101,12 +1127,10 @@ ${t}` : `
 ${t}`;
     });
 
-    // Image — read the tiny-original webp from zip and encode as base64
-    let image = '';
+    // Image — read from zip and store in IndexedDB (not in App.data / localStorage)
     if (embedImages) {
       try {
         const uuid     = toUUID(rid);
-        // Prefer tiny for storage efficiency; fall back to original
         const imgPaths = [
           `data/recipes/${uuid}/images/tiny-original.webp`,
           `data/recipes/${uuid}/images/original.webp`,
@@ -1114,12 +1138,15 @@ ${t}`;
         for (const p of imgPaths) {
           const imgFile = zip.file(p);
           if (imgFile) {
-            const b64 = await imgFile.async('base64');
-            image = `data:image/webp;base64,${b64}`;
+            const b64    = await imgFile.async('base64');
+            const dataUrl = `data:image/webp;base64,${b64}`;
+            // Store against the Refectory recipe ID we'll assign below
+            const targetId = existing ? existing.id : newId;
+            await ImageStore.set(targetId, dataUrl);
             break;
           }
         }
-      } catch { /* skip image */ }
+      } catch { /* skip image on failure */ }
     }
 
     const newId = genId();
@@ -1138,7 +1165,6 @@ ${t}`;
         source:      r.org_url      || '',
         sourceUrl:   r.org_url      || '',
         tags, ingredients, steps,
-        image:       image || existing.image,
         importedFrom: 'mealie-backup',
         updatedAt:   Date.now(),
       });
@@ -1154,7 +1180,7 @@ ${t}`;
         totalTime:   r.total_time   || '',
         source:      r.org_url      || '',
         sourceUrl:   r.org_url      || '',
-        tags, ingredients, steps, image,
+        tags, ingredients, steps,
         importedFrom: 'mealie-backup',
         createdAt:   Date.now(),
         updatedAt:   Date.now(),
@@ -1224,20 +1250,21 @@ function openSettings() {
 
 function clearImportedRecipes() {
   const recipes = App.data.recipes || {};
-  const before  = Object.keys(recipes).length;
-  App.data.recipes = Object.fromEntries(
-    Object.entries(recipes).filter(([, r]) => r.importedFrom !== 'mealie-backup' && r.importedFrom !== 'mealie')
-  );
-  const removed = before - Object.keys(App.data.recipes).length;
+  const toRemove = Object.entries(recipes)
+    .filter(([, r]) => r.importedFrom === 'mealie-backup' || r.importedFrom === 'mealie')
+    .map(([id]) => id);
+  toRemove.forEach(id => delete App.data.recipes[id]);
+  ImageStore.deleteMany(toRemove);
   saveLocal();
   renderAll();
   closeModal('modal-settings');
-  showToast(`Cleared ${removed} imported recipe${removed !== 1 ? 's' : ''} ✓`);
+  showToast(`Cleared ${toRemove.length} imported recipe${toRemove.length !== 1 ? 's' : ''} ✓`);
 }
 
 function wipeAllRecipes() {
   App.data.recipes  = {};
   App.data.mealplan = {};
+  ImageStore.clear();
   saveLocal();
   renderAll();
   closeModal('modal-settings');
