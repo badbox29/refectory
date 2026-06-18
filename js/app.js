@@ -1256,11 +1256,21 @@ function renderCookbookDetail(id) {
       }
     });
 
-    // Open recipe detail on card click (not on remove button)
+    // Open recipe detail — close cookbook detail first, reopen after
     grid.querySelectorAll('.recipe-card').forEach(card => {
       card.addEventListener('click', e => {
         if (e.target.closest('.cookbook-remove-recipe')) return;
+        closeModal('modal-cookbook-detail');
         openRecipeDetail(card.dataset.id);
+        // Reopen cookbook detail when recipe detail closes
+        const recipeOverlay = document.getElementById('modal-recipe-detail');
+        const observer = new MutationObserver(() => {
+          if (!recipeOverlay.classList.contains('open')) {
+            observer.disconnect();
+            openModal('modal-cookbook-detail');
+          }
+        });
+        observer.observe(recipeOverlay, { attributes: true, attributeFilter: ['class'] });
       });
     });
 
@@ -1324,7 +1334,14 @@ function openCookbookPick(cookbookId) {
     });
   }
 
-  if (search) { search.value = ''; search.addEventListener('input', e => renderPick(e.target.value)); }
+  // Reset search input cleanly to avoid stacking event listeners on repeated opens
+  if (search) {
+    const freshSearch = search.cloneNode(true);
+    freshSearch.value = '';
+    search.parentNode.replaceChild(freshSearch, search);
+    freshSearch.addEventListener('input', e => renderPick(e.target.value));
+    freshSearch.focus();
+  }
   renderPick('');
   openModal('modal-cookbook-pick');
 }
