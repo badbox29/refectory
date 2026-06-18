@@ -64,7 +64,7 @@ function defaultData() {
     lastName:    '',
     username:    '',
     // Recipes: { [id]: { id, title, description, servings, ingredients, steps, tags, source, sourceUrl, importedFrom, createdAt, updatedAt, image } }
-    recipes:     {},  // each recipe may have a `rating` field (0–5)
+    recipes:     {},  // each recipe may have a `rating` field (0–5) and `notes` field
     // Meal plan: { [weekKey]: { [dayIndex]: { [slot]: recipeId } } }
     // weekKey = ISO week "2025-W03", dayIndex 0-6, slot = "breakfast"|"lunch"|"dinner"|"snack"
     mealplan:    {},
@@ -597,6 +597,46 @@ function openRecipeDetail(id) {
     }
   };
   document.getElementById('detail-plan-btn').onclick = () => openAddToPlanModal(id);
+
+  // ── Tab switching ────────────────────────────────────────────────
+  const tabs        = document.querySelectorAll('.detail-tab');
+  const panelRecipe = document.getElementById('detail-panel-recipe');
+  const panelNotes  = document.getElementById('detail-panel-notes');
+  const notesArea   = document.getElementById('detail-notes');
+
+  // Reset to Recipe Details tab each time modal opens
+  tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === 'recipe'));
+  if (panelRecipe) panelRecipe.style.display = '';
+  if (panelNotes)  panelNotes.style.display  = 'none';
+
+  // Populate notes
+  if (notesArea) notesArea.value = r.notes || '';
+
+  // Wire tab buttons
+  tabs.forEach(tab => {
+    tab.onclick = () => {
+      tabs.forEach(t => t.classList.toggle('active', t === tab));
+      const isNotes = tab.dataset.tab === 'notes';
+      if (panelRecipe) panelRecipe.style.display = isNotes ? 'none' : '';
+      if (panelNotes)  panelNotes.style.display  = isNotes ? '' : 'none';
+      if (isNotes) notesArea?.focus();
+    };
+  });
+
+  // Auto-save notes on input (debounced 600ms)
+  let _notesSaveTimer = null;
+  if (notesArea) {
+    notesArea.oninput = () => {
+      clearTimeout(_notesSaveTimer);
+      _notesSaveTimer = setTimeout(() => {
+        const recipe = getRecipe(id);
+        if (recipe) {
+          recipe.notes = notesArea.value;
+          saveRecipe(recipe);
+        }
+      }, 600);
+    };
+  }
 
   openModal('modal-recipe-detail');
   updateScaledIngredients();
@@ -2218,6 +2258,22 @@ async function printRecipe(id) {
     (r.steps || []).map(s =>
       `<li>${esc(plainText(stepText(s)))}</li>`
     ).join('');
+
+  // Notes — show only if present
+  let printNotesEl = document.getElementById('print-notes');
+  if (!printNotesEl) {
+    printNotesEl = document.createElement('div');
+    printNotesEl.id = 'print-notes';
+    document.querySelector('.print-footer')?.before(printNotesEl);
+  }
+  if (r.notes?.trim()) {
+    printNotesEl.innerHTML = `
+      <div class="print-notes-title">My Notes</div>
+      <div class="print-notes-text">${esc(r.notes)}</div>`;
+    printNotesEl.style.display = '';
+  } else {
+    printNotesEl.style.display = 'none';
+  }
 
   document.body.classList.add('printing-recipe');
   window.print();
