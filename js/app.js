@@ -484,7 +484,13 @@ function openRecipeDetail(id) {
   document.getElementById('detail-servings').textContent    = r.servings ? `Serves ${r.servings}` : '';
   document.getElementById('detail-tags').innerHTML          = (r.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join('');
   document.getElementById('detail-source').innerHTML        = r.sourceUrl
-    ? `<a href="${esc(r.sourceUrl)}" target="_blank" rel="noopener">${esc(r.source || r.sourceUrl)}</a>`
+    ? (() => {
+        const display = r.source && r.source !== r.sourceUrl
+          ? r.source
+          : (() => { try { const u = new URL(r.sourceUrl); return u.hostname + (u.pathname.length > 1 ? u.pathname : ''); } catch { return r.sourceUrl; } })();
+        const truncated = display.length > 60 ? display.slice(0, 57) + '…' : display;
+        return `<a href="${esc(r.sourceUrl)}" target="_blank" rel="noopener" title="${esc(r.sourceUrl)}">${esc(truncated)}</a>`;
+      })()
     : (r.source ? esc(r.source) : '');
 
   const imgEl = document.getElementById('detail-image');
