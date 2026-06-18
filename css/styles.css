@@ -1862,3 +1862,62 @@ body.modal-open { overflow: hidden; }
   .planner-day-tabs { display: flex; }
   .planner-table-wrap { display: none; }
 }
+
+/* ── Plan slot dice / random button ─────────────────────────── */
+.plan-add-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: .2rem;
+  height: 100%;
+  padding: .2rem;
+}
+.plan-add-wrap .plan-add {
+  flex: 1;
+}
+.plan-dice {
+  background: none;
+  border: 1px dashed var(--border);
+  border-radius: var(--r-sm);
+  color: var(--muted);
+  font-size: .75rem;
+  cursor: pointer;
+  padding: .15rem;
+  width: 100%;
+  transition: border-color .12s, color .12s;
+  line-height: 1;
+}
+.plan-dice:hover { border-color: var(--green-soft); color: var(--green-mid); }
+
+/* Mobile dice */
+.plan-add-wrap-mobile {
+  flex-direction: row;
+  gap: .4rem;
+  min-height: 56px;
+  padding: 0;
+}
+.plan-add-wrap-mobile .plan-add-mobile { flex: 1; }
+.plan-dice-mobile {
+  flex-shrink: 0;
+  height: 56px;
+  width: 72px;
+  border: 2px dashed var(--border);
+  border-radius: var(--r-md);
+  background: none;
+  color: var(--muted);
+  font-size: .75rem;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: .15rem;
+  transition: border-color .12s, color .12s;
+}
+.plan-dice-mobile:hover { border-color: var(--green-soft); color: var(--green-mid); }
+
+/* Last cooked in detail meta */
+.detail-last-cooked {
+  font-size: .78rem;
+  color: var(--muted);
+  font-style: italic;
+}
