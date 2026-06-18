@@ -811,6 +811,33 @@ textarea.input { resize: vertical; min-height: 80px; }
   color: var(--muted);
 }
 
+/* Labeled time chips in detail meta row */
+.detail-time-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: .3rem;
+  background: var(--cream-dark);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: .15rem .5rem;
+  font-size: .78rem;
+  color: var(--ink-mid);
+}
+.detail-time-label {
+  font-size: .68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--muted);
+}
+
+/* Time on recipe cards */
+.card-time {
+  font-size: .72rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 #detail-source {
   overflow: hidden;
   text-overflow: ellipsis;
