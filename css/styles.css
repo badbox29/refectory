@@ -1457,3 +1457,66 @@ body.modal-open { overflow: hidden; }
     font-style: italic;
   }
 }
+
+/* ── Cookbooks ───────────────────────────────────────────────── */
+.cookbooks-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1.25rem;
+}
+
+.cookbook-card {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform .12s, box-shadow .12s, border-color .12s;
+}
+.cookbook-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); border-color: var(--green-soft); }
+
+/* Mosaic of up to 4 recipe images */
+.cookbook-card-mosaic {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  height: 140px;
+  background: var(--cream-dark);
+  overflow: hidden;
+}
+.cookbook-card-mosaic:has(:only-child) { grid-template-columns: 1fr; }
+
+.cookbook-mosaic-cell {
+  background-size: cover;
+  background-position: center;
+  background-color: var(--cream-dark);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.4rem;
+  opacity: .5;
+  border: 1px solid var(--white);
+}
+.cookbook-mosaic-empty {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2.5rem;
+  opacity: .3;
+  color: var(--muted);
+}
+
+.cookbook-card-body { padding: .75rem 1rem; }
+.cookbook-card-name  { font-size: .95rem; font-weight: 600; margin-bottom: .15rem; }
+.cookbook-card-count { font-size: .78rem; margin-bottom: .2rem; }
+.cookbook-card-desc  { font-size: .78rem; margin-top: .2rem;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* Cookbook recipe picker */
+.pick-recipe-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: .75rem;
+  max-height: 400px;
+  overflow-y: auto;
+}
