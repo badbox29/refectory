@@ -64,7 +64,7 @@ function defaultData() {
     lastName:    '',
     username:    '',
     // Recipes: { [id]: { id, title, description, servings, ingredients, steps, tags, source, sourceUrl, importedFrom, createdAt, updatedAt, image } }
-    recipes:     {},
+    recipes:     {},  // each recipe may have a `rating` field (0–5)
     // Meal plan: { [weekKey]: { [dayIndex]: { [slot]: recipeId } } }
     // weekKey = ISO week "2025-W03", dayIndex 0-6, slot = "breakfast"|"lunch"|"dinner"|"snack"
     mealplan:    {},
@@ -221,6 +221,42 @@ function closeModal(id) {
 // ─── Render helpers ───────────────────────────────────────────────
 
 // Strip markdown and collapse whitespace for plain-text card previews
+// ─── Star rating helpers ─────────────────────────────────────────
+
+// Render a read-only star string for display (e.g. "★★★☆☆")
+function starsDisplay(rating) {
+  const n = Math.round(rating || 0);
+  return '★'.repeat(n) + '☆'.repeat(5 - n);
+}
+
+// Wire up a .star-input widget for interactive rating
+function initStarInput(container, initialRating) {
+  if (!container) return;
+  const stars = container.querySelectorAll('.star-btn');
+  function setRating(val) {
+    container.dataset.rating = val;
+    stars.forEach(s => {
+      const v = parseInt(s.dataset.val);
+      s.classList.toggle('filled', v <= val);
+    });
+  }
+  setRating(initialRating || 0);
+  stars.forEach(star => {
+    star.addEventListener('click', () => {
+      const val = parseInt(star.dataset.val);
+      // Clicking current rating again clears it
+      const current = parseInt(container.dataset.rating);
+      setRating(val === current ? 0 : val);
+    });
+    star.addEventListener('mouseenter', () => {
+      stars.forEach(s => s.classList.toggle('filled', parseInt(s.dataset.val) <= parseInt(star.dataset.val)));
+    });
+    star.addEventListener('mouseleave', () => {
+      setRating(parseInt(container.dataset.rating));
+    });
+  });
+}
+
 function plainText(str) {
   if (!str) return '';
   return str
@@ -278,6 +314,7 @@ const View = {
   recipeTags:    [],          // selected tag filters
   editingId:     null,        // recipe id being edited
   checkedItems:  new Set(),   // shopping list checked item keys (session only)
+  recipeSort:    'updated',     // 'updated' | 'alpha' | 'rating'
 };
 
 // ─── Navigation ───────────────────────────────────────────────────
@@ -294,7 +331,10 @@ function showSection(name) {
 // ─── Recipe CRUD ──────────────────────────────────────────────────
 
 function getRecipes() {
-  return Object.values(App.data.recipes || {}).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  const recipes = Object.values(App.data.recipes || {});
+  if (View.recipeSort === 'alpha')  return recipes.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+  if (View.recipeSort === 'rating') return recipes.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+  return recipes.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 }
 
 function getRecipe(id) { return App.data.recipes?.[id] || null; }
@@ -360,6 +400,7 @@ function renderRecipes() {
         <div class="recipe-card-title">${esc(r.title)}</div>
         ${r.description ? `<div class="recipe-card-desc">${esc(plainText(r.description))}</div>` : ''}
         <div class="recipe-card-meta">
+          ${r.rating ? `<span class="card-stars" title="${r.rating} out of 5">${starsDisplay(r.rating)}</span>` : ''}
           ${r.servings ? `<span>Serves ${esc(String(r.servings))}</span>` : ''}
           ${r.totalTime ? `<span class="card-time">⏱ ${esc(r.totalTime)}</span>` : r.cookTime ? `<span class="card-time">⏱ ${esc(r.cookTime)}</span>` : ''}
           ${r.tags?.length ? `<span>${r.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</span>` : ''}
@@ -484,6 +525,14 @@ function openRecipeDetail(id) {
   document.getElementById('detail-title').textContent       = r.title || '';
   document.getElementById('detail-description').textContent = r.description || '';
   document.getElementById('detail-servings').textContent    = r.servings ? `Serves ${r.servings}` : '';
+  const ratingEl = document.getElementById('detail-rating');
+  if (ratingEl) {
+    if (r.rating) {
+      ratingEl.innerHTML = `<span class="detail-stars" title="${r.rating} out of 5">${starsDisplay(r.rating)}</span>`;
+    } else {
+      ratingEl.textContent = '';
+    }
+  }
 
   // Time chips — only shown when data present
   const timeChip = (label, val) => {
@@ -596,6 +645,7 @@ function openRecipeEditor(id = null) {
   form.querySelector('#editor-title').value       = recipe.title       || '';
   form.querySelector('#editor-description').value = recipe.description || '';
   form.querySelector('#editor-servings').value    = recipe.servings    || '';
+  initStarInput(form.querySelector('#editor-rating'), recipe.rating || 0);
   form.querySelector('#editor-tags').value        = (recipe.tags || []).join(', ');
   form.querySelector('#editor-source').value      = recipe.source      || '';
   form.querySelector('#editor-source-url').value  = recipe.sourceUrl   || '';
@@ -667,6 +717,7 @@ function collectEditorData() {
     title:       form.querySelector('#editor-title').value.trim(),
     description: form.querySelector('#editor-description').value.trim(),
     servings:    parseInt(form.querySelector('#editor-servings').value) || null,
+    rating:      parseInt(form.querySelector('#editor-rating')?.dataset.rating) || 0,
     tags,
     source:      form.querySelector('#editor-source').value.trim(),
     sourceUrl:   form.querySelector('#editor-source-url').value.trim(),
@@ -1788,6 +1839,11 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Recipe search
+  document.getElementById('recipe-sort')?.addEventListener('change', e => {
+    View.recipeSort = e.target.value;
+    renderRecipes();
+  });
+
   document.getElementById('recipe-search')?.addEventListener('input', e => {
     View.recipeSearch = e.target.value;
     renderRecipes();
