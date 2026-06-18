@@ -360,6 +360,7 @@ function renderRecipes() {
         ${r.description ? `<div class="recipe-card-desc">${esc(plainText(r.description))}</div>` : ''}
         <div class="recipe-card-meta">
           ${r.servings ? `<span>Serves ${esc(String(r.servings))}</span>` : ''}
+          ${r.totalTime ? `<span class="card-time">⏱ ${esc(r.totalTime)}</span>` : r.cookTime ? `<span class="card-time">⏱ ${esc(r.cookTime)}</span>` : ''}
           ${r.tags?.length ? `<span>${r.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</span>` : ''}
         </div>
       </div>
@@ -482,6 +483,20 @@ function openRecipeDetail(id) {
   document.getElementById('detail-title').textContent       = r.title || '';
   document.getElementById('detail-description').textContent = r.description || '';
   document.getElementById('detail-servings').textContent    = r.servings ? `Serves ${r.servings}` : '';
+
+  // Time chips — only shown when data present
+  const timeChip = (label, val) => {
+    const el = document.getElementById(`detail-${label}`);
+    if (!el) return;
+    if (val) {
+      el.innerHTML = `<span class="detail-time-chip"><span class="detail-time-label">${label}</span>${esc(val)}</span>`;
+    } else {
+      el.textContent = '';
+    }
+  };
+  timeChip('prep',  r.prepTime  || '');
+  timeChip('cook',  r.cookTime  || '');
+  timeChip('total', r.totalTime || '');
   document.getElementById('detail-tags').innerHTML          = (r.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join('');
   document.getElementById('detail-source').innerHTML        = r.sourceUrl
     ? (() => {
