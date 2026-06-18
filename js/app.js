@@ -110,9 +110,21 @@ function getWorkerUrl() {
 async function pushToWorker() {
   const base  = getWorkerUrl().replace(/\/+$/, '');
   if (!base) return false;
-  const token   = App.data?.userToken;
+  const token = App.data?.userToken;
   if (!token) return false;
-  const body    = JSON.stringify(App.data);
+
+  // Strip image fields — images live in IndexedDB, never sent to worker
+  const payload = {
+    ...App.data,
+    recipes: Object.fromEntries(
+      Object.entries(App.data.recipes || {}).map(([id, r]) => {
+        const { image: _img, ...rest } = r;
+        return [id, rest];
+      })
+    ),
+  };
+
+  const body    = JSON.stringify(payload);
   const headers = await Auth._authHeaders('PUT', token, body);
   try {
     const res = await fetch(`${base}/storage/${encodeURIComponent(token)}/profile`, {
@@ -120,8 +132,15 @@ async function pushToWorker() {
       headers: { 'Content-Type': 'application/json', ...headers },
       body,
     });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => String(res.status));
+      console.error(`[Refectory] pushToWorker failed (${res.status}):`, errText);
+    }
     return res.ok;
-  } catch { return false; }
+  } catch(e) {
+    console.error('[Refectory] pushToWorker network error:', e);
+    return false;
+  }
 }
 
 async function pullFromWorker() {
@@ -150,8 +169,10 @@ async function pullFromWorker() {
 
 async function syncToWorker() {
   if (Auth.isGuest()) return;
+  if (!App.pendingSync) return;
   App.pendingSync = false;
-  await pushToWorker();
+  const ok = await pushToWorker();
+  if (!ok) App.pendingSync = true; // retry next tick
 }
 
 function scheduleSave() {
@@ -1206,15 +1227,18 @@ async function triggerMealieZipImport(file) {
   if (btn) { btn.disabled = false; btn.textContent = 'Import from Backup'; }
 
   if (result.ok) {
-    // Explicitly save after import — belt and suspenders
     saveLocal();
     renderAll();
     closeModal('modal-mealie-import');
     showToast(`✅ Imported ${result.count} recipes from Mealie backup`);
-    // Confirm to console that data was persisted
-    const saved = localStorage.getItem(STORAGE_KEY);
-    const recipeCount = saved ? Object.keys(JSON.parse(saved).recipes || {}).length : 0;
-    console.log(`[Refectory] Saved. localStorage has ${recipeCount} recipes.`);
+    // Push to worker immediately — don't wait for the next sync interval
+    if (!Auth.isGuest()) {
+      App.pendingSync = true;
+      syncToWorker().then(ok => {
+        if (ok) showToast('Recipes synced to worker ✓');
+        else    console.warn('[Refectory] Post-import worker push failed — will retry on next sync');
+      });
+    }
   } else {
     if (status) { status.textContent = result.error; status.style.color = 'var(--red)'; }
   }
