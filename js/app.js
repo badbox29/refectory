@@ -1222,6 +1222,28 @@ function openSettings() {
   openModal('modal-settings');
 }
 
+function clearImportedRecipes() {
+  const recipes = App.data.recipes || {};
+  const before  = Object.keys(recipes).length;
+  App.data.recipes = Object.fromEntries(
+    Object.entries(recipes).filter(([, r]) => r.importedFrom !== 'mealie-backup' && r.importedFrom !== 'mealie')
+  );
+  const removed = before - Object.keys(App.data.recipes).length;
+  saveLocal();
+  renderAll();
+  closeModal('modal-settings');
+  showToast(`Cleared ${removed} imported recipe${removed !== 1 ? 's' : ''} ✓`);
+}
+
+function wipeAllRecipes() {
+  App.data.recipes  = {};
+  App.data.mealplan = {};
+  saveLocal();
+  renderAll();
+  closeModal('modal-settings');
+  showToast('All recipes wiped ✓');
+}
+
 function saveSettings() {
   App.data.firstName = document.getElementById('settings-firstname-input').value.trim();
   App.data.lastName  = document.getElementById('settings-lastname-input').value.trim();
@@ -1418,6 +1440,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Settings
   document.getElementById('btn-settings')?.addEventListener('click', openSettings);
+
+  // Danger zone buttons (wired fresh each time settings opens via delegation)
+  document.getElementById('modal-settings')?.addEventListener('click', e => {
+    if (e.target.id === 'btn-clear-imported') {
+      if (confirm('Remove all Mealie-imported recipes? Hand-entered recipes will be kept.')) {
+        clearImportedRecipes();
+      }
+    }
+    if (e.target.id === 'btn-wipe-recipes') {
+      if (confirm('Permanently delete ALL recipes and meal plans? This cannot be undone.')) {
+        wipeAllRecipes();
+      }
+    }
+  });
   document.getElementById('settings-save-btn')?.addEventListener('click', saveSettings);
   document.getElementById('settings-account-btn')?.addEventListener('click', () => {
     closeModal('modal-settings');
