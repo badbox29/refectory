@@ -1156,6 +1156,39 @@ body.modal-open { overflow: hidden; }
   .modal-overlay { padding: 1rem .5rem; }
 }
 
+
+/* ── Star rating ─────────────────────────────────────────────── */
+.star-input {
+  display: flex;
+  gap: .1rem;
+}
+.star-btn {
+  background: none;
+  border: none;
+  font-size: 1.4rem;
+  cursor: pointer;
+  color: var(--border);
+  padding: 0 .05rem;
+  line-height: 1;
+  transition: color .1s, transform .1s;
+}
+.star-btn.filled,
+.star-btn:hover { color: var(--saffron, #d4a832); transform: scale(1.15); }
+
+/* Read-only stars on cards */
+.card-stars {
+  font-size: .75rem;
+  color: var(--saffron, #d4a832);
+  letter-spacing: .05em;
+  white-space: nowrap;
+}
+
+/* Stars in detail meta row */
+.detail-stars {
+  font-size: .95rem;
+  color: var(--saffron, #d4a832);
+  letter-spacing: .05em;
+}
 /* ── Print styles ────────────────────────────────────────────── */
 
 /* Hide print area on screen */
