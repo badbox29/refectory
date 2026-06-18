@@ -1453,9 +1453,11 @@ async function importFromMealieApi(baseUrl, apiKey) {
 function openSettings() {
   Auth.renderSettingsSection();
   const d = App.data;
-  document.getElementById('settings-firstname-input').value = d.firstName || '';
-  document.getElementById('settings-lastname-input').value  = d.lastName  || '';
-  document.getElementById('settings-username-input').value   = d.username  || '';
+  document.getElementById('settings-firstname-input').value = d.firstName  || '';
+  document.getElementById('settings-lastname-input').value  = d.lastName   || '';
+  document.getElementById('settings-username-input').value  = d.username   || '';
+  const workerEl = document.getElementById('settings-worker-url');
+  if (workerEl) workerEl.value = d.workerUrl || '';
   openModal('modal-settings');
 }
 
@@ -1486,6 +1488,8 @@ function saveSettings() {
   App.data.firstName = document.getElementById('settings-firstname-input').value.trim();
   App.data.lastName  = document.getElementById('settings-lastname-input').value.trim();
   App.data.username  = document.getElementById('settings-username-input').value.trim();
+  const workerEl = document.getElementById('settings-worker-url');
+  if (workerEl) App.data.workerUrl = workerEl.value.trim().replace(/\/+$/, '');
   scheduleSave();
   closeModal('modal-settings');
   showToast('Settings saved ✓');

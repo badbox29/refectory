@@ -832,18 +832,27 @@ const Auth = (() => {
   }
 
   // ── S3B: Load via token ──────────────────────────────────────────
-  // Worker URL + token both required. Load button disabled until both filled.
+  // If workerUrl is already set (came from S2B), skip asking for it again.
   // HOST APP INTERFACE: calls getData(), setData(), mergeData(), onSignedIn(), startSyncPing()
   function showSetupLoadToken() {
+    const existingWorker = getData()?.workerUrl || '';
+
     setupScreen('Load with Token', `
       <p class="f13 lh muted" style="margin-bottom:1rem;">
-        Enter your Worker URL and token from your other device.
+        Paste the sync token from your other device.
       </p>
+      ${!existingWorker ? `
       <div class="form-group">
         <label class="form-label">Worker URL</label>
         <input class="input" id="auth-setup-worker-url"
                placeholder="https://your-worker.workers.dev"/>
-      </div>
+      </div>` : `
+      <div class="form-group">
+        <label class="form-label">Worker URL</label>
+        <div class="input" style="color:var(--muted);background:var(--cream-dark);cursor:default;">
+          ${_esc(existingWorker)}
+        </div>
+      </div>`}
       <div class="form-group">
         <label class="form-label">Your Token</label>
         <input class="input input-mono" id="auth-setup-token"
@@ -854,26 +863,27 @@ const Auth = (() => {
       </div>
       <div class="row gap-8" style="justify-content:space-between;">
         <button class="btn btn-ghost" id="auth-btn-back">← Back</button>
-        <button class="btn btn-primary" id="auth-btn-load" disabled>Load Account</button>
+        <button class="btn btn-primary" id="auth-btn-load" ${existingWorker ? '' : 'disabled'}>Load Account</button>
       </div>
     `);
 
     document.getElementById('auth-btn-back').addEventListener('click', showSetupLoadChoice);
 
-    const workerInput = document.getElementById('auth-setup-worker-url');
+    const workerInput = document.getElementById('auth-setup-worker-url'); // null if pre-filled
     const tokenInput  = document.getElementById('auth-setup-token');
     const loadBtn     = document.getElementById('auth-btn-load');
     const statusEl    = document.getElementById('auth-setup-status');
 
-    // Enable load button only when both fields have content
+    // Enable load button when required fields have content
     function checkFields() {
-      loadBtn.disabled = !(workerInput.value.trim() && tokenInput.value.trim());
+      const workerOk = existingWorker || (workerInput?.value.trim());
+      loadBtn.disabled = !(workerOk && tokenInput.value.trim());
     }
-    workerInput.addEventListener('input', checkFields);
+    workerInput?.addEventListener('input', checkFields);
     tokenInput.addEventListener('input', checkFields);
 
     loadBtn.addEventListener('click', async () => {
-      const workerUrl = workerInput.value.trim();
+      const workerUrl = existingWorker || workerInput?.value.trim() || '';
       const token     = tokenInput.value.trim();
       loadBtn.disabled = true;
       statusEl.style.color = 'var(--gold2, #b8985a)';
