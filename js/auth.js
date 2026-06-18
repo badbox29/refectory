@@ -1153,16 +1153,21 @@ const Auth = (() => {
         return;
       }
 
-      const base    = workerBase();
-      const idToken = store.get(C.storageAuthKey);
+      const base        = workerBase();
+      const idToken     = store.get(C.storageAuthKey);
+      const migrateBody = JSON.stringify({ idToken, oldToken });
+      // Sign with the OLD token via HMAC — must use _signRequest directly because
+      // by this point authMethod may already be 'google' and _authHeaders would
+      // send a Bearer token instead, which the migrate endpoint doesn't accept.
+      const hmacHdrs    = await _signRequest('POST', oldToken, migrateBody).catch(() => ({}));
       statusEl.style.color = 'var(--gold2, #b8985a)';
       statusEl.textContent = 'Migrating account…';
 
       try {
         const res  = await fetch(`${base}/auth/migrate`, {
           method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ idToken, oldToken }),
+          headers: { 'Content-Type': 'application/json', ...hmacHdrs },
+          body:    migrateBody,
         });
         const data = await res.json();
         if(!res.ok || !data.ok) throw new Error(data.error || 'Migration failed');
