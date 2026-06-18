@@ -64,6 +64,11 @@
           <span class="search-icon">🔍</span>
           <input class="input" id="recipe-search" placeholder="Search recipes…" type="search"/>
         </div>
+        <select class="input" id="recipe-sort" style="width:auto;padding-right:1.5rem;">
+          <option value="updated">Recently updated</option>
+          <option value="alpha">A → Z</option>
+          <option value="rating">Top rated</option>
+        </select>
         <button class="btn btn-primary" id="btn-new-recipe">+ New Recipe</button>
       </div>
       <div id="tag-filter-bar" class="tag-filter-bar"></div>
@@ -134,6 +139,7 @@
       </div>
       <div class="detail-meta">
         <span id="detail-servings"></span>
+        <span id="detail-rating" class="detail-rating"></span>
         <span id="detail-prep"></span>
         <span id="detail-cook"></span>
         <span id="detail-total"></span>
@@ -190,6 +196,16 @@
           <div class="form-group">
             <label class="form-label">Servings</label>
             <input class="input" id="editor-servings" type="number" min="1" placeholder="4"/>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Rating</label>
+            <div class="star-input" id="editor-rating" data-rating="0">
+              <button type="button" class="star-btn" data-val="1">★</button>
+              <button type="button" class="star-btn" data-val="2">★</button>
+              <button type="button" class="star-btn" data-val="3">★</button>
+              <button type="button" class="star-btn" data-val="4">★</button>
+              <button type="button" class="star-btn" data-val="5">★</button>
+            </div>
           </div>
           <div class="form-group">
             <label class="form-label">Tags <span class="muted">(comma separated)</span></label>
