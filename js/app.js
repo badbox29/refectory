@@ -277,6 +277,7 @@ const View = {
   recipeSearch:  '',
   recipeTags:    [],          // selected tag filters
   editingId:     null,        // recipe id being edited
+  checkedItems:  new Set(),   // shopping list checked item keys (session only)
 };
 
 // ─── Navigation ───────────────────────────────────────────────────
@@ -859,7 +860,7 @@ function renderShoppingList() {
   if (!container) return;
 
   // Collect all recipes in current + next week plan
-  const weeks   = [View.currentWeek, addWeeks(View.currentWeek, 1)];
+  const weeks     = [View.currentWeek, addWeeks(View.currentWeek, 1)];
   const recipeIds = new Set();
   for (const wk of weeks) {
     const plan = getWeekPlan(wk);
@@ -876,7 +877,7 @@ function renderShoppingList() {
   }
 
   // Aggregate ingredients
-  const agg = {}; // "name" → { amounts: [...], unit }
+  const agg = {};
   for (const rid of recipeIds) {
     const r = getRecipe(rid);
     if (!r) continue;
@@ -886,26 +887,36 @@ function renderShoppingList() {
         : rawIng;
       if (!ing.name) continue;
       const key = ing.name.toLowerCase().trim();
-      if (!agg[key]) agg[key] = { name: ing.name, entries: [] };
+      if (!agg[key]) agg[key] = { name: ing.name, entries: [], key };
       agg[key].entries.push({ amount: ing.amount, unit: ing.unit, from: r.title });
     }
   }
 
-  const sorted = Object.values(agg).sort((a, b) => a.name.localeCompare(b.name));
+  // Unchecked items first (alphabetical), checked items at bottom (alphabetical)
+  const all       = Object.values(agg);
+  const unchecked = all.filter(i => !View.checkedItems.has(i.key)).sort((a, b) => a.name.localeCompare(b.name));
+  const checked   = all.filter(i =>  View.checkedItems.has(i.key)).sort((a, b) => a.name.localeCompare(b.name));
+  const sorted    = [...unchecked, ...checked];
+  const checkedCount = checked.length;
+
   container.innerHTML = `
     <div class="shopping-header">
       <p class="muted shopping-note">Based on meals planned for ${formatWeekLabel(weeks[0])} and the following week.</p>
-      <button class="btn btn-ghost btn-sm" id="shopping-print-btn">Print / Save PDF</button>
+      <div style="display:flex;gap:.5rem;align-items:center;">
+        ${checkedCount ? `<button class="btn btn-ghost btn-sm" id="shopping-clear-checked">Clear checked (${checkedCount})</button>` : ''}
+        <button class="btn btn-ghost btn-sm" id="shopping-print-btn">Print / Save PDF</button>
+      </div>
     </div>
     <ul class="shopping-list">
       ${sorted.map(item => {
-        const summary = item.entries.map(e =>
+        const isChecked = View.checkedItems.has(item.key);
+        const summary   = item.entries.map(e =>
           [e.amount, e.unit, e.name].filter(Boolean).join(' ')
         ).join(' + ');
         return `
-          <li class="shopping-item">
+          <li class="shopping-item${isChecked ? ' is-checked' : ''}" data-key="${esc(item.key)}">
             <label class="shopping-check">
-              <input type="checkbox" class="shopping-cb"/>
+              <input type="checkbox" class="shopping-cb"${isChecked ? ' checked' : ''}/>
               <span class="shopping-ing">
                 <span class="shopping-name">${esc(item.name)}</span>
                 <span class="shopping-detail muted">${esc(summary)}</span>
@@ -915,6 +926,21 @@ function renderShoppingList() {
       }).join('')}
     </ul>
   `;
+
+  // Checkbox interactions
+  container.querySelectorAll('.shopping-cb').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const key = cb.closest('.shopping-item').dataset.key;
+      if (cb.checked) View.checkedItems.add(key);
+      else            View.checkedItems.delete(key);
+      renderShoppingList();
+    });
+  });
+
+  document.getElementById('shopping-clear-checked')?.addEventListener('click', () => {
+    View.checkedItems.clear();
+    renderShoppingList();
+  });
 
   document.getElementById('shopping-print-btn')?.addEventListener('click', () => window.print());
 }
