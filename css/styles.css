@@ -773,6 +773,19 @@ textarea.input { resize: vertical; min-height: 80px; }
   color: var(--muted);
 }
 
+#detail-source {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  min-width: 0;
+}
+#detail-source a {
+  color: var(--green-soft);
+  text-decoration: none;
+}
+#detail-source a:hover { text-decoration: underline; }
+
 .detail-desc {
   font-family: var(--font-body);
   font-size: .95rem;
