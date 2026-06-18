@@ -485,11 +485,10 @@
 
           <!-- Upgrade to Google (token accounts only) -->
           <div id="settings-upgrade-google" style="display:none;">
-            <button class="btn btn-ghost btn-sm" onclick="Auth.showGoogleUpgradeFlow()">
+            <button class="btn btn-ghost btn-sm" onclick="closeModal('modal-settings'); Auth.showGoogleUpgradeFlow();">
               Upgrade to Google sign-in →
             </button>
           </div>
-
           <!-- Account action button -->
           <div style="margin-top:.25rem;">
             <button class="btn btn-ghost btn-sm" id="settings-account-btn">
