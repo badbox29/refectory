@@ -166,20 +166,37 @@
       </div>
       <div class="detail-desc" id="detail-description"></div>
 
-      <div class="detail-scale-row">
-        <label id="detail-scale-label">Servings</label>
-        <input class="input" id="detail-scale" type="number" min="1" max="100" style="width:70px;"/>
+      <div class="detail-scale-tab-row">
+        <div class="detail-scale-row">
+          <label id="detail-scale-label">Servings</label>
+          <input class="input" id="detail-scale" type="number" min="1" max="100" style="width:70px;"/>
+        </div>
+        <div class="detail-tabs">
+          <button class="detail-tab active" data-tab="recipe">Recipe Details</button>
+          <button class="detail-tab" data-tab="notes">Notes</button>
+        </div>
+      </div>
+      <div class="detail-tab-rule"></div>
+
+      <!-- Recipe Details panel -->
+      <div id="detail-panel-recipe">
+        <div class="detail-two-col">
+          <div>
+            <div class="detail-section-title">Ingredients</div>
+            <ul id="detail-ingredients"></ul>
+          </div>
+          <div>
+            <div class="detail-section-title">Instructions</div>
+            <ol id="detail-steps"></ol>
+          </div>
+        </div>
       </div>
 
-      <div class="detail-two-col">
-        <div>
-          <div class="detail-section-title">Ingredients</div>
-          <ul id="detail-ingredients"></ul>
-        </div>
-        <div>
-          <div class="detail-section-title">Instructions</div>
-          <ol id="detail-steps"></ol>
-        </div>
+      <!-- Notes panel -->
+      <div id="detail-panel-notes" style="display:none;">
+        <textarea id="detail-notes"
+          class="input detail-notes-area"
+          placeholder="Add your notes here — family reactions, substitutions to try, tips for next time…"></textarea>
       </div>
     </div>
     <div class="modal-footer">
