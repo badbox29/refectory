@@ -164,6 +164,7 @@
       <div class="detail-meta">
         <span id="detail-servings"></span>
         <span id="detail-rating" class="detail-rating"></span>
+        <span id="detail-meal-type" class="detail-meal-type"></span>
         <span id="detail-last-cooked" class="detail-last-cooked"></span>
         <span id="detail-prep"></span>
         <span id="detail-cook"></span>
@@ -247,6 +248,16 @@
               <button type="button" class="star-btn" data-val="4">★</button>
               <button type="button" class="star-btn" data-val="5">★</button>
             </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Meal type</label>
+            <select class="input" id="editor-meal-type">
+              <option value="">Any / unspecified</option>
+              <option value="breakfast">Breakfast</option>
+              <option value="lunch">Lunch</option>
+              <option value="dinner">Dinner</option>
+              <option value="snack">Snack</option>
+            </select>
           </div>
           <div class="form-group">
             <label class="form-label">Tags <span class="muted">(comma separated)</span></label>
