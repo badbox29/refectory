@@ -1127,6 +1127,11 @@ ${t}` : `
 ${t}`;
     });
 
+    // Determine the Refectory ID for this recipe before touching images
+    const existing = Object.values(App.data.recipes)
+      .find(ex => ex.importedFrom === 'mealie-backup' && ex.title === r.name);
+    const newId    = existing ? existing.id : genId();
+
     // Image — read from zip and store in IndexedDB (not in App.data / localStorage)
     if (embedImages) {
       try {
@@ -1138,20 +1143,14 @@ ${t}`;
         for (const p of imgPaths) {
           const imgFile = zip.file(p);
           if (imgFile) {
-            const b64    = await imgFile.async('base64');
+            const b64     = await imgFile.async('base64');
             const dataUrl = `data:image/webp;base64,${b64}`;
-            // Store against the Refectory recipe ID we'll assign below
-            const targetId = existing ? existing.id : newId;
-            await ImageStore.set(targetId, dataUrl);
+            await ImageStore.set(newId, dataUrl);
             break;
           }
         }
       } catch { /* skip image on failure */ }
     }
-
-    const newId = genId();
-    const existing = Object.values(App.data.recipes)
-      .find(ex => ex.importedFrom === 'mealie-backup' && ex.title === r.name);
 
     if (existing) {
       // Update in place, preserve our own id
