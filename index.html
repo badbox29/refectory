@@ -156,6 +156,7 @@
       </div>
     </div>
     <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" id="detail-print-btn">🖨️ Print</button>
       <button class="btn btn-ghost btn-sm" id="detail-plan-btn">📅 Add to Plan</button>
       <button class="btn btn-ghost btn-sm" id="detail-edit-btn">✏️ Edit</button>
       <button class="btn btn-ghost btn-sm" id="detail-delete-btn" style="color:var(--red)">🗑️ Delete</button>
@@ -546,6 +547,44 @@
 <script src="js/imageStore.js"></script>
 <script src="js/auth.js"></script>
 <script src="js/app.js"></script>
+
+
+<!-- ── Print area (only visible during window.print()) ─────── -->
+<div id="print-area" aria-hidden="true">
+  <div class="print-card">
+
+    <div class="print-header">
+      <div class="print-header-text">
+        <h1 class="print-title" id="print-title"></h1>
+        <div class="print-tags" id="print-tags"></div>
+        <div class="print-source" id="print-source"></div>
+      </div>
+      <img class="print-image" id="print-image" src="" alt="" style="display:none;"/>
+    </div>
+
+    <div class="print-meta" id="print-meta"></div>
+
+    <hr class="print-rule"/>
+
+    <div class="print-desc" id="print-desc"></div>
+
+    <div class="print-body">
+      <div class="print-ingredients-col">
+        <div class="print-section-title">Ingredients</div>
+        <ul class="print-ingredients" id="print-ingredients"></ul>
+      </div>
+      <div class="print-steps-col">
+        <div class="print-section-title">Instructions</div>
+        <ol class="print-steps" id="print-steps"></ol>
+      </div>
+    </div>
+
+    <div class="print-footer">
+      <span class="print-logo">🌿 Refectory</span>
+    </div>
+
+  </div>
+</div>
 
 </body>
 </html>
