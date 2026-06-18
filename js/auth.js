@@ -777,7 +777,7 @@ const Auth = (() => {
         <div id="auth-setup-status" style="min-height:1.3rem;font-size:.82rem;margin-top:.35rem;"></div>
       </div>
       <div id="auth-google-btn-container"
-           style="width:100%;min-height:44px;opacity:.35;pointer-events:none;transition:opacity .25s;">
+           style="width:100%;min-height:44px;transition:opacity .25s;">
       </div>
       <div class="row gap-8 mt-8" style="justify-content:flex-start;">
         <button class="btn btn-ghost btn-sm" id="auth-btn-back">← Back</button>
@@ -790,38 +790,52 @@ const Auth = (() => {
     const statusEl    = document.getElementById('auth-setup-status');
     const googleCtr   = document.getElementById('auth-google-btn-container');
 
-    // Render the Google button immediately — locked until worker URL confirmed.
-    signInWithGoogle(googleCtr).then(result => {
-      if(result?.ok) {
-        C.closeModal('modal-account-setup');
-        C.toast(result.isNewAccount
-          ? `Welcome to ${appName()} ${appEmoji()}`
-          : 'Account loaded ✓');
-        C.startSyncPing();
-      } else if(result === null && getData()?.workerUrl) {
-        statusEl.style.color = 'var(--red, #c07070)';
-        statusEl.textContent = 'Sign-in cancelled — try again.';
-        googleCtr.style.opacity = '1';
-        googleCtr.style.pointerEvents = 'auto';
-      }
-    });
-
     async function unlockGoogle() {
       const url = workerInput.value.trim();
       if(!url) { statusEl.style.color='var(--red,#c07070)'; statusEl.textContent='Enter a Worker URL first.'; return; }
       statusEl.style.color = 'var(--gold2, #b8985a)';
       statusEl.textContent = 'Testing connection…';
       const ok = await testWorkerUrl(url);
-      if(ok) {
-        const d = getData(); d.workerUrl = url.replace(/\/+$/, ''); C.setData(d);
-        statusEl.style.color = 'var(--green, #6daa8f)';
-        statusEl.textContent = 'Connected ✓ — click the button below to sign in.';
-        googleCtr.style.opacity = '1';
-        googleCtr.style.pointerEvents = 'auto';
-      } else {
+      if(!ok) {
         statusEl.style.color = 'var(--red, #c07070)';
         statusEl.textContent = 'Could not reach that URL — check it and try again.';
+        return;
       }
+
+      // Worker confirmed — save URL and fetch the Google client ID from it
+      const d = getData(); d.workerUrl = url.replace(/\/+$/, ''); C.setData(d);
+      statusEl.style.color = 'var(--gold2, #b8985a)';
+      statusEl.textContent = 'Fetching auth config…';
+
+      try {
+        const res  = await fetch(`${d.workerUrl}/auth/config`);
+        const cfg  = await res.json();
+        if(cfg.googleClientId) C.googleClientId = cfg.googleClientId;
+      } catch { /* use existing clientId if any */ }
+
+      if(!C.googleClientId) {
+        statusEl.style.color = 'var(--red, #c07070)';
+        statusEl.textContent = 'Worker did not return a Google client ID — check your worker config.';
+        return;
+      }
+
+      statusEl.style.color = 'var(--green, #6daa8f)';
+      statusEl.textContent = 'Connected ✓ — sign in with Google below.';
+
+      // Now render the Google button with a valid client ID
+      googleCtr.innerHTML = '';
+      signInWithGoogle(googleCtr).then(result => {
+        if(result?.ok) {
+          C.closeModal('modal-account-setup');
+          C.toast(result.isNewAccount
+            ? `Welcome to ${appName()} ${appEmoji()}`
+            : 'Account loaded ✓');
+          C.startSyncPing();
+        } else if(result === null) {
+          statusEl.style.color = 'var(--red, #c07070)';
+          statusEl.textContent = 'Sign-in cancelled — try again.';
+        }
+      });
     }
 
     document.getElementById('auth-btn-test-worker').addEventListener('click', unlockGoogle);
