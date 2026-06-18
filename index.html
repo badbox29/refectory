@@ -51,6 +51,9 @@
     <button class="nav-btn" data-section="shopping">
       <span class="nav-icon">🛒</span>Shopping
     </button>
+    <button class="nav-btn" data-section="cookbooks">
+      <span class="nav-icon">📚</span>Cookbooks
+    </button>
   </nav>
 
   <!-- ── Main content ────────────────────────────────────────── -->
@@ -106,6 +109,21 @@
         <h1 class="section-title">Shopping List</h1>
       </div>
       <div id="shopping-list-content"></div>
+    </section>
+
+    <!-- ── Cookbooks section ──────────────────────────────── -->
+    <section id="section-cookbooks" class="section">
+      <div class="section-header">
+        <h1 class="section-title">Cookbooks</h1>
+        <button class="btn btn-primary" id="btn-new-cookbook">+ New Cookbook</button>
+      </div>
+      <div id="cookbooks-grid" class="cookbooks-grid"></div>
+      <div id="cookbooks-empty" class="empty-state" style="display:none;">
+        <div class="empty-icon">📚</div>
+        <div class="empty-title">No cookbooks yet</div>
+        <div class="empty-sub">Create a cookbook to organise your favourite recipes into curated collections.</div>
+        <button class="btn btn-primary" onclick="openCookbookEditor(null)">+ New Cookbook</button>
+      </div>
     </section>
 
   </main>
@@ -555,6 +573,75 @@
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal('modal-settings')">Cancel</button>
       <button class="btn btn-primary" id="settings-save-btn">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Cookbook editor modal ───────────────────────────────── -->
+<div class="modal-overlay" id="modal-cookbook-editor" role="dialog" aria-modal="true">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <h2 class="modal-title" id="cookbook-editor-title">New Cookbook</h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Name</label>
+        <input class="input" id="cookbook-name" placeholder="e.g. Weeknight Dinners"/>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Description <span class="muted">(optional)</span></label>
+        <textarea class="input" id="cookbook-desc" rows="2"
+                  placeholder="A short description of this collection…"></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="cookbook-editor-cancel">Cancel</button>
+      <button class="btn btn-primary" id="cookbook-editor-save">Save Cookbook</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Cookbook detail modal ────────────────────────────────── -->
+<div class="modal-overlay" id="modal-cookbook-detail" role="dialog" aria-modal="true">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <h2 class="modal-title" id="cookbook-detail-title"></h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="muted" id="cookbook-detail-desc" style="margin-bottom:1rem;"></p>
+      <div class="section-header" style="margin-bottom:.75rem;">
+        <div class="search-bar" style="flex:1;">
+          <span class="search-icon">🔍</span>
+          <input class="input" id="cookbook-recipe-search" placeholder="Search recipes to add…" type="search"/>
+        </div>
+        <button class="btn btn-outline btn-sm" id="cookbook-add-recipe-btn">+ Add Recipe</button>
+      </div>
+      <div id="cookbook-recipes-grid" class="recipe-grid" style="margin-top:0;"></div>
+      <div id="cookbook-recipes-empty" class="muted" style="display:none;padding:1rem 0;">
+        No recipes in this cookbook yet — search above to add some.
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" id="cookbook-detail-edit">✏️ Edit</button>
+      <button class="btn btn-ghost btn-sm" id="cookbook-detail-delete" style="color:var(--red)">🗑️ Delete</button>
+      <button class="btn btn-primary" onclick="closeModal('modal-cookbook-detail')">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Cookbook pick-recipe panel ──────────────────────────── -->
+<div class="modal-overlay" id="modal-cookbook-pick" role="dialog" aria-modal="true">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <h2 class="modal-title">Add to Cookbook</h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <input class="input" id="cookbook-pick-search" placeholder="Search recipes…"
+             style="margin-bottom:.75rem;" type="search"/>
+      <div id="cookbook-pick-grid" class="pick-recipe-grid"></div>
     </div>
   </div>
 </div>
