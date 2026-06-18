@@ -313,6 +313,7 @@ const MEAL_SLOTS = ['breakfast', 'lunch', 'dinner', 'snack'];
 const View = {
   currentWeek:   getISOWeekKey(),
   activeSection: 'recipes',  // 'recipes' | 'planner' | 'shopping' | 'cookbooks'
+  plannerDay:    new Date().getDay() === 0 ? 6 : new Date().getDay() - 1, // 0=Mon…6=Sun, default today
   recipeSearch:  '',
   recipeTags:    [],          // selected tag filters
   editingId:     null,        // recipe id being edited
@@ -824,12 +825,118 @@ function setMealSlot(weekKey, dayIdx, slot, recipeId) {
   scheduleSave();
 }
 
+
+// ─── Mobile planner (single-day view) ────────────────────────────
+
+function isMobilePlanner() {
+  return window.innerWidth <= 640;
+}
+
+function renderPlannerMobile() {
+  const wk    = View.currentWeek;
+  const start = weekStartDate(wk);
+  const plan  = getWeekPlan(wk);
+  const di    = View.plannerDay;
+
+  // Day tabs
+  const tabsEl = document.getElementById('planner-day-tabs');
+  if (tabsEl) {
+    tabsEl.innerHTML = DAY_NAMES.map((name, i) => {
+      const date = new Date(start);
+      date.setDate(start.getDate() + i);
+      const hasRecipe = MEAL_SLOTS.some(slot => plan[i]?.[slot]);
+      return `<button class="planner-day-tab${i === di ? ' active' : ''}" data-di="${i}">
+        <span class="planner-day-tab-name">${name.slice(0,1)}</span>
+        <span class="planner-day-tab-date">${date.getDate()}</span>
+        ${hasRecipe ? '<span class="planner-day-tab-dot"></span>' : ''}
+      </button>`;
+    }).join('');
+    tabsEl.querySelectorAll('.planner-day-tab').forEach(btn => {
+      btn.addEventListener('click', () => {
+        View.plannerDay = parseInt(btn.dataset.di);
+        renderPlannerMobile();
+      });
+    });
+  }
+
+  // Single day content
+  const dayEl = document.getElementById('planner-mobile-day');
+  if (!dayEl) return;
+
+  const date = new Date(start);
+  date.setDate(start.getDate() + di);
+  const dateLabel = date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+
+  dayEl.innerHTML = `
+    <div class="planner-mobile-date-label">${dateLabel}</div>
+    ${MEAL_SLOTS.map(slot => {
+      const rid = plan[di]?.[slot];
+      const r   = rid ? getRecipe(rid) : null;
+      return `
+        <div class="planner-mobile-slot">
+          <div class="planner-mobile-slot-label">${capitalise(slot)}</div>
+          <div class="planner-mobile-slot-content">
+            ${r
+              ? `<div class="plan-recipe plan-recipe-mobile" data-id="${esc(rid)}">
+                   <div class="plan-recipe-img" data-plan-img="${esc(rid)}"></div>
+                   <div class="plan-recipe-img-placeholder">🍽️</div>
+                   <div class="plan-recipe-title">${esc(r.title)}</div>
+                   <button class="plan-remove" data-day="${di}" data-slot="${slot}" title="Remove">✕</button>
+                 </div>`
+              : `<button class="plan-add plan-add-mobile" data-day="${di}" data-slot="${slot}">+ Add Recipe</button>`
+            }
+          </div>
+        </div>`;
+    }).join('')}
+  `;
+
+  // Wire add buttons
+  dayEl.querySelectorAll('.plan-add').forEach(btn => {
+    btn.addEventListener('click', () => {
+      openPickRecipeModal(wk, parseInt(btn.dataset.day), btn.dataset.slot);
+    });
+  });
+
+  // Wire remove buttons
+  dayEl.querySelectorAll('.plan-remove').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      setMealSlot(wk, parseInt(btn.dataset.day), btn.dataset.slot, null);
+      renderPlannerMobile();
+    });
+  });
+
+  // Wire recipe card clicks
+  dayEl.querySelectorAll('.plan-recipe').forEach(el => {
+    el.addEventListener('click', () => openRecipeDetail(el.dataset.id));
+  });
+
+  // Async-load images
+  dayEl.querySelectorAll('[data-plan-img]').forEach(async imgEl => {
+    const dataUrl = await ImageStore.get(imgEl.dataset.planImg);
+    if (dataUrl) {
+      imgEl.style.backgroundImage = `url('${dataUrl}')`;
+      imgEl.closest('.plan-recipe')?.querySelector('.plan-recipe-img-placeholder')?.remove();
+    }
+  });
+}
+
 function renderPlanner() {
   const wk      = View.currentWeek;
   const start   = weekStartDate(wk);
   const plan    = getWeekPlan(wk);
 
   document.getElementById('planner-week-label').textContent = formatWeekLabel(wk);
+
+  // Mobile: single-day view
+  const mobileDay  = document.getElementById('planner-mobile-day');
+  const tableWrap  = document.querySelector('.planner-table-wrap');
+  const dayTabs    = document.getElementById('planner-day-tabs');
+  const isMobile   = isMobilePlanner();
+  if (mobileDay)  mobileDay.style.display  = isMobile ? '' : 'none';
+  if (tableWrap)  tableWrap.style.display  = isMobile ? 'none' : '';
+  if (dayTabs)    dayTabs.style.display    = isMobile ? '' : 'none';
+  if (isMobile) { renderPlannerMobile(); return; }
 
   const table = document.getElementById('planner-table');
   table.innerHTML = `
@@ -2733,6 +2840,15 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   window.addEventListener('pagehide', () => {
     if (App.data) saveLocal();
+  });
+
+  // Re-render planner on resize (fold open/close)
+  let _resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(_resizeTimer);
+    _resizeTimer = setTimeout(() => {
+      if (View.activeSection === 'planner') renderPlanner();
+    }, 150);
   });
 
   boot();
