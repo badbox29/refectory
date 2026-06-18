@@ -338,8 +338,9 @@ function showSection(name) {
 
 function getRecipes() {
   const recipes = Object.values(App.data.recipes || {});
-  if (View.recipeSort === 'alpha')  return recipes.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
-  if (View.recipeSort === 'rating') return recipes.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+  if (View.recipeSort === 'alpha')      return recipes.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+  if (View.recipeSort === 'rating')     return recipes.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+  if (View.recipeSort === 'lastCooked') return recipes.filter(r => r.lastCooked).sort((a, b) => (b.lastCooked || 0) - (a.lastCooked || 0));
   return recipes.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 }
 
@@ -529,6 +530,15 @@ function openRecipeDetail(id) {
   document.getElementById('detail-title').textContent       = r.title || '';
   document.getElementById('detail-description').textContent = r.description || '';
   document.getElementById('detail-servings').textContent    = r.servings ? `Serves ${r.servings}` : '';
+  const lcEl = document.getElementById('detail-last-cooked');
+  if (lcEl) {
+    if (r.lastCooked) {
+      const d = new Date(r.lastCooked);
+      lcEl.textContent = `Last cooked ${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+    } else {
+      lcEl.textContent = '';
+    }
+  }
   const ratingEl = document.getElementById('detail-rating');
   if (ratingEl) {
     const rating = r.rating || 0;
@@ -816,12 +826,43 @@ function getWeekPlan(weekKey) {
   return App.data.mealplan?.[weekKey] || {};
 }
 
+
+// ─── Random recipe suggestion ─────────────────────────────────────
+
+function pickRandomRecipe(excludeIds = []) {
+  const pool = Object.values(App.data.recipes || {})
+    .filter(r => !excludeIds.includes(r.id));
+  if (!pool.length) return null;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function suggestRandomMealSlot(weekKey, dayIdx, slot) {
+  // Exclude recipes already planned this week to avoid repeats
+  const plan = getWeekPlan(weekKey);
+  const usedIds = [];
+  for (const day of Object.values(plan)) {
+    for (const rid of Object.values(day)) { if (rid) usedIds.push(rid); }
+  }
+  const recipe = pickRandomRecipe(usedIds);
+  if (!recipe) { showToast('No recipes available to suggest.'); return; }
+  setMealSlot(weekKey, dayIdx, slot, recipe.id);
+  if (isMobilePlanner()) renderPlannerMobile();
+  else renderPlanner();
+  showToast(`🎲 Suggested: ${recipe.title}`);
+}
+
 function setMealSlot(weekKey, dayIdx, slot, recipeId) {
   if (!App.data.mealplan) App.data.mealplan = {};
   if (!App.data.mealplan[weekKey]) App.data.mealplan[weekKey] = {};
   if (!App.data.mealplan[weekKey][dayIdx]) App.data.mealplan[weekKey][dayIdx] = {};
-  if (recipeId) App.data.mealplan[weekKey][dayIdx][slot] = recipeId;
-  else delete App.data.mealplan[weekKey][dayIdx][slot];
+  if (recipeId) {
+    App.data.mealplan[weekKey][dayIdx][slot] = recipeId;
+    // Record last cooked date on the recipe
+    const r = getRecipe(recipeId);
+    if (r) { r.lastCooked = Date.now(); saveRecipe(r); }
+  } else {
+    delete App.data.mealplan[weekKey][dayIdx][slot];
+  }
   scheduleSave();
 }
 
@@ -883,7 +924,10 @@ function renderPlannerMobile() {
                    <div class="plan-recipe-title">${esc(r.title)}</div>
                    <button class="plan-remove" data-day="${di}" data-slot="${slot}" title="Remove">✕</button>
                  </div>`
-              : `<button class="plan-add plan-add-mobile" data-day="${di}" data-slot="${slot}">+ Add Recipe</button>`
+              : `<div class="plan-add-wrap plan-add-wrap-mobile">
+                   <button class="plan-add plan-add-mobile" data-day="${di}" data-slot="${slot}">+ Add Recipe</button>
+                   <button class="plan-dice plan-dice-mobile" data-day="${di}" data-slot="${slot}" title="Random recipe">🎲 Suggest</button>
+                 </div>`
             }
           </div>
         </div>`;
@@ -903,6 +947,13 @@ function renderPlannerMobile() {
       e.stopPropagation();
       setMealSlot(wk, parseInt(btn.dataset.day), btn.dataset.slot, null);
       renderPlannerMobile();
+    });
+  });
+
+  // Wire dice buttons (mobile)
+  dayEl.querySelectorAll('.plan-dice').forEach(btn => {
+    btn.addEventListener('click', () => {
+      suggestRandomMealSlot(wk, parseInt(btn.dataset.day), btn.dataset.slot);
     });
   });
 
@@ -969,7 +1020,10 @@ function renderPlanner() {
                        <div class="plan-recipe-title">${esc(r.title)}</div>
                        <button class="plan-remove" data-day="${di}" data-slot="${slot}" title="Remove">✕</button>
                      </div>`
-                  : `<button class="plan-add" data-day="${di}" data-slot="${slot}" title="Add recipe">+</button>`
+                  : `<div class="plan-add-wrap">
+                       <button class="plan-add" data-day="${di}" data-slot="${slot}" title="Add recipe">+</button>
+                       <button class="plan-dice" data-day="${di}" data-slot="${slot}" title="Random recipe">🎲</button>
+                     </div>`
                 }
               </td>`;
           }).join('')}
@@ -991,6 +1045,13 @@ function renderPlanner() {
       e.stopPropagation();
       setMealSlot(wk, parseInt(btn.dataset.day), btn.dataset.slot, null);
       renderPlanner();
+    });
+  });
+
+  // Random suggestion buttons (desktop)
+  table.querySelectorAll('.plan-dice').forEach(btn => {
+    btn.addEventListener('click', () => {
+      suggestRandomMealSlot(wk, parseInt(btn.dataset.day), btn.dataset.slot);
     });
   });
 
