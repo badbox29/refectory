@@ -1190,8 +1190,8 @@ body.modal-open { overflow: hidden; }
   letter-spacing: .05em;
 }
 .detail-stars-empty {
-  color: var(--border);
-  opacity: .6;
+  color: var(--ink-mid);
+  opacity: .4;
 }
 /* ── Print styles ────────────────────────────────────────────── */
 
