@@ -405,6 +405,33 @@
         </div>
       </div>
 
+      <!-- Danger Zone -->
+      <div class="settings-section settings-danger-zone">
+        <div class="settings-section-header" style="color:var(--red);">Danger Zone</div>
+        <div class="settings-section-body">
+          <div class="settings-row">
+            <div>
+              <div class="settings-row-label">Clear all imported recipes</div>
+              <div class="settings-row-sub">Removes only recipes imported from Mealie. Hand-entered recipes are kept.</div>
+            </div>
+            <button class="btn btn-sm" id="btn-clear-imported"
+                    style="background:transparent;border:1px solid var(--red);color:var(--red);white-space:nowrap;flex-shrink:0;">
+              Clear Imported
+            </button>
+          </div>
+          <div class="settings-row" style="margin-top:.65rem;">
+            <div>
+              <div class="settings-row-label">Wipe all recipes</div>
+              <div class="settings-row-sub">Permanently deletes every recipe. Cannot be undone.</div>
+            </div>
+            <button class="btn btn-sm" id="btn-wipe-recipes"
+                    style="background:var(--red);border:1px solid var(--red);color:#fff;white-space:nowrap;flex-shrink:0;">
+              Wipe All
+            </button>
+          </div>
+        </div>
+      </div>
+
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal('modal-settings')">Cancel</button>
