@@ -348,8 +348,6 @@ function saveRecipe(recipe) {
   recipe.updatedAt = Date.now();
   if (!recipe.createdAt) recipe.createdAt = recipe.updatedAt;
   App.data.recipes[recipe.id] = recipe;
-  const editorImg = form.querySelector('#editor-image-url')?.value.trim();
-  if (editorImg) ImageStore.set(recipe.id, editorImg);
   scheduleSave();
 }
 
@@ -732,9 +730,14 @@ function saveEditorRecipe() {
   const data = collectEditorData();
   if (!data.title) { showToast('Please enter a recipe title.'); return; }
 
-  const id = View.editingId || genId();
+  const id       = View.editingId || genId();
   const existing = getRecipe(id) || {};
   saveRecipe({ ...existing, ...data, id });
+
+  // Save image URL to IndexedDB — kept out of recipe data / localStorage
+  const form     = document.getElementById('recipe-editor-form');
+  const imgUrl   = form?.querySelector('#editor-image-url')?.value.trim();
+  if (imgUrl) ImageStore.set(id, imgUrl);
   closeModal('modal-recipe-editor');
   View.editingId = null;
   renderRecipes();
@@ -1161,6 +1164,12 @@ async function fetchAndScrapeUrl() {
 
     // Success — open editor pre-filled
     closeModal('modal-url-import');
+    // If recipe has an image URL, store it to IndexedDB for display
+    if (recipe.image) {
+      const tempId = '_scrape_preview';
+      ImageStore.set(tempId, recipe.image);
+      recipe._scrapeImageUrl = recipe.image;
+    }
     openRecipeEditor(null, recipe);
 
   } catch(e) {
