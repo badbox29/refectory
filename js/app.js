@@ -1187,6 +1187,150 @@ function wireShoppingAddInput() {
   addInput?.addEventListener('keydown', e => { if (e.key === 'Enter') addManualItem(); });
 }
 
+
+// ─── Smart ingredient merging for shopping list ────────────────────
+
+const UNICODE_FRACTIONS = {
+  '¼': 0.25, '½': 0.5, '¾': 0.75,
+  '⅓': 1/3, '⅔': 2/3,
+  '⅕': 0.2, '⅖': 0.4, '⅗': 0.6, '⅘': 0.8,
+  '⅙': 1/6, '⅚': 5/6,
+  '⅛': 0.125, '⅜': 0.375, '⅝': 0.625, '⅞': 0.875,
+};
+
+const UNIT_ALIASES = {
+  cup:   ['cup', 'cups', 'c'],
+  tbsp:  ['tbsp', 'tbsps', 'tablespoon', 'tablespoons', 'tb', 'tbs'],
+  tsp:   ['tsp', 'tsps', 'teaspoon', 'teaspoons'],
+  oz:    ['oz', 'ozs', 'ounce', 'ounces'],
+  lb:    ['lb', 'lbs', 'pound', 'pounds', 'lb.'],
+  g:     ['g', 'gram', 'grams'],
+  kg:    ['kg', 'kilogram', 'kilograms'],
+  ml:    ['ml', 'milliliter', 'milliliters'],
+  l:     ['l', 'liter', 'liters'],
+  pinch: ['pinch', 'pinches'],
+  clove: ['clove', 'cloves'],
+  can:   ['can', 'cans'],
+  slice: ['slice', 'slices'],
+};
+
+const UNIT_LOOKUP = (() => {
+  const lookup = {};
+  for (const [canon, variants] of Object.entries(UNIT_ALIASES)) {
+    for (const v of variants) lookup[v.toLowerCase()] = canon;
+  }
+  return lookup;
+})();
+
+function parseQuantityFromString(str) {
+  str = str.trim();
+  // Convert "1½" style mixed unicode fractions, then standalone unicode fractions
+  for (const [frac, val] of Object.entries(UNICODE_FRACTIONS)) {
+    str = str.replace(new RegExp(`(\\d+)\\s*${frac}`, 'g'), (m, whole) => String(parseInt(whole) + val));
+    str = str.replace(new RegExp(frac, 'g'), String(val));
+  }
+  const m = str.match(/^(\d+\s+\d+\/\d+|\d+\/\d+|\d+\.\d+|\d+)/);
+  if (!m) return null;
+  const numStr = m[1];
+  let value;
+  if (numStr.includes('/')) {
+    const parts = numStr.split(/\s+/);
+    if (parts.length === 2) {
+      const [num, den] = parts[1].split('/').map(Number);
+      value = parseInt(parts[0]) + num / den;
+    } else {
+      const [num, den] = numStr.split('/').map(Number);
+      value = num / den;
+    }
+  } else {
+    value = parseFloat(numStr);
+  }
+  return { value, rest: str.slice(m[0].length).trim() };
+}
+
+// Parse a free-text ingredient line into { quantity, unit, name }
+function parseIngredientForMerge(line) {
+  if (typeof line !== 'string') return { quantity: null, unit: null, name: String(line || '') };
+  const qty = parseQuantityFromString(line);
+  if (!qty) return { quantity: null, unit: null, name: line.trim() };
+
+  const restWords = qty.rest.split(/\s+/);
+  const firstWord = (restWords[0] || '').toLowerCase().replace(/[.,]/g, '');
+  const unit = UNIT_LOOKUP[firstWord] || null;
+
+  if (unit) {
+    return { quantity: qty.value, unit, name: restWords.slice(1).join(' ').trim() };
+  }
+  return { quantity: qty.value, unit: null, name: qty.rest };
+}
+
+// Strip prep descriptors so "garlic, minced" groups with "garlic"
+function normalizeIngredientName(name) {
+  return name
+    .toLowerCase()
+    .replace(/,.*$/, '')
+    .replace(/\b(finely|roughly|coarsely|thinly|freshly)\b/g, '')
+    .replace(/\b(diced|minced|chopped|sliced|crushed|grated|peeled|halved|quartered|melted|softened|divided)\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function decimalToFraction(val) {
+  const whole = Math.floor(val);
+  const frac  = val - whole;
+  const map = [
+    [0.125, '⅛'], [0.25, '¼'], [1/3, '⅓'], [0.375, '⅜'],
+    [0.5, '½'], [0.625, '⅝'], [2/3, '⅔'], [0.75, '¾'], [0.875, '⅞'],
+  ];
+  if (frac < 0.02) return String(whole || 0);
+  let closest = map[0], minDiff = Math.abs(frac - closest[0]);
+  for (const f of map) {
+    const diff = Math.abs(frac - f[0]);
+    if (diff < minDiff) { minDiff = diff; closest = f; }
+  }
+  if (minDiff > 0.015) return val.toFixed(2).replace(/\.?0+$/, '').replace(/^0\./, '.');
+  return whole ? `${whole}${closest[1]}` : closest[1];
+}
+
+// Merge a flat list of { text, from } ingredient entries into consolidated lines.
+// Returns [{ key, displayName, summary, sources: [recipeTitle, ...] }]
+function mergeShoppingIngredients(entries) {
+  const groups = {}; // "unit::normalizedName" → group
+
+  for (const { text, from } of entries) {
+    const parsed = parseIngredientForMerge(text);
+    const groupName = normalizeIngredientName(parsed.name) || parsed.name.toLowerCase().trim();
+    if (!groupName) continue;
+    const key = `${parsed.unit || 'none'}::${groupName}`;
+
+    if (!groups[key]) {
+      groups[key] = {
+        key, unit: parsed.unit, displayName: parsed.name,
+        totalQty: 0, hasQty: false, sources: new Set(),
+      };
+    }
+    if (parsed.quantity != null) { groups[key].totalQty += parsed.quantity; groups[key].hasQty = true; }
+    if (from) groups[key].sources.add(from);
+  }
+
+  return Object.values(groups).map(g => {
+    const sources = [...g.sources];
+    let summary;
+    if (g.hasQty) {
+      const qtyStr = Number.isInteger(g.totalQty) ? String(g.totalQty) : decimalToFraction(g.totalQty);
+      summary = g.unit ? `${qtyStr} ${g.unit}` : qtyStr;
+    } else {
+      summary = '';
+    }
+    return {
+      key: g.key,
+      name: g.displayName,
+      summary,
+      sources,
+    };
+  }).sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function renderShoppingList() {
   const container = document.getElementById('shopping-list-content');
   if (!container) return;
@@ -1216,21 +1360,27 @@ function renderShoppingList() {
     return;
   }
 
-  // Aggregate ingredients
-  const agg = {};
+  // Collect raw ingredient lines with their source recipe
+  const rawEntries = [];
   for (const rid of recipeIds) {
     const r = getRecipe(rid);
     if (!r) continue;
     for (const rawIng of (r.ingredients || [])) {
-      const ing = typeof rawIng === 'string'
-        ? { name: rawIng, amount: '', unit: '' }
-        : rawIng;
-      if (!ing.name) continue;
-      const key = ing.name.toLowerCase().trim();
-      if (!agg[key]) agg[key] = { name: ing.name, entries: [], key };
-      agg[key].entries.push({ amount: ing.amount, unit: ing.unit, from: r.title });
+      const text = typeof rawIng === 'string' ? rawIng : ingredientText(rawIng);
+      if (text?.trim()) rawEntries.push({ text: text.trim(), from: r.title });
     }
   }
+
+  // Smart-merge: combines matching quantities/units, groups by ingredient name
+  const merged = mergeShoppingIngredients(rawEntries);
+  const agg = {};
+  merged.forEach(m => {
+    agg[m.key] = {
+      name: m.name,
+      key: m.key,
+      entries: [{ amount: m.summary, unit: '', from: m.sources.join(', ') }],
+    };
+  });
 
   // Unchecked items first (alphabetical), checked items at bottom (alphabetical)
   const all       = Object.values(agg);
@@ -1275,9 +1425,12 @@ function renderShoppingList() {
 
       <!-- Recipe items: unchecked -->
       ${unchecked.map(item => {
-        const summary = item.entries.map(e =>
-          [e.amount, e.unit, e.name].filter(Boolean).join(' ')
-        ).join(' + ');
+        const e = item.entries[0] || {};
+        const sourceList = e.from || '';
+        const sourceLabel = sourceList.split(', ').length > 2
+          ? `${sourceList.split(', ').slice(0, 2).join(', ')} +${sourceList.split(', ').length - 2} more`
+          : sourceList;
+        const summary = [e.amount, sourceLabel ? `(${sourceLabel})` : ''].filter(Boolean).join(' ');
         return `
           <li class="shopping-item" data-key="${esc(item.key)}">
             <label class="shopping-check">
@@ -1295,9 +1448,12 @@ function renderShoppingList() {
 
       <!-- Recipe items: checked -->
       ${checked.map(item => {
-        const summary = item.entries.map(e =>
-          [e.amount, e.unit, e.name].filter(Boolean).join(' ')
-        ).join(' + ');
+        const e = item.entries[0] || {};
+        const sourceList = e.from || '';
+        const sourceLabel = sourceList.split(', ').length > 2
+          ? `${sourceList.split(', ').slice(0, 2).join(', ')} +${sourceList.split(', ').length - 2} more`
+          : sourceList;
+        const summary = [e.amount, sourceLabel ? `(${sourceLabel})` : ''].filter(Boolean).join(' ');
         return `
           <li class="shopping-item is-checked" data-key="${esc(item.key)}">
             <label class="shopping-check">
