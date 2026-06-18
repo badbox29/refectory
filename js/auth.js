@@ -1139,13 +1139,31 @@ const Auth = (() => {
     const statusEl    = document.getElementById('auth-upgrade-status');
     const googleCtr   = document.getElementById('auth-upgrade-google-container');
 
-    // CRITICAL: capture oldToken NOW before signInWithGoogle runs.
-    // handleGoogleCredential overwrites getData().userToken with "google:<sub>".
-    // Reading it inside the .then() callback gives the Google key, not the token.
+    // Capture oldToken before any Google auth runs — it gets overwritten later.
     const oldToken = getData().userToken;
 
-    signInWithGoogle(googleCtr).then(async result => {
-      if(!result?.ok) {
+    // Use a raw GIS credential capture rather than signInWithGoogle() to avoid
+    // handleGoogleCredential() creating a new Google-keyed account (or pushing
+    // authMethod:google to the worker) before the /auth/migrate call completes.
+    // That race caused a 409 "account already exists" error on the migrate endpoint.
+    const idTokenPromise = new Promise((resolve) => {
+      google.accounts.id.initialize({
+        client_id:   C.googleClientId,
+        auto_select: false,
+        callback: (response) => {
+          google.accounts.id.cancel();
+          resolve(response?.credential || null);
+        },
+      });
+      google.accounts.id.renderButton(googleCtr, {
+        theme: 'filled_black', size: 'large',
+        width: googleCtr.offsetWidth || 280,
+        text: 'continue_with', locale: 'en', ux_mode: 'popup',
+      });
+    });
+
+    idTokenPromise.then(async (idToken) => {
+      if (!idToken) {
         statusEl.style.color = 'var(--red, #c07070)';
         statusEl.textContent = 'Sign-in cancelled — try again.';
         googleCtr.style.opacity = '1';
@@ -1154,11 +1172,9 @@ const Auth = (() => {
       }
 
       const base        = workerBase();
-      const idToken     = store.get(C.storageAuthKey);
       const migrateBody = JSON.stringify({ idToken, oldToken });
-      // Sign with the OLD token via HMAC — must use _signRequest directly because
-      // by this point authMethod may already be 'google' and _authHeaders would
-      // send a Bearer token instead, which the migrate endpoint doesn't accept.
+      // Sign with oldToken via HMAC directly — not _authHeaders which checks
+      // account type and could send Bearer if authMethod has changed.
       const hmacHdrs    = await _signRequest('POST', oldToken, migrateBody).catch(() => ({}));
       statusEl.style.color = 'var(--gold2, #b8985a)';
       statusEl.textContent = 'Migrating account…';
@@ -1172,6 +1188,8 @@ const Auth = (() => {
         const data = await res.json();
         if(!res.ok || !data.ok) throw new Error(data.error || 'Migration failed');
 
+        // Migration succeeded — now update local state and store the idToken
+        store.set(C.storageAuthKey, idToken);
         const d = getData();
         d.authMethod   = 'google';
         d.linkedGoogle = data.profile;
@@ -1181,7 +1199,7 @@ const Auth = (() => {
 
         C.closeModal('modal-account-setup');
         C.toast('Account upgraded to Google sign-in ✓');
-        C.onSignedIn(d, false); // false = existing account — triggers loadEntries/render
+        C.onSignedIn(d, false);
       } catch(err) {
         statusEl.style.color = 'var(--red, #c07070)';
         statusEl.textContent = `Migration failed: ${err.message}`;
