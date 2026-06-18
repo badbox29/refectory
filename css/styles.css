@@ -207,12 +207,10 @@ a:hover { text-decoration: underline; }
   border-top: 1px solid rgba(255,255,255,.1);
   display: flex;
   gap: 0;
-  overflow-x: auto;
 }
 
 .nav-btn {
   flex: 1;
-  min-width: 90px;
   background: transparent;
   border: none;
   color: rgba(255,255,255,.65);
