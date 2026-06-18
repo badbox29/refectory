@@ -146,6 +146,15 @@ a:hover { text-decoration: underline; }
   color: var(--saffron-pale);
 }
 
+.app-name .app-version {
+  font-size: .62rem;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: rgba(255,255,255,.45);
+  vertical-align: super;
+  margin-left: .1rem;
+}
+
 .header-right {
   display: flex;
   align-items: center;
