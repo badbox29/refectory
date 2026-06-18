@@ -955,6 +955,12 @@ textarea.input { resize: vertical; min-height: 80px; }
   overflow: hidden;
   margin-bottom: 1rem;
 }
+.settings-danger-zone {
+  border-top: 1px solid rgba(180,70,70,.25);
+  margin-top: .5rem;
+  padding-top: .25rem;
+}
+
 .settings-section-header {
   background: var(--cream);
   padding: .55rem .85rem;
