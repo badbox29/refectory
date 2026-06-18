@@ -530,6 +530,15 @@ function openRecipeDetail(id) {
   document.getElementById('detail-title').textContent       = r.title || '';
   document.getElementById('detail-description').textContent = r.description || '';
   document.getElementById('detail-servings').textContent    = r.servings ? `Serves ${r.servings}` : '';
+  const mtEl = document.getElementById('detail-meal-type');
+  if (mtEl) {
+    if (r.mealType) {
+      mtEl.innerHTML = `<span class="meal-type-badge meal-type-${esc(r.mealType)}">${esc(r.mealType.charAt(0).toUpperCase() + r.mealType.slice(1))}</span>`;
+    } else {
+      mtEl.textContent = '';
+    }
+  }
+
   const lcEl = document.getElementById('detail-last-cooked');
   if (lcEl) {
     if (r.lastCooked) {
@@ -710,6 +719,8 @@ function openRecipeEditor(id = null, prefill = null) {
   form.querySelector('#editor-description').value = recipe.description || '';
   form.querySelector('#editor-servings').value    = recipe.servings    || '';
   initStarInput(form.querySelector('#editor-rating'), recipe.rating || 0);
+  const mealTypeEl = form.querySelector('#editor-meal-type');
+  if (mealTypeEl) mealTypeEl.value = recipe.mealType || '';
   form.querySelector('#editor-tags').value        = (recipe.tags || []).join(', ');
   form.querySelector('#editor-source').value      = recipe.source      || '';
   form.querySelector('#editor-source-url').value  = recipe.sourceUrl   || '';
@@ -782,6 +793,7 @@ function collectEditorData() {
     description: form.querySelector('#editor-description').value.trim(),
     servings:    parseInt(form.querySelector('#editor-servings').value) || null,
     rating:      parseInt(form.querySelector('#editor-rating')?.dataset.rating) || 0,
+    mealType:    form.querySelector('#editor-meal-type')?.value || '',
     tags,
     source:      form.querySelector('#editor-source').value.trim(),
     sourceUrl:   form.querySelector('#editor-source-url').value.trim(),
@@ -837,18 +849,35 @@ function pickRandomRecipe(excludeIds = []) {
 }
 
 function suggestRandomMealSlot(weekKey, dayIdx, slot) {
-  // Exclude recipes already planned this week to avoid repeats
+  // Exclude recipes already planned this week
   const plan = getWeekPlan(weekKey);
   const usedIds = [];
   for (const day of Object.values(plan)) {
     for (const rid of Object.values(day)) { if (rid) usedIds.push(rid); }
   }
-  const recipe = pickRandomRecipe(usedIds);
-  if (!recipe) { showToast('No recipes available to suggest.'); return; }
+
+  const allRecipes = Object.values(App.data.recipes || {});
+
+  // Prefer recipes whose mealType matches this slot
+  const matching = allRecipes.filter(r =>
+    !usedIds.includes(r.id) && r.mealType === slot
+  );
+  // Fall back to untyped recipes if no matches
+  const untyped = allRecipes.filter(r =>
+    !usedIds.includes(r.id) && !r.mealType
+  );
+  // Last resort — any recipe not already used
+  const fallback = allRecipes.filter(r => !usedIds.includes(r.id));
+
+  const pool = matching.length ? matching : untyped.length ? untyped : fallback;
+  if (!pool.length) { showToast('No recipes available to suggest.'); return; }
+
+  const recipe = pool[Math.floor(Math.random() * pool.length)];
   setMealSlot(weekKey, dayIdx, slot, recipe.id);
   if (isMobilePlanner()) renderPlannerMobile();
   else renderPlanner();
-  showToast(`🎲 Suggested: ${recipe.title}`);
+  const source = matching.length ? '' : untyped.length ? ' (untyped)' : ' (any)';
+  showToast(`🎲 Suggested: ${recipe.title}${source}`);
 }
 
 function setMealSlot(weekKey, dayIdx, slot, recipeId) {
@@ -2262,6 +2291,15 @@ async function importFromMealieBackup(file, embedImages) {
     (r2c[rid] || []).forEach(cid => { if (catMap[cid]) recipeTags.push(catMap[cid]); });
     const tags = [...new Set(recipeTags)];
 
+    // Auto-detect mealType from tags/categories
+    const mealKeywords = { breakfast: ['breakfast','brunch','morning'], lunch: ['lunch','midday'], dinner: ['dinner','supper','main course','entree','entrée'], snack: ['snack','appetizer','side','dessert','treat'] };
+    let mealType = '';
+    outer: for (const [type, keywords] of Object.entries(mealKeywords)) {
+      for (const tag of recipeTags) {
+        if (keywords.some(kw => tag.toLowerCase().includes(kw))) { mealType = type; break outer; }
+      }
+    }
+
     // Description + notes
     let description = (r.description || '').trim();
     (notesByRecipe[rid] || []).forEach(n => {
@@ -2312,6 +2350,7 @@ ${t}`;
         source:      r.org_url      || '',
         sourceUrl:   r.org_url      || '',
         tags, ingredients, steps,
+        mealType: mealType || existing.mealType || '',
         importedFrom: 'mealie-backup',
         updatedAt:   Date.now(),
       });
@@ -2327,7 +2366,7 @@ ${t}`;
         totalTime:   r.total_time   || '',
         source:      r.org_url      || '',
         sourceUrl:   r.org_url      || '',
-        tags, ingredients, steps,
+        tags, ingredients, steps, mealType,
         importedFrom: 'mealie-backup',
         createdAt:   Date.now(),
         updatedAt:   Date.now(),
