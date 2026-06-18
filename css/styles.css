@@ -1741,3 +1741,124 @@ body.modal-open { overflow: hidden; }
   color: #3a3a2a;
   white-space: pre-wrap;
 }
+
+/* ── Mobile planner (single-day view) ───────────────────────── */
+.planner-day-tabs {
+  display: none; /* shown via JS on mobile */
+  gap: .3rem;
+  padding: .5rem 0 .25rem;
+  overflow-x: hidden;
+}
+
+.planner-day-tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: .1rem;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: .35rem .2rem;
+  cursor: pointer;
+  position: relative;
+  transition: border-color .12s;
+}
+.planner-day-tab.active {
+  border-bottom-color: var(--saffron, #d4a832);
+}
+.planner-day-tab-name {
+  font-size: .72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--muted);
+  letter-spacing: .05em;
+}
+.planner-day-tab.active .planner-day-tab-name { color: var(--ink); }
+.planner-day-tab-date {
+  font-size: .8rem;
+  color: var(--ink-mid);
+  font-weight: 500;
+}
+.planner-day-tab-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--green-mid);
+  position: absolute;
+  bottom: 4px;
+}
+
+.planner-mobile-date-label {
+  font-size: .8rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  padding: .5rem 0 .75rem;
+}
+
+.planner-mobile-slot {
+  display: flex;
+  flex-direction: column;
+  gap: .35rem;
+  margin-bottom: .85rem;
+}
+.planner-mobile-slot-label {
+  font-size: .7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  color: var(--green-mid);
+}
+.planner-mobile-slot-content {
+  min-height: 64px;
+}
+
+/* Mobile recipe card — wider, landscape-ish */
+.plan-recipe-mobile {
+  aspect-ratio: unset !important;
+  height: 90px;
+  flex-direction: row !important;
+}
+.plan-recipe-mobile .plan-recipe-img,
+.plan-recipe-mobile .plan-recipe-img-placeholder {
+  width: 90px;
+  flex-shrink: 0;
+  position: relative;
+  height: 100%;
+  border-radius: var(--r-sm) 0 0 var(--r-sm);
+}
+.plan-recipe-mobile .plan-recipe-title {
+  position: relative;
+  background: none;
+  color: var(--ink);
+  font-size: .85rem;
+  padding: .5rem .75rem;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  -webkit-line-clamp: unset;
+}
+
+/* Mobile add button — full width */
+.plan-add-mobile {
+  width: 100%;
+  height: 56px;
+  border: 2px dashed var(--border);
+  border-radius: var(--r-md);
+  background: none;
+  color: var(--muted);
+  font-size: .85rem;
+  cursor: pointer;
+  transition: border-color .12s, color .12s;
+}
+.plan-add-mobile:hover {
+  border-color: var(--green-soft);
+  color: var(--green-mid);
+}
+
+@media (max-width: 640px) {
+  .planner-day-tabs { display: flex; }
+  .planner-table-wrap { display: none; }
+}
