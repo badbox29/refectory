@@ -1086,3 +1086,204 @@ body.modal-open { overflow: hidden; }
   .modal { border-radius: var(--r-md); }
   .modal-overlay { padding: 1rem .5rem; }
 }
+
+/* ── Print styles ────────────────────────────────────────────── */
+
+/* Hide print area on screen */
+#print-area { display: none; }
+
+@media print {
+  /* Hide absolutely everything on screen */
+  body > *:not(#print-area) { display: none !important; }
+  #print-area { display: block !important; }
+
+  /* Page setup — recipe card portrait */
+  @page {
+    size: letter portrait;
+    margin: .6in .65in .5in .65in;
+  }
+
+  /* Reset */
+  * { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body { background: #fff; margin: 0; padding: 0; }
+
+  /* Card */
+  .print-card {
+    font-family: Georgia, 'Times New Roman', serif;
+    color: #1a1a14;
+    max-width: 100%;
+  }
+
+  /* Header: title + image side by side */
+  .print-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: .75rem;
+    margin-bottom: .35rem;
+  }
+  .print-header-text { flex: 1; min-width: 0; }
+
+  .print-title {
+    font-family: Georgia, serif;
+    font-size: 22pt;
+    font-weight: bold;
+    color: #2d3d1e;
+    line-height: 1.2;
+    margin: 0 0 .2rem;
+  }
+
+  .print-tags {
+    font-family: Arial, sans-serif;
+    font-size: 7.5pt;
+    color: #6b7a52;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    margin-bottom: .15rem;
+  }
+
+  .print-source {
+    font-family: Arial, sans-serif;
+    font-size: 7pt;
+    color: #888;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .print-image {
+    width: 2.2in;
+    height: 1.6in;
+    object-fit: cover;
+    border-radius: 4px;
+    flex-shrink: 0;
+    border: 1px solid #ddd;
+  }
+
+  /* Meta row: time + servings chips */
+  .print-meta {
+    display: flex;
+    gap: .5rem;
+    flex-wrap: wrap;
+    margin-bottom: .3rem;
+  }
+  .print-meta-chip {
+    border: 1px solid #b5c49a;
+    border-radius: 3px;
+    padding: .1rem .45rem;
+    font-family: Arial, sans-serif;
+    font-size: 7.5pt;
+    color: #4a5e2e;
+    background: #f4f7ee;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: .05rem;
+  }
+  .print-meta-chip-label {
+    font-size: 6pt;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    color: #888;
+  }
+
+  /* Divider */
+  .print-rule {
+    border: none;
+    border-top: 1.5px solid #b5c49a;
+    margin: .3rem 0 .35rem;
+  }
+
+  /* Description */
+  .print-desc {
+    font-size: 8.5pt;
+    color: #4a4a3a;
+    line-height: 1.5;
+    font-style: italic;
+    margin-bottom: .35rem;
+  }
+
+  /* Two-column body */
+  .print-body {
+    display: grid;
+    grid-template-columns: 2.2in 1fr;
+    gap: .6rem;
+    align-items: start;
+  }
+
+  .print-section-title {
+    font-family: Arial, sans-serif;
+    font-size: 7pt;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: #6b7a52;
+    border-bottom: 1px solid #d0dbbf;
+    padding-bottom: .1rem;
+    margin-bottom: .25rem;
+  }
+
+  /* Ingredients */
+  .print-ingredients {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: .15rem;
+  }
+  .print-ingredients li {
+    font-size: 8.5pt;
+    line-height: 1.4;
+    padding: .1rem .2rem;
+    border-bottom: .5px solid #e8edd8;
+  }
+
+  /* Steps */
+  .print-steps {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    counter-reset: steps;
+    display: flex;
+    flex-direction: column;
+    gap: .3rem;
+  }
+  .print-steps li {
+    font-size: 8.5pt;
+    line-height: 1.45;
+    display: flex;
+    gap: .35rem;
+    counter-increment: steps;
+  }
+  .print-steps li::before {
+    content: counter(steps);
+    background: #4a6632;
+    color: #fff;
+    border-radius: 50%;
+    width: 14pt;
+    height: 14pt;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 6.5pt;
+    font-weight: bold;
+    margin-top: .05rem;
+    font-family: Arial, sans-serif;
+  }
+
+  /* Footer */
+  .print-footer {
+    margin-top: .5rem;
+    border-top: .5px solid #d0dbbf;
+    padding-top: .2rem;
+    text-align: right;
+  }
+  .print-logo {
+    font-family: Georgia, serif;
+    font-size: 7.5pt;
+    color: #6b7a52;
+    font-style: italic;
+  }
+}
