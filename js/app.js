@@ -1297,51 +1297,57 @@ function renderCookbookDetail(id) {
 // ── Add recipe to cookbook picker ────────────────────────────────
 
 function openCookbookPick(cookbookId) {
-  const cb       = getCookbook(cookbookId);
-  const existing = new Set(cb?.recipeIds || []);
-  const grid     = document.getElementById('cookbook-pick-grid');
-  const search   = document.getElementById('cookbook-pick-search');
+  const grid   = document.getElementById('cookbook-pick-grid');
+  const search = document.getElementById('cookbook-pick-search');
   if (!grid) return;
 
+  // Clear state from any previous open
+  grid.innerHTML = '';
+  if (search) search.value = '';
+
   function renderPick(q) {
+    const cb       = getCookbook(cookbookId);
+    const existing = new Set(cb?.recipeIds || []);
+    const g        = document.getElementById('cookbook-pick-grid');
+    if (!g) return;
+
     const recipes = getRecipes().filter(r =>
       !existing.has(r.id) &&
       (!q || r.title.toLowerCase().includes(q.toLowerCase()))
     );
-    grid.innerHTML = recipes.map(r => `
+
+    g.innerHTML = recipes.map(r => `
       <div class="pick-recipe-item" data-id="${esc(r.id)}">
         <div class="pick-img" data-pick-img="${esc(r.id)}">🍽️</div>
         <div class="pick-title">${esc(r.title)}</div>
       </div>`).join('');
 
-    grid.querySelectorAll('[data-pick-img]').forEach(async imgEl => {
+    g.querySelectorAll('[data-pick-img]').forEach(async imgEl => {
       const dataUrl = await ImageStore.get(imgEl.dataset.pickImg);
       if (dataUrl) { imgEl.style.backgroundImage = `url('${dataUrl}')`; imgEl.textContent = ''; }
     });
 
-    grid.querySelectorAll('.pick-recipe-item').forEach(item => {
+    g.querySelectorAll('.pick-recipe-item').forEach(item => {
       item.addEventListener('click', () => {
         const cb = getCookbook(cookbookId);
         if (cb && !cb.recipeIds.includes(item.dataset.id)) {
           cb.recipeIds.push(item.dataset.id);
-          existing.add(item.dataset.id);
           scheduleSave();
           renderCookbookDetail(cookbookId);
           renderCookbooks();
-          renderPick(search?.value || '');
+          const s = document.getElementById('cookbook-pick-search');
+          renderPick(s?.value || '');
         }
       });
     });
   }
 
-  // Reset search input cleanly to avoid stacking event listeners on repeated opens
+  // Wire search — remove old listener by replacing with a fresh handler via oninput
   if (search) {
-    const freshSearch = search.cloneNode(true);
-    freshSearch.value = '';
-    search.parentNode.replaceChild(freshSearch, search);
-    freshSearch.addEventListener('input', e => renderPick(e.target.value));
-    freshSearch.focus();
+    search.oninput = e => renderPick(e.target.value);
+    setTimeout(() => search.focus(), 50);
   }
+
   renderPick('');
   openModal('modal-cookbook-pick');
 }
