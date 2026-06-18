@@ -1071,8 +1071,11 @@ body.modal-open { overflow: hidden; }
 
 /* ── Print ───────────────────────────────────────────────────── */
 @media print {
-  .app-header, .app-nav, .section-header .btn, #shopping-print-btn { display: none !important; }
-  .shopping-list { border: none; }
+  body:not(.printing-recipe) .app-header,
+  body:not(.printing-recipe) .app-nav,
+  body:not(.printing-recipe) .section-header .btn,
+  body:not(.printing-recipe) #shopping-print-btn { display: none !important; }
+  body:not(.printing-recipe) .shopping-list { border: none; }
 }
 
 /* ── Responsive ──────────────────────────────────────────────── */
@@ -1096,6 +1099,28 @@ body.modal-open { overflow: hidden; }
   /* Hide absolutely everything on screen */
   body > *:not(#print-area) { display: none !important; }
   #print-area { display: block !important; }
+
+  /* Aggressively kill any source of extra height */
+  html, body {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  #print-area {
+    height: auto !important;
+    overflow: hidden !important;
+    page-break-after: avoid !important;
+    break-after: avoid !important;
+  }
+  .print-card {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+    page-break-after: avoid !important;
+    break-after: avoid !important;
+    overflow: hidden !important;
+  }
 
   /* Page setup — recipe card portrait */
   @page {
