@@ -859,14 +859,167 @@ function renderShoppingList() {
 
 // ─── Mealie import ────────────────────────────────────────────────
 
+
+// ─── Export ───────────────────────────────────────────────────────
+
+let _exportMode = null; // 'full' | 'images'
+
+function openExportModal() {
+  _exportMode = null;
+  document.getElementById('export-status').textContent = '';
+  document.getElementById('btn-export-go').disabled = true;
+  // Reset selection styles
+  ['export-opt-full', 'export-opt-images'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.style.borderColor = 'var(--border)';
+      el.style.background  = '';
+    }
+  });
+  openModal('modal-export');
+}
+
+function selectExportMode(mode) {
+  _exportMode = mode;
+  ['full', 'images'].forEach(m => {
+    const el = document.getElementById(`export-opt-${m}`);
+    if (!el) return;
+    const active = m === mode;
+    el.style.borderColor = active ? 'var(--green-mid)' : 'var(--border)';
+    el.style.background  = active ? 'rgba(107,140,90,.08)' : '';
+  });
+  document.getElementById('btn-export-go').disabled = false;
+  document.getElementById('export-status').textContent = '';
+}
+
+async function runExport() {
+  if (!_exportMode) return;
+  const statusEl = document.getElementById('export-status');
+  const btn      = document.getElementById('btn-export-go');
+  btn.disabled   = true;
+  btn.textContent = 'Building…';
+
+  try {
+    const zip  = new JSZip();
+    const date = new Date().toISOString().slice(0, 10);
+
+    if (_exportMode === 'full') {
+      // recipes.json — all recipe data, no images
+      const recipes = Object.fromEntries(
+        Object.entries(App.data.recipes || {}).map(([id, r]) => {
+          const { image: _img, ...rest } = r;
+          return [id, rest];
+        })
+      );
+      zip.file('recipes.json', JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), recipes }, null, 2));
+      statusEl.textContent = 'Adding recipe data…';
+    }
+
+    // Images — always included in full, only thing in images-only
+    statusEl.textContent = 'Collecting images…';
+    const imgFolder = zip.folder('images');
+    const ids = Object.keys(App.data.recipes || {});
+    let imgCount = 0;
+    for (const id of ids) {
+      const dataUrl = await ImageStore.get(id);
+      if (!dataUrl) continue;
+      // dataUrl is "data:image/webp;base64,{b64}" — extract the raw base64
+      const b64 = dataUrl.split(',')[1];
+      if (b64) { imgFolder.file(`${id}.webp`, b64, { base64: true }); imgCount++; }
+    }
+
+    statusEl.textContent = 'Compressing…';
+    const blob     = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+    const filename = _exportMode === 'full'
+      ? `refectory-backup-${date}.zip`
+      : `refectory-images-${date}.zip`;
+
+    // Trigger download
+    const url = URL.createObjectURL(blob);
+    const a   = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+
+    const recipeCount = Object.keys(App.data.recipes || {}).length;
+    statusEl.style.color = 'var(--green-mid)';
+    statusEl.textContent = _exportMode === 'full'
+      ? `✓ Exported ${recipeCount} recipes and ${imgCount} images`
+      : `✓ Exported ${imgCount} images`;
+
+  } catch (e) {
+    statusEl.style.color = 'var(--red)';
+    statusEl.textContent = `Export failed: ${e.message}`;
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = 'Download';
+  }
+}
+
+// ─── Refectory backup import ──────────────────────────────────────
+
+async function importFromRefectoryBackup(file) {
+  const statusEl = document.getElementById('mealie-import-status');
+  const status   = (msg, err) => {
+    if (statusEl) { statusEl.textContent = msg; statusEl.style.color = err ? 'var(--red)' : ''; }
+  };
+
+  status('Reading zip…');
+  let zip;
+  try { zip = await JSZip.loadAsync(file); }
+  catch (e) { return { ok: false, error: `Could not read zip: ${e.message}` }; }
+
+  const hasRecipes = !!zip.file('recipes.json');
+  const imgFiles   = Object.keys(zip.files).filter(n => n.startsWith('images/') && n.endsWith('.webp'));
+
+  if (!hasRecipes && !imgFiles.length) {
+    return { ok: false, error: 'Not a valid Refectory backup — no recipes.json or images found.' };
+  }
+
+  let recipeCount = 0, imgCount = 0;
+
+  // ── Restore recipe data ──────────────────────────────────────────
+  if (hasRecipes) {
+    status('Restoring recipes…');
+    try {
+      const text = await zip.file('recipes.json').async('string');
+      const { recipes } = JSON.parse(text);
+      if (recipes && typeof recipes === 'object') {
+        // Merge — don't wipe recipes already on device
+        App.data.recipes = { ...App.data.recipes, ...recipes };
+        recipeCount = Object.keys(recipes).length;
+      }
+    } catch (e) { return { ok: false, error: `recipes.json parse error: ${e.message}` }; }
+  }
+
+  // ── Restore images ───────────────────────────────────────────────
+  if (imgFiles.length) {
+    status(`Restoring ${imgFiles.length} images…`);
+    for (const path of imgFiles) {
+      try {
+        const id  = path.replace('images/', '').replace('.webp', '');
+        const b64 = await zip.file(path).async('base64');
+        await ImageStore.set(id, `data:image/webp;base64,${b64}`);
+        imgCount++;
+      } catch { /* skip bad image */ }
+    }
+  }
+
+  if (recipeCount) { scheduleSave(); }
+  return { ok: true, recipeCount, imgCount, hasRecipes };
+}
+
 function openMealieImport() {
   document.getElementById('mealie-json-input').value = '';
   document.getElementById('mealie-url-input').value  = '';
   document.getElementById('mealie-api-key').value    = '';
   document.getElementById('mealie-import-status').textContent = '';
-  document.getElementById('mealie-zip-input').value  = '';
-  // Remove any lingering import button from previous session
+  document.getElementById('mealie-zip-input').value   = '';
+  document.getElementById('refectory-zip-input').value = '';
+  // Remove any lingering import buttons from previous session
   document.getElementById('mealie-import-zip-btn')?.remove();
+  document.getElementById('refectory-import-btn')?.remove();
   setMealieDropZoneIdle();
   // Default to backup tab — most common full-import path
   switchMealieTab('backup');
@@ -874,8 +1027,8 @@ function openMealieImport() {
 }
 
 function switchMealieTab(tab) {
-  const panels = { backup: 'mealie-backup-panel', json: 'mealie-json-panel', api: 'mealie-api-panel' };
-  const btns   = { backup: 'mealie-tab-backup',   json: 'mealie-tab-json',   api: 'mealie-tab-api'   };
+  const panels = { backup: 'mealie-backup-panel', json: 'mealie-json-panel', api: 'mealie-api-panel', refectory: 'mealie-refectory-panel' };
+  const btns   = { backup: 'mealie-tab-backup',   json: 'mealie-tab-json',   api: 'mealie-tab-api',   refectory: 'mealie-tab-refectory'   };
   Object.entries(panels).forEach(([key, id]) => {
     const el = document.getElementById(id);
     if (el) el.style.display = key === tab ? '' : 'none';
@@ -947,6 +1100,65 @@ function parseMealieRecipe(raw) {
   };
 }
 
+
+// Called when user drops or selects a Refectory backup zip
+async function handleRefectoryZipFile(file) {
+  const dz     = document.getElementById('refectory-drop-zone');
+  const status = document.getElementById('mealie-import-status');
+
+  if (!file.name.endsWith('.zip')) {
+    if (status) { status.textContent = 'Please select a .zip file.'; status.style.color = 'var(--red)'; }
+    return;
+  }
+
+  if (dz) {
+    dz.style.borderColor = 'var(--green-mid)';
+    dz.innerHTML = `<div style="font-size:1.5rem;margin-bottom:.5rem;">✅</div>
+      <div style="font-size:.9rem;font-weight:600;">${file.name}</div>
+      <div style="font-size:.8rem;margin-top:.35rem;color:var(--muted);">${(file.size/1024/1024).toFixed(1)} MB — click Import to continue</div>`;
+  }
+  if (status) { status.textContent = ''; status.style.color = ''; }
+
+  const existing = document.getElementById('refectory-import-btn');
+  if (!existing && dz) {
+    const btn = document.createElement('button');
+    btn.id = 'refectory-import-btn';
+    btn.className = 'btn btn-primary w100';
+    btn.textContent = 'Import Refectory Backup';
+    btn.style.marginTop = '.75rem';
+    dz.parentElement.insertBefore(btn, dz.nextSibling);
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; btn.textContent = 'Importing…';
+      const result = await importFromRefectoryBackup(file);
+      btn.disabled = false; btn.textContent = 'Import Refectory Backup';
+      if (result.ok) {
+        renderAll();
+        closeModal('modal-mealie-import');
+        const parts = [];
+        if (result.recipeCount) parts.push(`${result.recipeCount} recipes`);
+        if (result.imgCount)    parts.push(`${result.imgCount} images`);
+        showToast(`✅ Imported ${parts.join(' and ')}`);
+      } else {
+        const s = document.getElementById('mealie-import-status');
+        if (s) { s.textContent = result.error; s.style.color = 'var(--red)'; }
+      }
+    });
+  } else if (existing) {
+    existing.onclick = async () => {
+      existing.disabled = true; existing.textContent = 'Importing…';
+      const result = await importFromRefectoryBackup(file);
+      existing.disabled = false; existing.textContent = 'Import Refectory Backup';
+      if (result.ok) {
+        renderAll();
+        closeModal('modal-mealie-import');
+        const parts = [];
+        if (result.recipeCount) parts.push(`${result.recipeCount} recipes`);
+        if (result.imgCount)    parts.push(`${result.imgCount} images`);
+        showToast(`✅ Imported ${parts.join(' and ')}`);
+      }
+    };
+  }
+}
 
 // Called when user drops or selects a zip file
 async function handleMealieZipFile(file) {
@@ -1405,6 +1617,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Import button
   document.getElementById('btn-import-mealie')?.addEventListener('click', openMealieImport);
+  document.getElementById('btn-export')?.addEventListener('click', openExportModal);
+
+  // Export modal — option selection and go button
+  document.getElementById('export-opt-full')?.addEventListener('click',   () => selectExportMode('full'));
+  document.getElementById('export-opt-images')?.addEventListener('click', () => selectExportMode('images'));
+  document.getElementById('btn-export-go')?.addEventListener('click', runExport);
+  document.getElementById('modal-export')?.querySelector('.modal-close')
+    ?.addEventListener('click', () => closeModal('modal-export'));
 
   // Editor form
   document.getElementById('btn-add-ingredient')?.addEventListener('click', () => {
@@ -1490,9 +1710,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Mealie import tabs
   // Mealie import tabs
-  document.getElementById('mealie-tab-backup')?.addEventListener('click', () => switchMealieTab('backup'));
-  document.getElementById('mealie-tab-json')?.addEventListener('click',   () => switchMealieTab('json'));
-  document.getElementById('mealie-tab-api')?.addEventListener('click',    () => switchMealieTab('api'));
+  document.getElementById('mealie-tab-backup')?.addEventListener('click',     () => switchMealieTab('backup'));
+  document.getElementById('mealie-tab-json')?.addEventListener('click',       () => switchMealieTab('json'));
+  document.getElementById('mealie-tab-api')?.addEventListener('click',        () => switchMealieTab('api'));
+  document.getElementById('mealie-tab-refectory')?.addEventListener('click',  () => switchMealieTab('refectory'));
 
   // Drop zone
   const dropZone = document.getElementById('mealie-drop-zone');
@@ -1512,6 +1733,28 @@ document.addEventListener('DOMContentLoaded', () => {
     dropZone.addEventListener('click', () => zipInput.click());
     zipInput.addEventListener('change', () => {
       if (zipInput.files[0]) handleMealieZipFile(zipInput.files[0]);
+    });
+  }
+
+  // Refectory backup drop zone
+  const refDz    = document.getElementById('refectory-drop-zone');
+  const refInput = document.getElementById('refectory-zip-input');
+  if (refDz && refInput) {
+    const highlight = () => { refDz.style.borderColor = 'var(--green-mid)'; refDz.style.background = 'rgba(107,140,90,.07)'; };
+    const unhighlight = () => { refDz.style.borderColor = ''; refDz.style.background = ''; };
+    refDz.addEventListener('dragover', e => { e.preventDefault(); highlight(); });
+    refDz.addEventListener('dragleave', unhighlight);
+    refDz.addEventListener('drop', e => {
+      e.preventDefault(); unhighlight();
+      const file = e.dataTransfer.files[0];
+      if (file) handleRefectoryZipFile(file);
+    });
+    refDz.addEventListener('click', () => refInput.click());
+    document.getElementById('refectory-browse-link')?.addEventListener('click', e => {
+      e.stopPropagation(); refInput.click();
+    });
+    refInput.addEventListener('change', () => {
+      if (refInput.files[0]) handleRefectoryZipFile(refInput.files[0]);
     });
   }
 
