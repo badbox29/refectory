@@ -963,8 +963,6 @@ textarea.input { resize: vertical; min-height: 80px; }
   .modal-md  { max-width: 100%; }
   .modal-lg  { max-width: 100%; }
 }
-
-.step-num {
   background: var(--green-deep);
   color: var(--cream);
   border-radius: 50%;
@@ -1178,15 +1176,126 @@ body.modal-open { overflow: hidden; }
 }
 
 /* ── Responsive ──────────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════
+   RESPONSIVE — Galaxy Fold 5 breakpoints
+   860px  = fold open / tablet
+   640px  = mid-range phones
+   420px  = fold closed (~370px viewport)
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── 860px: tablet / fold open ──────────────────────────────── */
+@media (max-width: 860px) {
+  /* Header — compress, hide Import/Export text labels */
+  .app-header { padding: 0 .75rem; }
+  .btn-header .btn-label { display: none; }
+  .app-name { font-size: 1rem; }
+
+  /* Nav — tighter */
+  .nav-btn { font-size: .68rem; padding: .5rem .4rem; gap: .2rem; }
+  .nav-icon { font-size: 1.1rem; }
+
+  /* Section header — allow wrapping */
+  .section-header { flex-wrap: wrap; gap: .5rem; }
+  #recipe-sort { width: 100%; order: 3; }
+
+  /* Recipe grid — 2 columns */
+  #recipe-grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+
+  /* Cookbooks grid */
+  .cookbooks-grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+
+  /* Planner table — smaller text */
+  #planner-table th,
+  #planner-table td { font-size: .72rem; padding: .3rem .2rem; }
+  .day-col { min-width: 80px; }
+
+  /* Detail modal two-col */
+  .detail-two-col { grid-template-columns: 1fr; }
+  .detail-scale-tab-row { flex-wrap: wrap; }
+}
+
+/* ── 640px: mid phones ──────────────────────────────────────── */
 @media (max-width: 640px) {
-  .app-main { padding: 1rem .85rem 2rem; }
-  .section-header { gap: .5rem; }
-  .section-title { font-size: 1.3rem; }
+  /* Layout */
+  .app-main { padding: 1rem .75rem 2rem; }
+
+  /* Header */
+  .app-name span { display: none; }   /* "Re" only — saves space */
+  .theme-toggle-btn { width: 22px; height: 22px; font-size: .75rem; }
+
+  /* Modals */
+  .modal { border-radius: var(--r-md); }
+  .modal-overlay { padding: .5rem .35rem; }
+  .modal-sm, .modal-md, .modal-lg, .modal-xl { max-width: 100%; }
+  .modal-body { padding: 1rem 1.1rem; }
+  .modal-header { padding: .85rem 1.1rem; }
+
+  /* Section header */
+  .section-title { font-size: 1.2rem; }
+  .section-header { flex-wrap: wrap; gap: .5rem; }
+  .search-bar { width: 100%; order: 2; }
+  #btn-new-recipe { order: 3; width: 100%; justify-content: center; }
+  #recipe-sort { order: 4; width: 100%; }
+
+  /* Recipe grid — 2 columns */
+  #recipe-grid { grid-template-columns: repeat(2, 1fr); gap: .65rem; }
+
+  /* Editor */
   .editor-two-col { grid-template-columns: 1fr; }
   .ingredient-row { grid-template-columns: 70px 70px 1fr auto; }
-  #recipe-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
-  .modal { border-radius: var(--r-md); }
-  .modal-overlay { padding: 1rem .5rem; }
+
+  /* Detail tabs row — stack scale above tabs */
+  .detail-scale-tab-row { flex-direction: column; align-items: flex-start; gap: .5rem; }
+  .detail-tabs { width: 100%; }
+  .detail-tab { flex: 1; text-align: center; }
+
+  /* Planner */
+  #planner-table { font-size: .7rem; }
+  .plan-cell { padding: .15rem; }
+  .day-col { min-width: 60px; }
+  .plan-recipe-title { font-size: .6rem; }
+
+  /* Shopping add row */
+  .shopping-add-row { flex-direction: column; }
+  .shopping-add-row .btn { width: 100%; justify-content: center; }
+
+  /* Cookbooks */
+  .cookbooks-grid { grid-template-columns: repeat(2, 1fr); gap: .65rem; }
+}
+
+/* ── 420px: fold closed / very narrow ───────────────────────── */
+@media (max-width: 420px) {
+  /* Header — absolute minimum */
+  .app-header { padding: 0 .4rem; }
+  .app-logo { width: 28px; height: 28px; }
+  .app-name { display: none; }
+  .btn-header { padding: .35rem .45rem; }
+  .theme-toggle { padding: .2rem .25rem; gap: .1rem; }
+  .theme-toggle-btn { width: 20px; height: 20px; font-size: .7rem; }
+
+  /* Nav — icon only */
+  .nav-btn { font-size: 0; padding: .5rem .3rem; }
+  .nav-icon { font-size: 1.2rem; display: block; }
+
+  /* Recipe grid — single column */
+  #recipe-grid { grid-template-columns: 1fr; }
+  .cookbooks-grid { grid-template-columns: 1fr; }
+
+  /* Section header */
+  #btn-new-recipe { font-size: .82rem; padding: .45rem .75rem; }
+
+  /* Modal */
+  .modal-overlay { padding: .35rem .2rem; }
+  .modal-body { padding: .85rem .9rem; }
+  .modal-header { padding: .75rem .9rem; }
+  .modal-footer { padding: .65rem .9rem; gap: .4rem; flex-wrap: wrap; }
+  .modal-footer .btn { flex: 1; justify-content: center; font-size: .8rem; }
+
+  /* Planner — hide labels, very compact */
+  .slot-label { display: none; }
+  #planner-table th { font-size: .65rem; padding: .2rem .1rem; }
+  .day-col { min-width: 46px; }
+  .plan-recipe-title { font-size: .55rem; padding: .6rem .2rem .2rem; }
 }
 
 
