@@ -2268,6 +2268,24 @@ body.modal-open { overflow: hidden; }
   border-color: var(--green-soft) !important;
 }
 
+/* Standalone entry point shown before any custom list exists */
+.shopping-new-list-link {
+  background: none;
+  border: 1px dashed var(--border);
+  border-radius: var(--r-sm);
+  color: var(--green-mid);
+  font-size: .8rem;
+  font-weight: 600;
+  padding: .35rem .8rem;
+  cursor: pointer;
+  margin-bottom: .65rem;
+  transition: border-color .12s, background .12s;
+}
+.shopping-new-list-link:hover {
+  border-color: var(--green-soft);
+  background: var(--cream-dark);
+}
+
 /* Caption hint above the list, explaining the pill-dropdown */
 .shopping-hint {
   font-size: .78rem;
