@@ -558,6 +558,21 @@ function applyBulkTag(mode) {
 }
 
 
+// Renders a small badge on a recipe card indicating why it matched the search.
+// Title matches are visually obvious (the title is right there), so we only
+// surface the less-obvious reasons: ingredients, description, or tags.
+function renderMatchPill(sources) {
+  const priority = [
+    ['ingredients', '🥕 Ingredient match'],
+    ['description', '📝 Description match'],
+    ['tags',        '🏷 Tag match'],
+  ];
+  for (const [key, label] of priority) {
+    if (sources.has(key)) return `<span class="match-pill">${label}</span>`;
+  }
+  return ''; // title-only match — no pill needed
+}
+
 function renderRecipes() {
   const grid   = document.getElementById('recipe-grid');
   const noRes  = document.getElementById('recipe-empty');
@@ -565,11 +580,19 @@ function renderRecipes() {
 
   let recipes = getRecipes();
   const q     = View.recipeSearch.toLowerCase();
-  if (q) recipes = recipes.filter(r =>
-    r.title?.toLowerCase().includes(q) ||
-    r.description?.toLowerCase().includes(q) ||
-    r.tags?.some(t => t.toLowerCase().includes(q))
-  );
+  const matchSources = {}; // recipeId -> Set of 'title'|'description'|'tags'|'ingredients'
+
+  if (q) {
+    recipes = recipes.filter(r => {
+      const sources = new Set();
+      if (r.title?.toLowerCase().includes(q)) sources.add('title');
+      if (r.description?.toLowerCase().includes(q)) sources.add('description');
+      if (r.tags?.some(t => t.toLowerCase().includes(q))) sources.add('tags');
+      if (r.ingredients?.some(i => ingredientText(i).toLowerCase().includes(q))) sources.add('ingredients');
+      if (sources.size) { matchSources[r.id] = sources; return true; }
+      return false;
+    });
+  }
   if (View.recipeTags.length) {
     recipes = recipes.filter(r => View.recipeTags.every(t => r.tags?.includes(t)));
   }
@@ -588,6 +611,7 @@ function renderRecipes() {
       ${View.selectMode ? `<div class="recipe-card-select-overlay"><input type="checkbox" class="recipe-select-cb" data-id="${esc(r.id)}" ${View.selectedRecipeIds.has(r.id) ? 'checked' : ''}/></div>` : ''}
       <div class="recipe-card-img" data-img-id="${esc(r.id)}">
         <div class="recipe-card-placeholder">🍽️</div>
+        ${q && matchSources[r.id] ? renderMatchPill(matchSources[r.id]) : ''}
       </div>
       <div class="recipe-card-body">
         <div class="recipe-card-title">${esc(r.title)}</div>
@@ -1060,6 +1084,70 @@ function updateScaledIngredients() {
 
 // ─── Recipe editor modal ──────────────────────────────────────────
 
+// ─── Duplicate recipe detection ────────────────────────────────────
+
+function normalizeTitleForCompare(t) {
+  return (t || '')
+    .toLowerCase()
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Token-overlap (Jaccard) similarity with a containment boost for
+// "X" vs "X Recipe" / "X Sandwich" style near-duplicates.
+function titleSimilarity(a, b) {
+  const na = normalizeTitleForCompare(a), nb = normalizeTitleForCompare(b);
+  if (!na || !nb) return 0;
+  if (na === nb) return 1;
+
+  const wordsA = new Set(na.split(' '));
+  const wordsB = new Set(nb.split(' '));
+  const intersection = [...wordsA].filter(w => wordsB.has(w)).length;
+  const union = new Set([...wordsA, ...wordsB]).size;
+  const jaccard = union ? intersection / union : 0;
+  const containment = na.includes(nb) || nb.includes(na) ? 0.25 : 0;
+
+  return Math.min(1, jaccard + containment);
+}
+
+const DUPLICATE_TITLE_THRESHOLD = 0.75;
+
+// Returns recipes already in the library whose title looks like a likely
+// duplicate of `title`. Excludes `excludeId` (used when editing an existing recipe).
+function findSimilarRecipes(title, excludeId = null) {
+  if (!title?.trim()) return [];
+  return Object.values(App.data.recipes || {})
+    .filter(r => r.id !== excludeId)
+    .map(r => ({ recipe: r, score: titleSimilarity(title, r.title) }))
+    .filter(m => m.score >= DUPLICATE_TITLE_THRESHOLD)
+    .sort((a, b) => b.score - a.score);
+}
+
+function renderDuplicateWarning(title, excludeId = null) {
+  const banner = document.getElementById('editor-duplicate-warning');
+  if (!banner) return;
+
+  const matches = findSimilarRecipes(title, excludeId);
+  if (!matches.length) { banner.style.display = 'none'; banner.innerHTML = ''; return; }
+
+  banner.style.display = '';
+  banner.innerHTML = `
+    <span class="dup-warning-icon">⚠️</span>
+    <span class="dup-warning-text">
+      ${matches.length === 1 ? 'A similar recipe already exists' : `${matches.length} similar recipes already exist`}:
+      ${matches.slice(0, 3).map(m => `<button type="button" class="dup-warning-link" data-id="${esc(m.recipe.id)}">${esc(m.recipe.title)}</button>`).join(', ')}
+    </span>
+  `;
+  banner.querySelectorAll('.dup-warning-link').forEach(btn => {
+    btn.addEventListener('click', () => {
+      closeModal('modal-recipe-editor');
+      openRecipeDetail(btn.dataset.id);
+    });
+  });
+}
+
+
 function openRecipeEditor(id = null, prefill = null) {
   const recipe = id ? (getRecipe(id) || {}) : (prefill || {});
   View.editingId = id;
@@ -1082,6 +1170,13 @@ function openRecipeEditor(id = null, prefill = null) {
   renderEditorSteps(recipe.steps || [{ text: '' }]);
 
   document.getElementById('modal-editor-title').textContent = id ? 'Edit Recipe' : 'New Recipe';
+
+  // Duplicate detection — check immediately (covers scraped/prefilled titles)
+  // and re-check live as the user types a title manually.
+  const titleInput = form.querySelector('#editor-title');
+  renderDuplicateWarning(titleInput.value, id);
+  titleInput.oninput = () => renderDuplicateWarning(titleInput.value, id);
+
   openModal('modal-recipe-editor');
 }
 
@@ -1681,6 +1776,46 @@ function mergeShoppingIngredients(entries) {
   }).sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// Builds and triggers the print-friendly shopping list view.
+// Only unchecked items are printed — checked items are already handled,
+// no need to clutter a paper list with things you already have.
+function printShoppingList(unchecked, checked, manualUnchecked, manualChecked) {
+  const subtitleEl = document.getElementById('print-shopping-subtitle');
+  const listEl     = document.getElementById('print-shopping-list');
+  if (!listEl) return;
+
+  const date = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  if (subtitleEl) subtitleEl.textContent = date;
+
+  // Combine recipe-derived and manual unchecked items into one alphabetical list
+  const combined = [
+    ...unchecked.map(item => ({
+      name: item.name,
+      detail: item.entries[0]?.amount || '',
+    })),
+    ...manualUnchecked.map(item => ({
+      name: item.name,
+      detail: '',
+    })),
+  ].sort((a, b) => a.name.localeCompare(b.name));
+
+  if (!combined.length) {
+    listEl.innerHTML = `<li class="print-shopping-empty">Nothing left to buy — list is all checked off!</li>`;
+  } else {
+    listEl.innerHTML = combined.map(item => `
+      <li class="print-shopping-item">
+        <span class="print-shopping-box"></span>
+        <span class="print-shopping-name">${esc(item.name)}</span>
+        ${item.detail ? `<span class="print-shopping-detail">${esc(item.detail)}</span>` : ''}
+      </li>`).join('');
+  }
+
+  document.body.classList.add('printing-shopping');
+  window.print();
+  document.body.classList.remove('printing-shopping');
+}
+
+
 function renderShoppingList() {
   const container = document.getElementById('shopping-list-content');
   if (!container) return;
@@ -1868,7 +2003,7 @@ function renderShoppingList() {
     renderShoppingList();
   });
 
-  document.getElementById('shopping-print-btn')?.addEventListener('click', () => window.print());
+  document.getElementById('shopping-print-btn')?.addEventListener('click', () => printShoppingList(unchecked, checked, manualUnchecked, manualChecked));
 }
 
 
