@@ -1964,15 +1964,32 @@ function gatherAllShoppingItems() {
 function buildShoppingPrintPage(title, subtitle, items, pillLabelFn = null) {
   const unchecked = items.filter(i => !i.checked).sort((a, b) => a.name.localeCompare(b.name));
 
-  const itemsHtml = unchecked.length
-    ? unchecked.map(item => `
-        <li class="print-shopping-item">
-          <span class="print-shopping-box"></span>
-          <span class="print-shopping-name">${esc(item.name)}</span>
-          ${item.detail ? `<span class="print-shopping-detail">${esc(item.detail)}</span>` : ''}
-          ${pillLabelFn ? `<span class="print-shopping-pill">${esc(pillLabelFn(item))}</span>` : ''}
-        </li>`).join('')
-    : `<li class="print-shopping-empty">Nothing here — list is empty or all checked off!</li>`;
+  const renderItem = (item) => `
+    <li class="print-shopping-item">
+      <span class="print-shopping-box"></span>
+      <span class="print-shopping-name">${esc(item.name)}</span>
+      ${item.detail ? `<span class="print-shopping-detail">${esc(item.detail)}</span>` : ''}
+      ${pillLabelFn ? `<span class="print-shopping-pill">${esc(pillLabelFn(item))}</span>` : ''}
+    </li>`;
+
+  let columnsHtml;
+  if (!unchecked.length) {
+    columnsHtml = `<ul class="print-shopping-list"><li class="print-shopping-empty">Nothing here — list is empty or all checked off!</li></ul>`;
+  } else if (unchecked.length <= 4) {
+    // Too few items to meaningfully split — one column reads cleaner
+    columnsHtml = `<ul class="print-shopping-list">${unchecked.map(renderItem).join('')}</ul>`;
+  } else {
+    // Split into two explicit columns (left fills first) so the dividing
+    // border between them always has real content on both sides to span.
+    const mid   = Math.ceil(unchecked.length / 2);
+    const left  = unchecked.slice(0, mid);
+    const right = unchecked.slice(mid);
+    columnsHtml = `
+      <div class="print-shopping-columns">
+        <ul class="print-shopping-list">${left.map(renderItem).join('')}</ul>
+        ${right.length ? `<ul class="print-shopping-list print-shopping-col-right">${right.map(renderItem).join('')}</ul>` : ''}
+      </div>`;
+  }
 
   return `
     <div class="print-shopping-card">
@@ -1980,7 +1997,7 @@ function buildShoppingPrintPage(title, subtitle, items, pillLabelFn = null) {
         <h1 class="print-shopping-title">${esc(title)}</h1>
         <div class="print-shopping-subtitle">${esc(subtitle)}</div>
       </div>
-      <ul class="print-shopping-list">${itemsHtml}</ul>
+      ${columnsHtml}
       <div class="print-footer"><span class="print-logo">🌿 Refectory</span></div>
     </div>`;
 }
