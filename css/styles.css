@@ -1238,10 +1238,11 @@ body.modal-open { overflow: hidden; }
   .print-shopping-list {
     list-style: none;
     margin: 0;
-    padding: 0;
+    padding: .15rem 0 .1rem;
     /* Two-column flow so a long list doesn't run off a single narrow column */
     column-count: 2;
     column-gap: 1.1rem;
+    column-rule: 0.75pt solid #c9d4b8;
   }
 
   .print-shopping-item {
