@@ -126,6 +126,7 @@
       <div class="section-header">
         <h1 class="section-title">Shopping List</h1>
       </div>
+      <div id="shopping-tabs" style="display:none;"></div>
       <div id="shopping-list-content"></div>
     </section>
 
@@ -797,6 +798,56 @@
   </div>
 </div>
 
+<!-- ── Shopping print mode modal ───────────────────────────── -->
+<div class="modal-overlay" id="modal-shopping-print" role="dialog" aria-modal="true">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <h2 class="modal-title">Print Shopping List</h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body" id="shopping-print-modal-body" style="display:flex;flex-direction:column;gap:.75rem;">
+      <button class="new-recipe-option" id="print-mode-default">
+        <span class="new-recipe-option-icon">📋</span>
+        <span>
+          <strong>Default list only</strong>
+          <span class="muted" style="display:block;font-size:.82rem;">Everything, regardless of store assignment</span>
+        </span>
+      </button>
+      <button class="new-recipe-option" id="print-mode-all">
+        <span class="new-recipe-option-icon">📚</span>
+        <span>
+          <strong>All lists</strong>
+          <span class="muted" style="display:block;font-size:.82rem;">Default list, then one page per store</span>
+        </span>
+      </button>
+      <button class="new-recipe-option" id="print-mode-specific">
+        <span class="new-recipe-option-icon">☑️</span>
+        <span>
+          <strong>Specific lists…</strong>
+          <span class="muted" style="display:block;font-size:.82rem;">Choose exactly which lists to print</span>
+        </span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Shopping specific-lists picker modal ────────────────── -->
+<div class="modal-overlay" id="modal-shopping-print-pick" role="dialog" aria-modal="true">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <h2 class="modal-title">Choose Lists to Print</h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="shopping-print-pick-list" class="bulk-cookbook-list"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modal-shopping-print-pick')">Cancel</button>
+      <button class="btn btn-primary" id="shopping-print-pick-confirm">Print Selected</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Toast ───────────────────────────────────────────────── -->
 <div id="toast"></div>
 
@@ -844,18 +895,8 @@
 </div>
 
 <!-- ── Shopping list print area ──────────────────────────────── -->
-<div id="shopping-print-area" aria-hidden="true">
-  <div class="print-shopping-card">
-    <div class="print-shopping-header">
-      <h1 class="print-shopping-title">Shopping List</h1>
-      <div class="print-shopping-subtitle" id="print-shopping-subtitle"></div>
-    </div>
-    <ul class="print-shopping-list" id="print-shopping-list"></ul>
-    <div class="print-footer">
-      <span class="print-logo">🌿 Refectory</span>
-    </div>
-  </div>
-</div>
+<!-- Populated dynamically by printShoppingList() with one .print-shopping-card per list -->
+<div id="shopping-print-area" aria-hidden="true"></div>
 
 </body>
 </html>
