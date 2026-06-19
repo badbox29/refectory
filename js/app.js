@@ -70,6 +70,11 @@ function defaultData() {
     mealplan:    {},
     // Cookbooks: { [id]: { id, name, description, recipeIds: [] } }
     cookbooks:   {},
+    // Shopping stores (custom lists): { [id]: { id, name, createdAt } }
+    shoppingStores: {},
+    // Item → store assignment: { [itemKey]: storeId }
+    // itemKey is the merge key for recipe-derived items, or the manual item's id
+    itemStoreAssignments: {},
     lastModified: Date.now(),
   };
 }
@@ -83,6 +88,8 @@ function mergeData(raw) {
     recipes:   (raw.recipes   && typeof raw.recipes   === 'object') ? raw.recipes   : d.recipes,
     mealplan:  (raw.mealplan  && typeof raw.mealplan  === 'object') ? raw.mealplan  : d.mealplan,
     cookbooks: (raw.cookbooks && typeof raw.cookbooks === 'object') ? raw.cookbooks : d.cookbooks,
+    shoppingStores: (raw.shoppingStores && typeof raw.shoppingStores === 'object') ? raw.shoppingStores : d.shoppingStores,
+    itemStoreAssignments: (raw.itemStoreAssignments && typeof raw.itemStoreAssignments === 'object') ? raw.itemStoreAssignments : d.itemStoreAssignments,
   };
 }
 
@@ -322,6 +329,7 @@ const View = {
   manualItems:   [],          // [{id, name, checked}] — manually added shopping items
   selectMode:        false,         // recipe bulk-select mode
   selectedRecipeIds: new Set(),     // recipe ids selected in bulk-select mode
+  activeShoppingTab: 'default',     // 'default' | a shoppingStores id
 };
 
 // ─── Navigation ───────────────────────────────────────────────────
@@ -1633,6 +1641,84 @@ function filterPickRecipes(q) {
 
 // ─── Shopping list ────────────────────────────────────────────────
 
+// ─── Shopping stores (custom lists) ────────────────────────────────
+
+function getShoppingStores() {
+  return Object.values(App.data.shoppingStores || {})
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+}
+
+function getShoppingStore(id) {
+  return App.data.shoppingStores?.[id] || null;
+}
+
+function createShoppingStore(name) {
+  const id = genId();
+  App.data.shoppingStores = App.data.shoppingStores || {};
+  App.data.shoppingStores[id] = { id, name, createdAt: Date.now() };
+  scheduleSave();
+  return id;
+}
+
+function deleteShoppingStore(id) {
+  if (!App.data.shoppingStores?.[id]) return;
+  delete App.data.shoppingStores[id];
+  // Any items assigned to this store fall back to Unassigned (default list)
+  for (const key of Object.keys(App.data.itemStoreAssignments || {})) {
+    if (App.data.itemStoreAssignments[key] === id) delete App.data.itemStoreAssignments[key];
+  }
+  if (View.activeShoppingTab === id) View.activeShoppingTab = 'default';
+  scheduleSave();
+}
+
+function getItemStore(itemKey) {
+  return App.data.itemStoreAssignments?.[itemKey] || '';
+}
+
+function setItemStore(itemKey, storeId) {
+  App.data.itemStoreAssignments = App.data.itemStoreAssignments || {};
+  if (storeId) App.data.itemStoreAssignments[itemKey] = storeId;
+  else delete App.data.itemStoreAssignments[itemKey];
+  scheduleSave();
+}
+
+// Renders the tab bar above the shopping list. Hidden entirely when no
+// custom stores exist yet — Default-only mode looks exactly like before.
+function renderShoppingTabs() {
+  const wrap = document.getElementById('shopping-tabs');
+  if (!wrap) return;
+
+  const stores = getShoppingStores();
+  if (!stores.length) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
+
+  wrap.style.display = '';
+  wrap.innerHTML = `
+    <div class="detail-tabs shopping-tabs-row">
+      <button class="detail-tab${View.activeShoppingTab === 'default' ? ' active' : ''}" data-tab="default">Default</button>
+      ${stores.map(s => `<button class="detail-tab${View.activeShoppingTab === s.id ? ' active' : ''}" data-tab="${esc(s.id)}">${esc(s.name)}</button>`).join('')}
+      <button class="detail-tab shopping-new-list-tab" id="shopping-new-list-btn" title="Create a new list">+ New List</button>
+    </div>
+  `;
+
+  wrap.querySelectorAll('.detail-tab[data-tab]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      View.activeShoppingTab = btn.dataset.tab;
+      renderShoppingList();
+    });
+  });
+
+  document.getElementById('shopping-new-list-btn')?.addEventListener('click', openNewShoppingListPrompt);
+}
+
+function openNewShoppingListPrompt() {
+  const name = prompt('Name this list (e.g. Kroger, Costco, Publix):');
+  const trimmed = name?.trim();
+  if (!trimmed) return;
+  const id = createShoppingStore(trimmed);
+  View.activeShoppingTab = id;
+  renderShoppingList();
+}
+
 function wireShoppingAddInput() {
   const addInput = document.getElementById('shopping-add-input');
   const addBtn   = document.getElementById('shopping-add-btn');
@@ -1795,46 +1881,148 @@ function mergeShoppingIngredients(entries) {
 // Builds and triggers the print-friendly shopping list view.
 // Only unchecked items are printed — checked items are already handled,
 // no need to clutter a paper list with things you already have.
-function printShoppingList(unchecked, checked, manualUnchecked, manualChecked) {
-  const subtitleEl = document.getElementById('print-shopping-subtitle');
-  const listEl     = document.getElementById('print-shopping-list');
-  if (!listEl) return;
+// ─── Shopping list printing ─────────────────────────────────────────
 
-  const date = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
-  if (subtitleEl) subtitleEl.textContent = date;
+function openShoppingPrintModal() {
+  openModal('modal-shopping-print');
+}
 
-  // Combine recipe-derived and manual unchecked items into one alphabetical list
-  const combined = [
-    ...unchecked.map(item => ({
-      name: item.name,
-      detail: item.entries[0]?.amount || '',
-    })),
-    ...manualUnchecked.map(item => ({
-      name: item.name,
-      detail: '',
-    })),
-  ].sort((a, b) => a.name.localeCompare(b.name));
+function openShoppingPrintPicker() {
+  closeModal('modal-shopping-print');
+  const stores = getShoppingStores();
+  const listEl = document.getElementById('shopping-print-pick-list');
 
-  if (!combined.length) {
-    listEl.innerHTML = `<li class="print-shopping-empty">Nothing left to buy — list is all checked off!</li>`;
-  } else {
-    listEl.innerHTML = combined.map(item => `
-      <li class="print-shopping-item">
-        <span class="print-shopping-box"></span>
-        <span class="print-shopping-name">${esc(item.name)}</span>
-        ${item.detail ? `<span class="print-shopping-detail">${esc(item.detail)}</span>` : ''}
-      </li>`).join('');
+  listEl.innerHTML = `
+    <label class="bulk-cookbook-row" style="cursor:pointer;">
+      <input type="checkbox" class="print-pick-cb" value="default" checked style="margin-right:.5rem;"/>
+      <span class="bulk-cookbook-name">Default list</span>
+    </label>
+    ${stores.map(s => `
+      <label class="bulk-cookbook-row" style="cursor:pointer;">
+        <input type="checkbox" class="print-pick-cb" value="${esc(s.id)}" style="margin-right:.5rem;"/>
+        <span class="bulk-cookbook-name">${esc(s.name)}</span>
+      </label>`).join('')}
+  `;
+
+  openModal('modal-shopping-print-pick');
+}
+
+// Gathers the full set of recipe-derived + manual items for the shopping
+// horizon (current + next week), independent of whatever tab is on screen.
+// This lets print modes pull "all lists" data even if you're viewing one
+// specific store tab when you open the print modal.
+function gatherAllShoppingItems() {
+  const weeks     = [View.currentWeek, addWeeks(View.currentWeek, 1)];
+  const recipeIds = new Set();
+  for (const wk of weeks) {
+    const plan = getWeekPlan(wk);
+    for (const day of Object.values(plan)) {
+      for (const rid of Object.values(day)) {
+        if (rid) recipeIds.add(rid);
+      }
+    }
   }
 
+  const rawEntries = [];
+  for (const rid of recipeIds) {
+    const r = getRecipe(rid);
+    if (!r) continue;
+    for (const rawIng of (r.ingredients || [])) {
+      const text = typeof rawIng === 'string' ? rawIng : ingredientText(rawIng);
+      if (text?.trim()) rawEntries.push({ text: text.trim(), from: r.title });
+    }
+  }
+
+  const merged = mergeShoppingIngredients(rawEntries);
+  const recipeItems = merged.map(m => ({
+    key: m.key,
+    name: m.name,
+    detail: m.summary,
+    checked: View.checkedItems.has(m.key),
+  }));
+
+  const manualItemsNorm = View.manualItems.map(i => ({
+    key: i.id,
+    name: i.name,
+    detail: '',
+    checked: i.checked,
+  }));
+
+  return { recipeItems, manualItems: manualItemsNorm, weekLabel: formatWeekLabel(weeks[0]) };
+}
+
+// Builds one print page (a .print-shopping-card) for a given list of items.
+// `pillLabelFn`, if provided, renders a small static pill per item (used
+// only on the Default page to show each item's assigned store / Unassigned).
+function buildShoppingPrintPage(title, subtitle, items, pillLabelFn = null) {
+  const unchecked = items.filter(i => !i.checked).sort((a, b) => a.name.localeCompare(b.name));
+
+  const itemsHtml = unchecked.length
+    ? unchecked.map(item => `
+        <li class="print-shopping-item">
+          <span class="print-shopping-box"></span>
+          <span class="print-shopping-name">${esc(item.name)}</span>
+          ${item.detail ? `<span class="print-shopping-detail">${esc(item.detail)}</span>` : ''}
+          ${pillLabelFn ? `<span class="print-shopping-pill">${esc(pillLabelFn(item))}</span>` : ''}
+        </li>`).join('')
+    : `<li class="print-shopping-empty">Nothing here — list is empty or all checked off!</li>`;
+
+  return `
+    <div class="print-shopping-card">
+      <div class="print-shopping-header">
+        <h1 class="print-shopping-title">${esc(title)}</h1>
+        <div class="print-shopping-subtitle">${esc(subtitle)}</div>
+      </div>
+      <ul class="print-shopping-list">${itemsHtml}</ul>
+      <div class="print-footer"><span class="print-logo">🌿 Refectory</span></div>
+    </div>`;
+}
+
+// Renders the requested set of pages into #shopping-print-area and triggers
+// the browser print dialog. `listIds` is an array where 'default' means the
+// Default list and anything else is a shoppingStores id.
+function printShoppingLists(listIds) {
+  const area = document.getElementById('shopping-print-area');
+  if (!area) return;
+
+  const { recipeItems, manualItems, weekLabel } = gatherAllShoppingItems();
+  const date = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  const stores = getShoppingStores();
+
+  const pages = [];
+
+  for (const listId of listIds) {
+    if (listId === 'default') {
+      const allItems = [...recipeItems, ...manualItems];
+      const pillFor = (item) => {
+        const storeId = getItemStore(item.key);
+        const store = storeId ? getShoppingStore(storeId) : null;
+        return store ? store.name : 'Unassigned';
+      };
+      pages.push(buildShoppingPrintPage('Shopping List', `${date} · Based on meals for ${weekLabel}`, allItems, pillFor));
+    } else {
+      const store = getShoppingStore(listId);
+      if (!store) continue;
+      const storeItems = [...recipeItems, ...manualItems].filter(item => getItemStore(item.key) === store.id);
+      pages.push(buildShoppingPrintPage(store.name, date, storeItems, null));
+    }
+  }
+
+  if (!pages.length) { showToast('Nothing to print.'); return; }
+
+  area.innerHTML = pages.join('');
   document.body.classList.add('printing-shopping');
   window.print();
   document.body.classList.remove('printing-shopping');
 }
 
 
+
 function renderShoppingList() {
   const container = document.getElementById('shopping-list-content');
   if (!container) return;
+
+  renderShoppingTabs();
 
   // Collect all recipes in current + next week plan
   const weeks     = [View.currentWeek, addWeeks(View.currentWeek, 1)];
@@ -1846,6 +2034,15 @@ function renderShoppingList() {
         if (rid) recipeIds.add(rid);
       }
     }
+  }
+
+  const isDefaultTab = View.activeShoppingTab === 'default';
+  const activeStore  = isDefaultTab ? null : getShoppingStore(View.activeShoppingTab);
+
+  // If the active custom-list tab was deleted out from under us, fall back
+  if (!isDefaultTab && !activeStore) {
+    View.activeShoppingTab = 'default';
+    return renderShoppingList();
   }
 
   if (!recipeIds.size && !View.manualItems.length) {
@@ -1883,26 +2080,58 @@ function renderShoppingList() {
     };
   });
 
+  // All recipe-derived items, regardless of store assignment
+  const allRecipeItems = Object.values(agg);
+
+  // Filter by active tab: Default shows everything; a store tab shows only
+  // items assigned to that store.
+  const visibleRecipeItems = isDefaultTab
+    ? allRecipeItems
+    : allRecipeItems.filter(item => getItemStore(item.key) === activeStore.id);
+
+  const visibleManualItems = isDefaultTab
+    ? View.manualItems
+    : View.manualItems.filter(item => getItemStore(item.id) === activeStore.id);
+
   // Unchecked items first (alphabetical), checked items at bottom (alphabetical)
-  const all       = Object.values(agg);
-  const unchecked = all.filter(i => !View.checkedItems.has(i.key)).sort((a, b) => a.name.localeCompare(b.name));
-  const checked   = all.filter(i =>  View.checkedItems.has(i.key)).sort((a, b) => a.name.localeCompare(b.name));
-  const sorted    = [...unchecked, ...checked];
+  const unchecked = visibleRecipeItems.filter(i => !View.checkedItems.has(i.key)).sort((a, b) => a.name.localeCompare(b.name));
+  const checked   = visibleRecipeItems.filter(i =>  View.checkedItems.has(i.key)).sort((a, b) => a.name.localeCompare(b.name));
   const checkedCount = checked.length;
 
   // Manual items — split into checked/unchecked
-  const manualUnchecked = View.manualItems.filter(i => !i.checked);
-  const manualChecked   = View.manualItems.filter(i =>  i.checked);
+  const manualUnchecked = visibleManualItems.filter(i => !i.checked);
+  const manualChecked   = visibleManualItems.filter(i =>  i.checked);
   const totalChecked    = checkedCount + manualChecked.length;
+
+  const stores = getShoppingStores();
+
+  // Builds the pill-styled <select> for assigning an item to a store.
+  // Shown on every tab so an item can be reassigned from anywhere.
+  function storeSelectHtml(itemKey) {
+    const current = getItemStore(itemKey);
+    const isAssigned = !!current;
+    const options = [
+      `<option value="">Unassigned</option>`,
+      ...stores.map(s => `<option value="${esc(s.id)}"${s.id === current ? ' selected' : ''}>${esc(s.name)}</option>`),
+    ].join('');
+    return `<select class="store-pill-select${isAssigned ? ' is-assigned' : ''}" data-item-key="${esc(itemKey)}">${options}</select>`;
+  }
 
   container.innerHTML = `
     <div class="shopping-header">
-      <p class="muted shopping-note">Based on meals planned for ${formatWeekLabel(weeks[0])} and the following week.</p>
+      <p class="muted shopping-note">
+        ${isDefaultTab
+          ? `Based on meals planned for ${formatWeekLabel(weeks[0])} and the following week.`
+          : `Items assigned to <strong>${esc(activeStore.name)}</strong>.`}
+      </p>
       <div style="display:flex;gap:.5rem;align-items:center;">
         ${totalChecked ? `<button class="btn btn-ghost btn-sm" id="shopping-clear-checked">Clear checked (${totalChecked})</button>` : ''}
+        ${!isDefaultTab ? `<button class="btn btn-ghost btn-sm" id="shopping-delete-list-btn" style="color:var(--red);">Delete List</button>` : ''}
         <button class="btn btn-ghost btn-sm" id="shopping-print-btn">Print / Save PDF</button>
       </div>
     </div>
+
+    ${stores.length ? `<p class="shopping-hint">Tap the list pill to assign an item to a store.</p>` : ''}
 
     <!-- Add item input -->
     <div class="shopping-add-row">
@@ -1921,6 +2150,7 @@ function renderShoppingList() {
               <span class="shopping-detail muted">Added manually</span>
             </span>
           </label>
+          ${storeSelectHtml(item.id)}
           <button class="shopping-remove-manual" data-manual-id="${esc(item.id)}" title="Remove">✕</button>
         </li>`).join('')}
 
@@ -1941,6 +2171,7 @@ function renderShoppingList() {
                 <span class="shopping-detail muted">${esc(summary)}</span>
               </span>
             </label>
+            ${storeSelectHtml(item.key)}
           </li>`;
       }).join('')}
 
@@ -1964,6 +2195,7 @@ function renderShoppingList() {
                 <span class="shopping-detail muted">${esc(summary)}</span>
               </span>
             </label>
+            ${storeSelectHtml(item.key)}
           </li>`;
       }).join('')}
 
@@ -1977,6 +2209,7 @@ function renderShoppingList() {
               <span class="shopping-detail muted">Added manually</span>
             </span>
           </label>
+          ${storeSelectHtml(item.id)}
           <button class="shopping-remove-manual" data-manual-id="${esc(item.id)}" title="Remove">✕</button>
         </li>`).join('')}
     </ul>
@@ -2007,20 +2240,39 @@ function renderShoppingList() {
   // Manual item remove buttons
   container.querySelectorAll('.shopping-remove-manual').forEach(btn => {
     btn.addEventListener('click', () => {
-      View.manualItems = View.manualItems.filter(i => i.id !== btn.dataset.manualId);
+      const id = btn.dataset.manualId;
+      View.manualItems = View.manualItems.filter(i => i.id !== id);
+      setItemStore(id, ''); // clean up any assignment for the removed item
       renderShoppingList();
     });
   });
 
-  // Clear all checked
+  // Store pill-selects — assign/reassign an item to a list
+  container.querySelectorAll('.store-pill-select').forEach(sel => {
+    sel.addEventListener('change', () => {
+      setItemStore(sel.dataset.itemKey, sel.value);
+      renderShoppingList();
+    });
+  });
+
+  // Clear all checked (scoped to what's visible on the current tab)
   document.getElementById('shopping-clear-checked')?.addEventListener('click', () => {
-    View.checkedItems.clear();
-    View.manualItems = View.manualItems.filter(i => !i.checked);
+    checked.forEach(i => View.checkedItems.delete(i.key));
+    View.manualItems = View.manualItems.filter(i => !(visibleManualItems.includes(i) && i.checked));
     renderShoppingList();
   });
 
-  document.getElementById('shopping-print-btn')?.addEventListener('click', () => printShoppingList(unchecked, checked, manualUnchecked, manualChecked));
+  // Delete this custom list
+  document.getElementById('shopping-delete-list-btn')?.addEventListener('click', () => {
+    if (!activeStore) return;
+    if (!confirm(`Delete the "${activeStore.name}" list? Items on it will become unassigned on the Default list. This cannot be undone.`)) return;
+    deleteShoppingStore(activeStore.id);
+    renderShoppingList();
+  });
+
+  document.getElementById('shopping-print-btn')?.addEventListener('click', () => openShoppingPrintModal());
 }
+
 
 
 
@@ -3368,6 +3620,28 @@ document.addEventListener('DOMContentLoaded', () => {
     ?.addEventListener('click', () => closeModal('modal-bulk-tag'));
   document.getElementById('modal-bulk-cookbook')?.querySelector('.modal-close')
     ?.addEventListener('click', () => closeModal('modal-bulk-cookbook'));
+
+  // Shopping list print modals
+  document.getElementById('modal-shopping-print')?.querySelector('.modal-close')
+    ?.addEventListener('click', () => closeModal('modal-shopping-print'));
+  document.getElementById('modal-shopping-print-pick')?.querySelector('.modal-close')
+    ?.addEventListener('click', () => closeModal('modal-shopping-print-pick'));
+  document.getElementById('print-mode-default')?.addEventListener('click', () => {
+    closeModal('modal-shopping-print');
+    printShoppingLists(['default']);
+  });
+  document.getElementById('print-mode-all')?.addEventListener('click', () => {
+    closeModal('modal-shopping-print');
+    const allIds = ['default', ...getShoppingStores().map(s => s.id)];
+    printShoppingLists(allIds);
+  });
+  document.getElementById('print-mode-specific')?.addEventListener('click', openShoppingPrintPicker);
+  document.getElementById('shopping-print-pick-confirm')?.addEventListener('click', () => {
+    const ids = [...document.querySelectorAll('.print-pick-cb:checked')].map(cb => cb.value);
+    closeModal('modal-shopping-print-pick');
+    if (!ids.length) { showToast('Select at least one list to print.'); return; }
+    printShoppingLists(ids);
+  });
   document.getElementById('bulk-tag-input')?.addEventListener('keydown', e => {
     if (e.key === 'Enter') applyBulkTag('add');
   });
