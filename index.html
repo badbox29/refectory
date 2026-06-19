@@ -241,6 +241,7 @@
           <div class="form-group" style="grid-column:1/-1">
             <label class="form-label">Recipe Name *</label>
             <input class="input" id="editor-title" placeholder="e.g. Roasted Butternut Squash Soup" required/>
+            <div id="editor-duplicate-warning" class="dup-warning" style="display:none;"></div>
           </div>
           <div class="form-group" style="grid-column:1/-1">
             <label class="form-label">Description</label>
@@ -839,6 +840,20 @@
       <span class="print-logo">🌿 Refectory</span>
     </div>
 
+  </div>
+</div>
+
+<!-- ── Shopping list print area ──────────────────────────────── -->
+<div id="shopping-print-area" aria-hidden="true">
+  <div class="print-shopping-card">
+    <div class="print-shopping-header">
+      <h1 class="print-shopping-title">Shopping List</h1>
+      <div class="print-shopping-subtitle" id="print-shopping-subtitle"></div>
+    </div>
+    <ul class="print-shopping-list" id="print-shopping-list"></ul>
+    <div class="print-footer">
+      <span class="print-logo">🌿 Refectory</span>
+    </div>
   </div>
 </div>
 
