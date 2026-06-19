@@ -400,10 +400,12 @@ function renderBulkActionBar(visibleRecipes) {
   document.getElementById('bulk-selected-count').textContent =
     count ? `${count} selected` : 'Select recipes below';
 
-  const addBtn    = document.getElementById('bulk-add-tag-btn');
-  const removeBtn = document.getElementById('bulk-remove-tag-btn');
-  if (addBtn)    addBtn.disabled    = count === 0;
-  if (removeBtn) removeBtn.disabled = count === 0;
+  const addBtn      = document.getElementById('bulk-add-tag-btn');
+  const removeBtn   = document.getElementById('bulk-remove-tag-btn');
+  const cookbookBtn = document.getElementById('bulk-add-cookbook-btn');
+  const exportBtn   = document.getElementById('bulk-export-btn');
+  const deleteBtn   = document.getElementById('bulk-delete-btn');
+  [addBtn, removeBtn, cookbookBtn, exportBtn, deleteBtn].forEach(b => { if (b) b.disabled = count === 0; });
 
   document.getElementById('bulk-select-all-btn').onclick = () => {
     visibleRecipes.forEach(r => View.selectedRecipeIds.add(r.id));
@@ -413,8 +415,75 @@ function renderBulkActionBar(visibleRecipes) {
     View.selectedRecipeIds.clear();
     renderRecipes();
   };
-  addBtn.onclick    = () => openBulkTagModal('add');
-  removeBtn.onclick = () => openBulkTagModal('remove');
+  addBtn.onclick      = () => openBulkTagModal('add');
+  removeBtn.onclick   = () => openBulkTagModal('remove');
+  cookbookBtn.onclick = () => openBulkCookbookModal();
+  exportBtn.onclick   = () => openExportModal([...View.selectedRecipeIds]);
+  deleteBtn.onclick   = () => confirmBulkDelete();
+}
+
+function confirmBulkDelete() {
+  const ids = [...View.selectedRecipeIds];
+  if (!ids.length) return;
+  const titles = ids.map(id => getRecipe(id)?.title).filter(Boolean);
+  const preview = titles.slice(0, 5).join(', ') + (titles.length > 5 ? `, +${titles.length - 5} more` : '');
+  if (!confirm(`Delete ${ids.length} recipe${ids.length !== 1 ? 's' : ''}?\n\n${preview}\n\nThis cannot be undone.`)) return;
+
+  ids.forEach(id => deleteRecipe(id));
+  View.selectedRecipeIds.clear();
+  renderRecipes();
+  renderTagFilter();
+  showToast(`✓ Deleted ${ids.length} recipe${ids.length !== 1 ? 's' : ''}`);
+}
+
+function openBulkCookbookModal() {
+  const count = View.selectedRecipeIds.size;
+  if (!count) return;
+
+  document.getElementById('bulk-cookbook-desc').textContent =
+    `Choose a cookbook to add ${count} selected recipe${count !== 1 ? 's' : ''} to.`;
+
+  const books = getCookbooks();
+  const listEl  = document.getElementById('bulk-cookbook-list');
+  const emptyEl = document.getElementById('bulk-cookbook-empty');
+
+  if (!books.length) {
+    listEl.innerHTML = '';
+    emptyEl.style.display = '';
+  } else {
+    emptyEl.style.display = 'none';
+    listEl.innerHTML = books.map(cb => {
+      const alreadyIn = (cb.recipeIds || []).filter(id => View.selectedRecipeIds.has(id)).length;
+      return `
+        <button class="bulk-cookbook-row" data-id="${esc(cb.id)}">
+          <span class="bulk-cookbook-name">${esc(cb.name)}</span>
+          <span class="muted" style="font-size:.78rem;">
+            ${(cb.recipeIds || []).length} recipe${(cb.recipeIds || []).length !== 1 ? 's' : ''}
+            ${alreadyIn ? ` · ${alreadyIn} already in` : ''}
+          </span>
+        </button>`;
+    }).join('');
+
+    listEl.querySelectorAll('.bulk-cookbook-row').forEach(btn => {
+      btn.addEventListener('click', () => addSelectedRecipesToCookbook(btn.dataset.id));
+    });
+  }
+
+  openModal('modal-bulk-cookbook');
+}
+
+function addSelectedRecipesToCookbook(cookbookId) {
+  const cb = getCookbook(cookbookId);
+  if (!cb) return;
+  const ids = [...View.selectedRecipeIds];
+  let added = 0;
+  cb.recipeIds = cb.recipeIds || [];
+  for (const id of ids) {
+    if (!cb.recipeIds.includes(id)) { cb.recipeIds.push(id); added++; }
+  }
+  scheduleSave();
+  closeModal('modal-bulk-cookbook');
+  showToast(`✓ Added ${added} recipe${added !== 1 ? 's' : ''} to "${cb.name}"`);
 }
 
 function openBulkTagModal(mode) {
@@ -2262,9 +2331,13 @@ function openCookbookPick(cookbookId) {
 // ─── Export ───────────────────────────────────────────────────────
 
 let _exportMode = null; // 'full' | 'images'
+let _bulkExportIds = null; // set when exporting a specific selection of recipes
 
-function openExportModal() {
+function openExportModal(idsOverride = null) {
   _exportMode = null;
+  _bulkExportIds = idsOverride;
+  const titleEl = document.querySelector('#modal-export .modal-title');
+  if (titleEl) titleEl.textContent = idsOverride ? `Export ${idsOverride.length} Selected Recipes` : 'Export Recipes';
   document.getElementById('export-status').textContent = '';
   document.getElementById('btn-export-go').disabled = true;
   // Reset selection styles
@@ -2291,7 +2364,7 @@ function selectExportMode(mode) {
   document.getElementById('export-status').textContent = '';
 }
 
-async function runExport() {
+async function runExport(idsOverride = null) {
   if (!_exportMode) return;
   const statusEl = document.getElementById('export-status');
   const btn      = document.getElementById('btn-export-go');
@@ -2301,12 +2374,13 @@ async function runExport() {
   try {
     const zip  = new JSZip();
     const date = new Date().toISOString().slice(0, 10);
+    const ids  = idsOverride || Object.keys(App.data.recipes || {});
 
     if (_exportMode === 'full') {
-      // recipes.json — all recipe data, no images
+      // recipes.json — selected recipe data, no images
       const recipes = Object.fromEntries(
-        Object.entries(App.data.recipes || {}).map(([id, r]) => {
-          const { image: _img, ...rest } = r;
+        ids.filter(id => App.data.recipes[id]).map(id => {
+          const { image: _img, ...rest } = App.data.recipes[id];
           return [id, rest];
         })
       );
@@ -2317,7 +2391,6 @@ async function runExport() {
     // Images — always included in full, only thing in images-only
     statusEl.textContent = 'Collecting images…';
     const imgFolder = zip.folder('images');
-    const ids = Object.keys(App.data.recipes || {});
     let imgCount = 0;
     for (const id of ids) {
       const dataUrl = await ImageStore.get(id);
@@ -2328,10 +2401,11 @@ async function runExport() {
     }
 
     statusEl.textContent = 'Compressing…';
-    const blob     = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+    const blob   = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+    const suffix = idsOverride ? `selected-${date}` : date;
     const filename = _exportMode === 'full'
-      ? `refectory-backup-${date}.zip`
-      : `refectory-images-${date}.zip`;
+      ? `refectory-backup-${suffix}.zip`
+      : `refectory-images-${suffix}.zip`;
 
     // Trigger download
     const url = URL.createObjectURL(blob);
@@ -2341,7 +2415,7 @@ async function runExport() {
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 5000);
 
-    const recipeCount = Object.keys(App.data.recipes || {}).length;
+    const recipeCount = ids.filter(id => App.data.recipes[id]).length;
     statusEl.style.color = 'var(--green-mid)';
     statusEl.textContent = _exportMode === 'full'
       ? `✓ Exported ${recipeCount} recipes and ${imgCount} images`
@@ -3141,6 +3215,8 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-select-mode')?.addEventListener('click', toggleSelectMode);
   document.getElementById('modal-bulk-tag')?.querySelector('.modal-close')
     ?.addEventListener('click', () => closeModal('modal-bulk-tag'));
+  document.getElementById('modal-bulk-cookbook')?.querySelector('.modal-close')
+    ?.addEventListener('click', () => closeModal('modal-bulk-cookbook'));
   document.getElementById('bulk-tag-input')?.addEventListener('keydown', e => {
     if (e.key === 'Enter') applyBulkTag('add');
   });
@@ -3164,12 +3240,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Import button
   document.getElementById('btn-import-mealie')?.addEventListener('click', openMealieImport);
-  document.getElementById('btn-export')?.addEventListener('click', openExportModal);
+  document.getElementById('btn-export')?.addEventListener('click', () => openExportModal());
 
   // Export modal — option selection and go button
   document.getElementById('export-opt-full')?.addEventListener('click',   () => selectExportMode('full'));
   document.getElementById('export-opt-images')?.addEventListener('click', () => selectExportMode('images'));
-  document.getElementById('btn-export-go')?.addEventListener('click', runExport);
+  document.getElementById('btn-export-go')?.addEventListener('click', () => runExport(_bulkExportIds));
   document.getElementById('modal-export')?.querySelector('.modal-close')
     ?.addEventListener('click', () => closeModal('modal-export'));
 
