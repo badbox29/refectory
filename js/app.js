@@ -1308,6 +1308,81 @@ function getWeekPlan(weekKey) {
 }
 
 
+// ─── Today's Meals widget ──────────────────────────────────────────
+
+function getTodaysMeals() {
+  const now      = new Date();
+  const weekKey  = getISOWeekKey(now);
+  const dayIdx   = (now.getDay() + 6) % 7; // Mon=0 .. Sun=6, matches DAY_NAMES/MEAL_SLOTS layout
+  const plan     = getWeekPlan(weekKey);
+  const dayPlan  = plan[dayIdx] || {};
+
+  const meals = [];
+  for (const slot of MEAL_SLOTS) {
+    const rid = dayPlan[slot];
+    if (!rid) continue;
+    const recipe = getRecipe(rid);
+    if (recipe) meals.push({ slot, recipe });
+  }
+  return meals;
+}
+
+function renderTodaysMealsTrigger() {
+  const btn   = document.getElementById('btn-todays-meals');
+  if (!btn) return;
+  const meals = getTodaysMeals();
+  btn.style.display = meals.length ? '' : 'none';
+}
+
+function renderTodaysMealsDrawer() {
+  const body = document.getElementById('todays-meals-drawer-body');
+  if (!body) return;
+  const meals = getTodaysMeals();
+
+  if (!meals.length) {
+    body.innerHTML = '<div class="todays-meals-empty">Nothing planned for today.</div>';
+    return;
+  }
+
+  body.innerHTML = `<div class="todays-meals-grid">${meals.map(({ slot, recipe }) => `
+    <div class="todays-meal-card" data-id="${esc(recipe.id)}">
+      <div class="todays-meal-card-img" data-img-id="${esc(recipe.id)}">🍽️</div>
+      <div class="todays-meal-card-body">
+        <span class="meal-type-badge meal-type-${esc(slot)}">${esc(capitalise(slot))}</span>
+        <div class="todays-meal-card-title">${esc(recipe.title)}</div>
+      </div>
+    </div>
+  `).join('')}</div>`;
+
+  body.querySelectorAll('.todays-meal-card').forEach(card => {
+    card.addEventListener('click', () => {
+      closeModal('todays-meals-overlay');
+      openRecipeDetail(card.dataset.id);
+    });
+  });
+
+  // Async-load card images from IndexedDB (non-blocking)
+  body.querySelectorAll('[data-img-id]').forEach(async imgEl => {
+    const dataUrl = await ImageStore.get(imgEl.dataset.imgId);
+    if (dataUrl) {
+      imgEl.style.backgroundImage = `url('${dataUrl}')`;
+      imgEl.textContent = '';
+    }
+  });
+}
+
+function toggleTodaysMealsDrawer() {
+  const overlay = document.getElementById('todays-meals-overlay');
+  if (!overlay) return;
+  if (overlay.classList.contains('open')) {
+    closeModal('todays-meals-overlay');
+  } else {
+    renderTodaysMealsDrawer();
+    openModal('todays-meals-overlay');
+  }
+}
+
+
 // ─── Random recipe suggestion ─────────────────────────────────────
 
 function pickRandomRecipe(excludeIds = []) {
@@ -1362,6 +1437,7 @@ function setMealSlot(weekKey, dayIdx, slot, recipeId) {
     delete App.data.mealplan[weekKey][dayIdx][slot];
   }
   scheduleSave();
+  renderTodaysMealsTrigger();
 }
 
 
@@ -3530,6 +3606,7 @@ function renderAll() {
   if (View.activeSection === 'planner')   renderPlanner();
   if (View.activeSection === 'shopping')  renderShoppingList();
   if (View.activeSection === 'cookbooks') renderCookbooks();
+  renderTodaysMealsTrigger();
 }
 
 // ─── Boot ─────────────────────────────────────────────────────────
@@ -3904,6 +3981,9 @@ document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.modal-close').forEach(btn => {
     btn.addEventListener('click', () => closeModal(btn.closest('.modal-overlay').id));
   });
+
+  // Today's Meals — toggle drawer; clicking the label again while open closes it
+  document.getElementById('btn-todays-meals')?.addEventListener('click', toggleTodaysMealsDrawer);
 
   // Safety save when tab is hidden or page is closing
   document.addEventListener('visibilitychange', () => {
