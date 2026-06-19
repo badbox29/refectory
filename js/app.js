@@ -436,6 +436,124 @@ function getAllTags() {
   return [...tags].sort();
 }
 
+function getAllTagsWithCounts() {
+  const counts = {};
+  for (const r of Object.values(App.data.recipes || {})) {
+    (r.tags || []).forEach(t => { counts[t] = (counts[t] || 0) + 1; });
+  }
+  return Object.entries(counts)
+    .map(([tag, count]) => ({ tag, count }))
+    .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+}
+
+// ─── Tag manager (merge / rename) ──────────────────────────────────
+
+let _tagManagerSelected = new Set();
+
+function openTagManager() {
+  _tagManagerSelected = new Set();
+  renderTagManager();
+  openModal('modal-tag-manager');
+}
+
+function renderTagManager() {
+  const body = document.getElementById('tag-manager-body');
+  if (!body) return;
+
+  const search = document.getElementById('tag-manager-search')?.value.trim().toLowerCase() || '';
+  const all    = getAllTagsWithCounts();
+  const visible = search ? all.filter(t => t.tag.toLowerCase().includes(search)) : all;
+
+  const selectedCount = _tagManagerSelected.size;
+  const totalRecipesAffected = selectedCount
+    ? new Set(
+        Object.values(App.data.recipes || {})
+          .filter(r => (r.tags || []).some(t => _tagManagerSelected.has(t)))
+          .map(r => r.id)
+      ).size
+    : 0;
+
+  body.innerHTML = `
+    <input class="input" id="tag-manager-search" placeholder="Search tags…"
+           value="${esc(search)}" autocomplete="off" style="margin-bottom:.65rem;"/>
+
+    <div class="tag-manager-list">
+      ${visible.map(({ tag, count }) => `
+        <label class="tag-manager-row">
+          <input type="checkbox" class="tag-manager-cb" data-tag="${esc(tag)}"
+                 ${_tagManagerSelected.has(tag) ? 'checked' : ''}/>
+          <span class="tag-manager-name">${esc(tag)}</span>
+          <span class="tag-manager-count muted">${count} recipe${count !== 1 ? 's' : ''}</span>
+        </label>`).join('') || `<p class="muted" style="padding:.5rem 0;">No tags match your search.</p>`}
+    </div>
+
+    ${selectedCount >= 2 ? `
+      <div class="tag-manager-merge-bar">
+        <div class="muted" style="font-size:.8rem;margin-bottom:.5rem;">
+          Merging <strong>${selectedCount}</strong> tags will affect <strong>${totalRecipesAffected}</strong> recipe${totalRecipesAffected !== 1 ? 's' : ''}.
+        </div>
+        <div style="display:flex;gap:.5rem;">
+          <input class="input" id="tag-manager-merge-name" placeholder="New tag name…"
+                 value="${esc([..._tagManagerSelected].sort((a,b) => b.length - a.length)[0] || '')}" style="flex:1;"/>
+          <button class="btn btn-primary btn-sm" id="tag-manager-merge-btn">Merge into this</button>
+        </div>
+      </div>
+    ` : selectedCount === 1 ? `
+      <div class="tag-manager-merge-bar">
+        <div class="muted" style="font-size:.8rem;margin-bottom:.5rem;">Rename this tag everywhere:</div>
+        <div style="display:flex;gap:.5rem;">
+          <input class="input" id="tag-manager-merge-name" placeholder="New name…"
+                 value="${esc([..._tagManagerSelected][0] || '')}" style="flex:1;"/>
+          <button class="btn btn-primary btn-sm" id="tag-manager-merge-btn">Rename</button>
+        </div>
+      </div>
+    ` : ''}
+  `;
+
+  // Re-wire search (preserve focus/cursor position)
+  const searchEl = document.getElementById('tag-manager-search');
+  searchEl?.addEventListener('input', () => {
+    const pos = searchEl.selectionStart;
+    renderTagManager();
+    const newEl = document.getElementById('tag-manager-search');
+    if (newEl) { newEl.focus(); newEl.setSelectionRange(pos, pos); }
+  });
+
+  // Checkbox selection
+  body.querySelectorAll('.tag-manager-cb').forEach(cb => {
+    cb.addEventListener('change', () => {
+      if (cb.checked) _tagManagerSelected.add(cb.dataset.tag);
+      else _tagManagerSelected.delete(cb.dataset.tag);
+      renderTagManager();
+    });
+  });
+
+  // Merge/rename action
+  document.getElementById('tag-manager-merge-btn')?.addEventListener('click', () => {
+    const newName = document.getElementById('tag-manager-merge-name')?.value.trim();
+    if (!newName) { showToast('Enter a tag name first.'); return; }
+    mergeTags([..._tagManagerSelected], newName);
+  });
+}
+
+function mergeTags(oldTags, newName) {
+  let affected = 0;
+  for (const r of Object.values(App.data.recipes || {})) {
+    const tags = r.tags || [];
+    if (!tags.some(t => oldTags.includes(t))) continue;
+    const rest = tags.filter(t => !oldTags.includes(t));
+    if (!rest.includes(newName)) rest.push(newName);
+    r.tags = rest;
+    affected++;
+  }
+  scheduleSave();
+  _tagManagerSelected = new Set();
+  renderTagManager();
+  renderTagFilter();
+  renderRecipes();
+  showToast(`✓ Merged into "${newName}" — ${affected} recipe${affected !== 1 ? 's' : ''} updated`);
+}
+
 function renderTagFilter() {
   const bar = document.getElementById('tag-filter-bar');
   if (!bar) return;
@@ -470,6 +588,7 @@ function renderTagFilter() {
       ${activePills}
       <button class="tag-filter-toggle" id="tag-filter-toggle-btn">${toggleLabel}</button>
       ${active.length ? `<button class="tag-filter-toggle" id="tag-filter-clear" style="color:var(--red);border-color:var(--red);">Clear all</button>` : ''}
+      <button class="tag-filter-toggle" id="tag-filter-manage" style="margin-left:auto;">⚙ Manage Tags</button>
     </div>
     <div class="tag-filter-panel${isOpen ? ' open' : ''}">
       <input class="tag-filter-search" id="tag-filter-search" placeholder="Search tags…" value="${esc(search)}" autocomplete="off"/>
@@ -482,6 +601,9 @@ function renderTagFilter() {
     bar.dataset.open = bar.dataset.open === '1' ? '0' : '1';
     renderTagFilter();
   });
+
+  // Open tag manager
+  bar.querySelector('#tag-filter-manage')?.addEventListener('click', openTagManager);
 
   // Clear all active tags
   bar.querySelector('#tag-filter-clear')?.addEventListener('click', () => {
@@ -2946,6 +3068,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Settings
   document.getElementById('btn-settings')?.addEventListener('click', openSettings);
+
+  document.getElementById('modal-tag-manager')?.querySelector('.modal-close')
+    ?.addEventListener('click', () => closeModal('modal-tag-manager'));
 
   // Cookbooks
   document.getElementById('btn-new-cookbook')?.addEventListener('click', () => openCookbookEditor(null));
