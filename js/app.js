@@ -320,6 +320,8 @@ const View = {
   checkedItems:  new Set(),   // shopping list checked item keys (session only)
   recipeSort:    'updated',   // 'updated' | 'alpha' | 'rating'
   manualItems:   [],          // [{id, name, checked}] — manually added shopping items
+  selectMode:        false,         // recipe bulk-select mode
+  selectedRecipeIds: new Set(),     // recipe ids selected in bulk-select mode
 };
 
 // ─── Navigation ───────────────────────────────────────────────────
@@ -371,6 +373,122 @@ function deleteRecipe(id) {
 
 // ─── Recipe rendering ─────────────────────────────────────────────
 
+// ─── Bulk recipe selection / tag editing ──────────────────────────
+
+function toggleSelectMode() {
+  View.selectMode = !View.selectMode;
+  if (!View.selectMode) View.selectedRecipeIds.clear();
+  const btn = document.getElementById('btn-select-mode');
+  if (btn) btn.classList.toggle('active', View.selectMode);
+  renderRecipes();
+}
+
+function toggleRecipeSelection(id) {
+  if (View.selectedRecipeIds.has(id)) View.selectedRecipeIds.delete(id);
+  else View.selectedRecipeIds.add(id);
+  renderRecipes();
+}
+
+function renderBulkActionBar(visibleRecipes) {
+  const bar = document.getElementById('bulk-action-bar');
+  if (!bar) return;
+
+  if (!View.selectMode) { bar.style.display = 'none'; return; }
+  bar.style.display = '';
+
+  const count = View.selectedRecipeIds.size;
+  document.getElementById('bulk-selected-count').textContent =
+    count ? `${count} selected` : 'Select recipes below';
+
+  const addBtn    = document.getElementById('bulk-add-tag-btn');
+  const removeBtn = document.getElementById('bulk-remove-tag-btn');
+  if (addBtn)    addBtn.disabled    = count === 0;
+  if (removeBtn) removeBtn.disabled = count === 0;
+
+  document.getElementById('bulk-select-all-btn').onclick = () => {
+    visibleRecipes.forEach(r => View.selectedRecipeIds.add(r.id));
+    renderRecipes();
+  };
+  document.getElementById('bulk-clear-btn').onclick = () => {
+    View.selectedRecipeIds.clear();
+    renderRecipes();
+  };
+  addBtn.onclick    = () => openBulkTagModal('add');
+  removeBtn.onclick = () => openBulkTagModal('remove');
+}
+
+function openBulkTagModal(mode) {
+  if (!View.selectedRecipeIds.size) return;
+  const count = View.selectedRecipeIds.size;
+
+  document.getElementById('bulk-tag-modal-title').textContent = mode === 'add' ? 'Add Tag' : 'Remove Tag';
+  document.getElementById('bulk-tag-modal-desc').textContent =
+    mode === 'add'
+      ? `Add a tag to ${count} selected recipe${count !== 1 ? 's' : ''}.`
+      : `Remove a tag from ${count} selected recipe${count !== 1 ? 's' : ''}.`;
+
+  document.getElementById('bulk-tag-add-group').style.display    = mode === 'add' ? '' : 'none';
+  document.getElementById('bulk-tag-remove-group').style.display = mode === 'remove' ? '' : 'none';
+
+  if (mode === 'add') {
+    document.getElementById('bulk-tag-input').value = '';
+  } else {
+    // Populate dropdown with tags present across the selected recipes, with counts
+    const tagCounts = {};
+    for (const id of View.selectedRecipeIds) {
+      const r = getRecipe(id);
+      (r?.tags || []).forEach(t => { tagCounts[t] = (tagCounts[t] || 0) + 1; });
+    }
+    const sortedTags = Object.entries(tagCounts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const selectEl = document.getElementById('bulk-tag-remove-select');
+    selectEl.innerHTML = sortedTags.length
+      ? sortedTags.map(([tag, n]) => `<option value="${esc(tag)}">${esc(tag)} (${n} of ${count})</option>`).join('')
+      : `<option value="">No tags on selected recipes</option>`;
+  }
+
+  document.getElementById('bulk-tag-confirm-btn').onclick = () => applyBulkTag(mode);
+  openModal('modal-bulk-tag');
+  if (mode === 'add') setTimeout(() => document.getElementById('bulk-tag-input')?.focus(), 50);
+}
+
+function applyBulkTag(mode) {
+  const ids = [...View.selectedRecipeIds];
+  if (!ids.length) return;
+
+  if (mode === 'add') {
+    const tag = document.getElementById('bulk-tag-input')?.value.trim();
+    if (!tag) { showToast('Enter a tag name first.'); return; }
+    let count = 0;
+    for (const id of ids) {
+      const r = getRecipe(id);
+      if (!r) continue;
+      r.tags = r.tags || [];
+      if (!r.tags.includes(tag)) { r.tags.push(tag); count++; }
+    }
+    scheduleSave();
+    closeModal('modal-bulk-tag');
+    renderRecipes();
+    renderTagFilter();
+    showToast(`✓ Added "${tag}" to ${count} recipe${count !== 1 ? 's' : ''}`);
+  } else {
+    const tag = document.getElementById('bulk-tag-remove-select')?.value;
+    if (!tag) { showToast('No tag selected.'); return; }
+    let count = 0;
+    for (const id of ids) {
+      const r = getRecipe(id);
+      if (!r?.tags?.includes(tag)) continue;
+      r.tags = r.tags.filter(t => t !== tag);
+      count++;
+    }
+    scheduleSave();
+    closeModal('modal-bulk-tag');
+    renderRecipes();
+    renderTagFilter();
+    showToast(`✓ Removed "${tag}" from ${count} recipe${count !== 1 ? 's' : ''}`);
+  }
+}
+
+
 function renderRecipes() {
   const grid   = document.getElementById('recipe-grid');
   const noRes  = document.getElementById('recipe-empty');
@@ -397,7 +515,8 @@ function renderRecipes() {
   noRes.style.display = 'none';
 
   grid.innerHTML = recipes.map(r => `
-    <div class="recipe-card" data-id="${esc(r.id)}">
+    <div class="recipe-card${View.selectMode ? ' select-mode' : ''}${View.selectedRecipeIds.has(r.id) ? ' is-selected' : ''}" data-id="${esc(r.id)}">
+      ${View.selectMode ? `<div class="recipe-card-select-overlay"><input type="checkbox" class="recipe-select-cb" data-id="${esc(r.id)}" ${View.selectedRecipeIds.has(r.id) ? 'checked' : ''}/></div>` : ''}
       <div class="recipe-card-img" data-img-id="${esc(r.id)}">
         <div class="recipe-card-placeholder">🍽️</div>
       </div>
@@ -415,8 +534,22 @@ function renderRecipes() {
   `).join('');
 
   grid.querySelectorAll('.recipe-card').forEach(card => {
-    card.addEventListener('click', () => openRecipeDetail(card.dataset.id));
+    card.addEventListener('click', e => {
+      if (View.selectMode) {
+        e.preventDefault();
+        toggleRecipeSelection(card.dataset.id);
+        return;
+      }
+      openRecipeDetail(card.dataset.id);
+    });
   });
+
+  grid.querySelectorAll('.recipe-select-cb').forEach(cb => {
+    cb.addEventListener('click', e => e.stopPropagation()); // prevent double toggle from card click
+    cb.addEventListener('change', () => toggleRecipeSelection(cb.dataset.id));
+  });
+
+  renderBulkActionBar(recipes);
 
   // Async-load card images from IndexedDB (non-blocking)
   grid.querySelectorAll('[data-img-id]').forEach(async imgEl => {
@@ -3005,6 +3138,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // New recipe button
   document.getElementById('btn-new-recipe')?.addEventListener('click', openNewRecipeChoice);
+  document.getElementById('btn-select-mode')?.addEventListener('click', toggleSelectMode);
+  document.getElementById('modal-bulk-tag')?.querySelector('.modal-close')
+    ?.addEventListener('click', () => closeModal('modal-bulk-tag'));
+  document.getElementById('bulk-tag-input')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') applyBulkTag('add');
+  });
 
   // New recipe choice modal
   document.getElementById('choice-import-url')?.addEventListener('click', openUrlImport);
