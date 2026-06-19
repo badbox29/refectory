@@ -74,8 +74,17 @@
           <option value="lastCooked">Recently cooked</option>
         </select>
         <button class="btn btn-primary" id="btn-new-recipe">+ New Recipe</button>
+        <button class="btn btn-outline" id="btn-select-mode">☑ Select</button>
       </div>
       <div id="tag-filter-bar" class="tag-filter-bar"></div>
+      <!-- Bulk action bar — shown only in select mode with 1+ selected -->
+      <div id="bulk-action-bar" class="bulk-action-bar" style="display:none;">
+        <span id="bulk-selected-count" class="muted"></span>
+        <button class="btn btn-outline btn-sm" id="bulk-add-tag-btn">+ Add Tag</button>
+        <button class="btn btn-outline btn-sm" id="bulk-remove-tag-btn">− Remove Tag</button>
+        <button class="btn btn-ghost btn-sm" id="bulk-select-all-btn">Select All</button>
+        <button class="btn btn-ghost btn-sm" id="bulk-clear-btn">Clear Selection</button>
+      </div>
       <div id="recipe-grid"></div>
       <div id="recipe-empty" class="empty-state" style="display:none;">
         <div class="empty-icon">🌿</div>
@@ -719,6 +728,31 @@
         <button class="btn btn-primary" id="url-import-fetch-btn">Fetch</button>
       </div>
       <div id="url-import-status" style="min-height:1.4rem;font-size:.85rem;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Bulk tag modal ───────────────────────────────────────── -->
+<div class="modal-overlay" id="modal-bulk-tag" role="dialog" aria-modal="true">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <h2 class="modal-title" id="bulk-tag-modal-title">Add Tag</h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="muted" id="bulk-tag-modal-desc" style="margin-bottom:.75rem;"></p>
+      <div class="form-group" id="bulk-tag-add-group">
+        <label class="form-label">Tag name</label>
+        <input class="input" id="bulk-tag-input" placeholder="e.g. Instant Pot" autocomplete="off"/>
+      </div>
+      <div class="form-group" id="bulk-tag-remove-group" style="display:none;">
+        <label class="form-label">Choose a tag to remove</label>
+        <select class="input" id="bulk-tag-remove-select"></select>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modal-bulk-tag')">Cancel</button>
+      <button class="btn btn-primary" id="bulk-tag-confirm-btn">Apply</button>
     </div>
   </div>
 </div>
