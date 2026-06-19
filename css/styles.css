@@ -161,6 +161,32 @@ a:hover { text-decoration: underline; }
   gap: .5rem;
 }
 
+/* Today's Meals trigger — sits in the flexible space between the
+   logo/name and the right-side icon buttons. On desktop the
+   app-name still claims most of that space via flex:1, so this
+   button is pulled to sit centered relative to the header as a
+   whole using absolute centering within the header's flex row. */
+.todays-meals-trigger {
+  background: rgba(255,255,255,.12);
+  color: var(--cream);
+  border: 1px solid rgba(255,255,255,.28);
+  border-radius: var(--r-sm);
+  font-size: .82rem;
+  font-weight: 600;
+  padding: .4rem .9rem;
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s, border-color .15s;
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.todays-meals-trigger:hover { background: rgba(255,255,255,.22); border-color: rgba(255,255,255,.5); }
+.todays-meals-trigger-icon { font-size: 1rem; }
+
 /* Buttons that live inside the dark header — always cream on transparent */
 .btn-header {
   background: rgba(255,255,255,.12);
@@ -802,6 +828,110 @@ textarea.input { resize: vertical; min-height: 80px; }
   to   { transform: translateY(0);    opacity: 1; }
 }
 
+/* ── Today's Meals drawer ────────────────────────────────────── */
+/* Reuses .modal-overlay for the dimmed backdrop + .open toggle,
+   but overrides alignment so the panel hugs the header and slides
+   down from it, rather than floating centered like a normal modal. */
+.todays-meals-overlay {
+  align-items: flex-start;
+  justify-content: center;
+  padding: 0;
+}
+
+.todays-meals-drawer {
+  background: var(--white);
+  width: 100%;
+  max-width: 900px;
+  margin: 0 1rem;
+  border-radius: 0 0 var(--r-lg) var(--r-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: todays-meals-slide-down .22s ease;
+  max-height: calc(100vh - 60px);
+  display: flex;
+  flex-direction: column;
+}
+
+@keyframes todays-meals-slide-down {
+  from { transform: translateY(-100%); opacity: 0; }
+  to   { transform: translateY(0);     opacity: 1; }
+}
+
+.todays-meals-drawer-header {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--cream-dark);
+  flex-shrink: 0;
+}
+.todays-meals-drawer-title {
+  font-family: var(--font-body);
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--ink);
+  flex: 1;
+}
+
+.todays-meals-drawer-body {
+  padding: 1.25rem 1.5rem 1.5rem;
+  overflow-y: auto;
+}
+
+/* Desktop: left-to-right, top-to-bottom grid of expanded cards */
+.todays-meals-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 1.1rem;
+}
+
+.todays-meal-card {
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--r-md);
+  overflow: hidden;
+  cursor: pointer;
+  background: var(--cream);
+  box-shadow: var(--shadow-sm);
+  transition: transform .15s, box-shadow .15s;
+}
+.todays-meal-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.todays-meal-card-img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background-size: cover;
+  background-position: center;
+  background-color: var(--cream-dark);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2.2rem;
+  flex-shrink: 0;
+}
+
+.todays-meal-card-body {
+  padding: .75rem .9rem .9rem;
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+}
+.todays-meal-card-title {
+  font-weight: 700;
+  color: var(--ink);
+  font-size: 1rem;
+  line-height: 1.25;
+}
+
+.todays-meals-empty {
+  color: var(--muted);
+  font-style: italic;
+  padding: 1rem 0;
+}
+
 .modal-sm  { max-width: 460px; }
 .modal-md  { max-width: 720px; }
 .modal-lg  { max-width: 980px; }
@@ -1357,6 +1487,26 @@ body.modal-open { overflow: hidden; }
   .app-name { display: none; }
   .theme-toggle-btn { width: 22px; height: 22px; font-size: .75rem; }
 
+  /* Today's Meals trigger — name is hidden, so drop the absolute
+     centering and let it sit naturally in the freed space between
+     the logo and the right-side icon buttons. flex:1 makes it
+     soak up the gap without crowding or hiding any other icon. */
+  .todays-meals-trigger {
+    position: static;
+    transform: none;
+    flex: 1;
+    min-width: 0;
+    justify-content: center;
+    font-size: .78rem;
+    padding: .38rem .5rem;
+    margin: 0 .35rem;
+  }
+  .todays-meals-trigger-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   /* Modals */
   .modal { border-radius: var(--r-md); }
   .modal-overlay { padding: .5rem .35rem; }
@@ -1395,6 +1545,25 @@ body.modal-open { overflow: hidden; }
 
   /* Cookbooks */
   .cookbooks-grid { grid-template-columns: repeat(2, 1fr); gap: .65rem; }
+
+  /* Today's Meals drawer — vertical list of cards, scaled to take
+     up most of the available screen so opening the drawer focuses
+     the user on it rather than the page behind. */
+  .todays-meals-drawer {
+    margin: 0;
+    max-width: 100%;
+    max-height: calc(100vh - 56px);
+    border-radius: 0 0 var(--r-md) var(--r-md);
+  }
+  .todays-meals-drawer-body { padding: 1rem 1rem 1.25rem; }
+  .todays-meals-grid {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+  .todays-meal-card-img {
+    aspect-ratio: 16 / 9;
+    min-height: 38vh;
+  }
 }
 
 /* ── 420px: fold closed / very narrow ───────────────────────── */
@@ -1406,6 +1575,16 @@ body.modal-open { overflow: hidden; }
   .btn-header { padding: .35rem .45rem; }
   .theme-toggle { padding: .2rem .25rem; gap: .1rem; }
   .theme-toggle-btn { width: 20px; height: 20px; font-size: .7rem; }
+
+  /* Today's Meals trigger — icon only, no min-width pressure */
+  .todays-meals-trigger {
+    font-size: 0;
+    padding: .35rem .45rem;
+    margin: 0 .15rem;
+    gap: 0;
+  }
+  .todays-meals-trigger-icon { font-size: 1rem; }
+  .todays-meals-trigger-label { display: none; }
 
   /* Nav — icon only, fill full width evenly */
   .app-nav { justify-content: space-around !important; overflow-x: hidden !important; }
@@ -1431,6 +1610,12 @@ body.modal-open { overflow: hidden; }
   #planner-table th { font-size: .65rem; padding: .2rem .1rem; }
   .day-col { min-width: 46px; }
   .plan-recipe-title { font-size: .55rem; padding: .6rem .2rem .2rem; }
+
+  /* Today's Meals drawer — tighter header, cards eat more height */
+  .todays-meals-drawer-header { padding: .75rem 1rem; }
+  .todays-meals-drawer-title { font-size: 1.05rem; }
+  .todays-meals-drawer-body { padding: .85rem .85rem 1.1rem; }
+  .todays-meal-card-img { min-height: 42vh; }
 }
 
 
