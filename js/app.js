@@ -579,17 +579,33 @@ function renderRecipes() {
   if (!grid) return;
 
   let recipes = getRecipes();
-  const q     = View.recipeSearch.toLowerCase();
+  const q     = View.recipeSearch.trim().toLowerCase();
+  const terms = q.split(/\s+/).filter(Boolean);
   const matchSources = {}; // recipeId -> Set of 'title'|'description'|'tags'|'ingredients'
 
-  if (q) {
+  if (terms.length) {
     recipes = recipes.filter(r => {
+      const titleText = (r.title || '').toLowerCase();
+      const descText  = (r.description || '').toLowerCase();
+      const tagTexts  = (r.tags || []).map(t => t.toLowerCase());
+      const ingTexts  = (r.ingredients || []).map(i => ingredientText(i).toLowerCase());
+
       const sources = new Set();
-      if (r.title?.toLowerCase().includes(q)) sources.add('title');
-      if (r.description?.toLowerCase().includes(q)) sources.add('description');
-      if (r.tags?.some(t => t.toLowerCase().includes(q))) sources.add('tags');
-      if (r.ingredients?.some(i => ingredientText(i).toLowerCase().includes(q))) sources.add('ingredients');
-      if (sources.size) { matchSources[r.id] = sources; return true; }
+      // Every search term must be found *somewhere* on the recipe (any field).
+      // Track which field(s) satisfied each term so the match pill stays accurate.
+      const allTermsMatch = terms.every(term => {
+        const inTitle = titleText.includes(term);
+        const inDesc  = descText.includes(term);
+        const inTags  = tagTexts.some(t => t.includes(term));
+        const inIng   = ingTexts.some(i => i.includes(term));
+        if (inTitle) sources.add('title');
+        if (inDesc)  sources.add('description');
+        if (inTags)  sources.add('tags');
+        if (inIng)   sources.add('ingredients');
+        return inTitle || inDesc || inTags || inIng;
+      });
+
+      if (allTermsMatch) { matchSources[r.id] = sources; return true; }
       return false;
     });
   }
