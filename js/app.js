@@ -460,11 +460,18 @@ function renderTagManager() {
   const body = document.getElementById('tag-manager-body');
   if (!body) return;
 
+  // Preserve scroll position of the tag list across re-renders
+  const prevList = document.querySelector('.tag-manager-list');
+  const prevScroll = prevList ? prevList.scrollTop : 0;
+
   const search = document.getElementById('tag-manager-search')?.value.trim().toLowerCase() || '';
   const all    = getAllTagsWithCounts();
   const visible = search ? all.filter(t => t.tag.toLowerCase().includes(search)) : all;
 
   const selectedCount = _tagManagerSelected.size;
+  const visibleSelectedCount = visible.filter(t => _tagManagerSelected.has(t.tag)).length;
+  const allVisibleSelected = visible.length > 0 && visibleSelectedCount === visible.length;
+
   const totalRecipesAffected = selectedCount
     ? new Set(
         Object.values(App.data.recipes || {})
@@ -476,6 +483,14 @@ function renderTagManager() {
   body.innerHTML = `
     <input class="input" id="tag-manager-search" placeholder="Search tags…"
            value="${esc(search)}" autocomplete="off" style="margin-bottom:.65rem;"/>
+
+    ${visible.length ? `
+      <label class="tag-manager-select-all">
+        <input type="checkbox" id="tag-manager-select-all-cb" ${allVisibleSelected ? 'checked' : ''}/>
+        <span>Select all ${search ? 'matching' : ''} (${visible.length})</span>
+        ${selectedCount ? `<span class="muted" style="margin-left:auto;">${selectedCount} selected</span>` : ''}
+      </label>
+    ` : ''}
 
     <div class="tag-manager-list">
       ${visible.map(({ tag, count }) => `
@@ -510,6 +525,10 @@ function renderTagManager() {
     ` : ''}
   `;
 
+  // Restore scroll position
+  const newList = document.querySelector('.tag-manager-list');
+  if (newList) newList.scrollTop = prevScroll;
+
   // Re-wire search (preserve focus/cursor position)
   const searchEl = document.getElementById('tag-manager-search');
   searchEl?.addEventListener('input', () => {
@@ -517,6 +536,13 @@ function renderTagManager() {
     renderTagManager();
     const newEl = document.getElementById('tag-manager-search');
     if (newEl) { newEl.focus(); newEl.setSelectionRange(pos, pos); }
+  });
+
+  // Select-all toggle — applies to currently visible (filtered) tags only
+  document.getElementById('tag-manager-select-all-cb')?.addEventListener('change', e => {
+    if (e.target.checked) visible.forEach(t => _tagManagerSelected.add(t.tag));
+    else visible.forEach(t => _tagManagerSelected.delete(t.tag));
+    renderTagManager();
   });
 
   // Checkbox selection
