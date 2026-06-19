@@ -1689,7 +1689,14 @@ function renderShoppingTabs() {
   if (!wrap) return;
 
   const stores = getShoppingStores();
-  if (!stores.length) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
+
+  if (!stores.length) {
+    // No custom lists yet — show a small standalone entry point instead of a full tab row
+    wrap.style.display = '';
+    wrap.innerHTML = `<button class="shopping-new-list-link" id="shopping-new-list-btn">+ New List</button>`;
+    document.getElementById('shopping-new-list-btn')?.addEventListener('click', openNewShoppingListPrompt);
+    return;
+  }
 
   wrap.style.display = '';
   wrap.innerHTML = `
