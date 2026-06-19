@@ -1235,14 +1235,25 @@ body.modal-open { overflow: hidden; }
     color: #6b7a52;
   }
 
+  .print-shopping-columns {
+    display: flex;
+    gap: 1.1rem;
+    padding: .15rem 0 .1rem;
+  }
+
   .print-shopping-list {
     list-style: none;
     margin: 0;
-    padding: .15rem 0 .1rem;
-    /* Two-column flow so a long list doesn't run off a single narrow column */
-    column-count: 2;
-    column-gap: 1.1rem;
-    column-rule: 0.75pt solid #c9d4b8;
+    padding: 0;
+    flex: 1;
+    min-width: 0;
+  }
+
+  /* Real border between the two columns — reliable across print engines,
+     unlike CSS column-rule which often fails to render when printed. */
+  .print-shopping-col-right {
+    border-left: 0.75pt solid #c9d4b8;
+    padding-left: 1.1rem;
   }
 
   .print-shopping-item {
