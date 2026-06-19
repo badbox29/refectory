@@ -2070,3 +2070,28 @@ body.modal-open { overflow: hidden; }
 
 /* Recipe card needs relative positioning for the overlay checkbox */
 .recipe-card { position: relative; }
+
+/* ── Bulk add-to-cookbook picker ─────────────────────────────── */
+.bulk-cookbook-list {
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.bulk-cookbook-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: .1rem;
+  width: 100%;
+  text-align: left;
+  background: var(--cream-dark);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: .55rem .75rem;
+  cursor: pointer;
+  transition: border-color .12s, background .12s;
+}
+.bulk-cookbook-row:hover { border-color: var(--green-soft); background: var(--cream); }
+.bulk-cookbook-name { font-size: .9rem; font-weight: 600; }
