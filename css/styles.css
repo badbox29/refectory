@@ -1955,6 +1955,28 @@ body.modal-open { overflow: hidden; }
 [data-theme="dark"] .meal-type-snack     { background: #2e0818; border-color: #8c1a3c; color: #f48fb1; }
 
 /* ── Tag manager ─────────────────────────────────────────────── */
+.tag-manager-select-all {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  padding: .4rem .75rem;
+  margin-bottom: .4rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--cream-dark);
+  cursor: pointer;
+  font-size: .8rem;
+  font-weight: 600;
+  color: var(--ink-mid);
+}
+.tag-manager-select-all input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--green-deep);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
 .tag-manager-list {
   max-height: 360px;
   overflow-y: auto;
