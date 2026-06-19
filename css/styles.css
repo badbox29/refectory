@@ -1226,8 +1226,8 @@ body.modal-open { overflow: hidden; }
   /* Layout */
   .app-main { padding: 1rem .75rem 2rem; }
 
-  /* Header */
-  .app-name span { display: none; }   /* "Re" only — saves space */
+  /* Header — logo only, full name doesn't fit comfortably */
+  .app-name { display: none; }
   .theme-toggle-btn { width: 22px; height: 22px; font-size: .75rem; }
 
   /* Modals */
