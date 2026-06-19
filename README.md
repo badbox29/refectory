@@ -16,19 +16,26 @@ https://badbox29.github.io/refectory/
 
 - **Recipe URL scraper** — paste any recipe link; Refectory fetches the page through your Worker and parses JSON-LD structured data (with an Open Graph fallback) into title, ingredients, steps, times, tags, and image
 - **Mealie backup import** — drag in a Mealie `.zip` backup; parses `database.json`, joins ingredient/unit/food tables, pulls images, and merges tags with categories
+- **Duplicate detection on import & entry** — title-similarity matching (token overlap with a containment boost for "X" vs "X Recipe" style near-duplicates) warns when a recipe you're adding looks like one already in your library, with one-click links to the existing match — never blocks saving, just flags it
 - **Manual recipe entry** — full editor with ingredient rows (amount/unit/name), numbered steps, tags, source attribution, and an embeddable image URL
 - **Serving scaler** — live-recalculates ingredient quantities as you adjust the serving count, including fraction-aware string parsing for imported recipes
 - **Star ratings** — 1–5 star rating per recipe, shown unrated as empty stars to invite use; sortable by top rated
 - **Meal type tagging** — mark a recipe as Breakfast/Lunch/Dinner/Snack so the random suggester never proposes seafood pasta for breakfast
+- **Today's Meals** — a header drawer that surfaces whatever's planned for today at a glance; hidden entirely when nothing's planned, expands into a card grid (desktop) or a focused vertical stack (mobile) showing each meal's photo, type, and title, with one tap through to the full recipe
 - **Last cooked tracking** — automatically stamped when a recipe is added to the meal plan; sortable by most recently cooked
 - **Personal notes per recipe** — a dedicated Notes tab on every recipe (separate from the imported description) for family reactions, substitution ideas, and tweaks — auto-saves as you type, no edit mode required
 - **Tag filtering** — collapsible tag panel with search, so libraries with hundreds of tags stay navigable
+- **Tag merge tool** — a dedicated manager listing every tag with its recipe count; search, multi-select, and merge any number of near-duplicate tags ("Mediterranean chicken salad" / "mediterranean chicken salad") into one canonical name across the whole library in a single pass, with a select-all for the currently filtered results
+- **Bulk tag editing** — toggle select mode on the recipe grid, multi-select any combination of recipes (optionally narrowed by a search first), and add or remove a tag across the entire selection at once; bulk-add to a cookbook and bulk delete/export are available from the same action bar
+- **Ingredient-aware search** — search matches ingredient list contents in addition to title, description, and tags, so "chicken spinach" surfaces any recipe containing both as ingredients even if neither word appears in the title; a match-source pill on each result shows whether it hit on title, description, tags, or ingredients
 - **Cookbooks** — curated recipe collections separate from tags, each with a thumbnail mosaic of its contents
 - **Weekly meal planner** — drag-free slot-based planning across Breakfast/Lunch/Dinner/Snack for all seven days, with a single-day mobile view on narrow screens
 - **Random recipe suggestion** — 🎲 button fills an empty slot with a recipe matching that slot's meal type, falling back to untyped or any recipe if no match exists, and avoiding repeats already planned that week
 - **Smart shopping list** — aggregates ingredients across the next two weeks of planned meals, merges matching quantities and units (handles unicode fractions, abbreviation variants, and prep-descriptor differences), and lists multiple source recipes per item
+- **Multiple shopping lists with store assignment** — create named lists (e.g. "Costco," "Farmer's Market") and assign any item — recipe-derived or manual — to one with a tap; everything still lives in one underlying list, so nothing needs to be re-entered, it's just sorted into tabs. Stays invisible (no tabs shown) until you create your first custom list
 - **Manual shopping items** — add anything not generated from a recipe; check off and clear independently
 - **Recipe printing** — single-page, recipe-box-style print layout (or Save as PDF) with ingredients, numbered steps, timing, and personal notes
+- **Shopping list printing** — dedicated print stylesheet for the smart-merged list; pick one list or several, each renders as its own clean two-column checklist page with a store-assignment pill per item
 - **Image storage via IndexedDB** — recipe photos never touch `localStorage` or the Worker; they live in the browser's IndexedDB so large imports never hit a storage quota
 - **Full backup & restore** — export a `.zip` with recipe data and images for a full portable backup, or export images-only to carry photos to a second synced device
 - **Dark mode** — full light/dark theme toggle; header and navigation stay a constant deep green in both modes
