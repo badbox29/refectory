@@ -1209,6 +1209,13 @@ body.modal-open { overflow: hidden; }
     color: #1a1a14;
     page-break-inside: avoid;
     break-inside: avoid;
+    page-break-after: always;
+    break-after: page;
+  }
+  /* Last page shouldn't force a trailing blank page */
+  .print-shopping-card:last-child {
+    page-break-after: auto;
+    break-after: auto;
   }
 
   .print-shopping-header {
@@ -1266,6 +1273,20 @@ body.modal-open { overflow: hidden; }
     color: #555;
     font-style: italic;
     margin-left: .3rem;
+  }
+
+  .print-shopping-pill {
+    font-size: 7pt;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    color: #4a6632;
+    border: 0.8pt solid #8aa56a;
+    border-radius: 99px;
+    padding: 1pt 6pt;
+    margin-left: auto;
+    white-space: nowrap;
+    flex-shrink: 0;
   }
 
   .print-shopping-empty {
@@ -2232,3 +2253,57 @@ body.modal-open { overflow: hidden; }
   font-size: inherit;
 }
 .dup-warning-link:hover { color: var(--green-mid); }
+
+/* ── Shopping list tabs (custom stores) ──────────────────────── */
+.shopping-tabs-row {
+  margin-bottom: .5rem;
+  flex-wrap: wrap;
+}
+.shopping-new-list-tab {
+  color: var(--green-mid) !important;
+  border-style: dashed !important;
+}
+.shopping-new-list-tab:hover {
+  background: var(--cream-dark) !important;
+  border-color: var(--green-soft) !important;
+}
+
+/* Caption hint above the list, explaining the pill-dropdown */
+.shopping-hint {
+  font-size: .78rem;
+  color: var(--muted);
+  margin: -.1rem 0 .65rem;
+}
+
+/* Pill-styled <select> for assigning an item to a store */
+.store-pill-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--cream-dark);
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  padding: .2rem 1.6rem .2rem .65rem;
+  font-size: .76rem;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path fill='none' stroke='%23888' stroke-width='1.6' d='M1 1l5 5 5-5'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right .55rem center;
+  background-size: 9px 6px;
+  transition: border-color .12s, background-color .12s;
+  flex-shrink: 0;
+}
+.store-pill-select:hover { border-color: var(--green-soft); }
+.store-pill-select:focus { outline: none; border-color: var(--green-mid); }
+
+/* Once a store is assigned, give the pill a more "claimed" look */
+.store-pill-select.is-assigned {
+  background-color: var(--green-pale);
+  border-color: var(--green-soft);
+  color: var(--green-deep);
+}
+
+.shopping-item { display: flex; align-items: center; gap: .6rem; }
+.shopping-item .shopping-check { flex: 1; }
