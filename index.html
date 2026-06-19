@@ -82,6 +82,9 @@
         <span id="bulk-selected-count" class="muted"></span>
         <button class="btn btn-outline btn-sm" id="bulk-add-tag-btn">+ Add Tag</button>
         <button class="btn btn-outline btn-sm" id="bulk-remove-tag-btn">− Remove Tag</button>
+        <button class="btn btn-outline btn-sm" id="bulk-add-cookbook-btn">📚 Add to Cookbook</button>
+        <button class="btn btn-outline btn-sm" id="bulk-export-btn">📤 Export</button>
+        <button class="btn btn-outline btn-sm" id="bulk-delete-btn" style="color:var(--red);border-color:var(--red);">🗑 Delete</button>
         <button class="btn btn-ghost btn-sm" id="bulk-select-all-btn">Select All</button>
         <button class="btn btn-ghost btn-sm" id="bulk-clear-btn">Clear Selection</button>
       </div>
@@ -728,6 +731,26 @@
         <button class="btn btn-primary" id="url-import-fetch-btn">Fetch</button>
       </div>
       <div id="url-import-status" style="min-height:1.4rem;font-size:.85rem;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Bulk add-to-cookbook modal ──────────────────────────────── -->
+<div class="modal-overlay" id="modal-bulk-cookbook" role="dialog" aria-modal="true">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <h2 class="modal-title">Add to Cookbook</h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="muted" id="bulk-cookbook-desc" style="margin-bottom:.75rem;"></p>
+      <div id="bulk-cookbook-list" class="bulk-cookbook-list"></div>
+      <p class="muted" id="bulk-cookbook-empty" style="display:none;">
+        No cookbooks yet — create one first from the Cookbooks tab.
+      </p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modal-bulk-cookbook')">Cancel</button>
     </div>
   </div>
 </div>
