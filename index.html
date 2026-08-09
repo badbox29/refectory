@@ -335,14 +335,20 @@
 <div class="modal-overlay" id="modal-pick-recipe" role="dialog" aria-modal="true">
   <div class="modal modal-md">
     <div class="modal-header">
-      <h2 class="modal-title">Choose a Recipe</h2>
+      <h2 class="modal-title" id="pick-recipe-title">Choose a Recipe</h2>
       <button class="modal-close" title="Close">✕</button>
     </div>
     <div class="modal-body">
       <div class="form-group">
         <input class="input" id="pick-recipe-search" placeholder="Search recipes…" type="search"/>
       </div>
+      <label id="pick-leftovers-toggle" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.75rem;cursor:pointer;">
+        <input type="checkbox" id="pick-as-leftovers"/>
+        <span class="f13 muted">Add as leftovers — no ingredients added to the shopping list</span>
+      </label>
+      <p id="pick-recipe-hint" class="f13 muted" style="display:none;margin-bottom:.6rem;"></p>
       <div id="pick-recipe-grid" class="pick-recipe-grid"></div>
+      <button class="btn btn-ghost btn-sm" id="pick-show-all" style="display:none;margin-top:.75rem;width:100%;"></button>
       <p id="pick-recipe-empty" class="muted" style="display:none;text-align:center;padding:2rem 0;">
         No recipes yet — add some first!
       </p>
@@ -910,6 +916,17 @@
 <div id="toast"></div>
 
 <!-- ── Scripts ────────────────────────────────────────────── -->
+<!-- ── Placeholder art (tiled utensils) — one definition, referenced everywhere ── -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <pattern id="rf-utensils" width="44" height="44" patternUnits="userSpaceOnUse" patternTransform="rotate(20)">
+      <path d="M10 8 L10 36 M10 8 L7 8 L7 18 L13 18 L13 8 L10 8 M30 8 L30 36 M27 8 Q34 8 34 20 Q34 24 30 24"
+            fill="none" stroke-width="1.4" stroke-linecap="round"
+            style="stroke: var(--green-soft); opacity: .34;"/>
+    </pattern>
+  </defs>
+</svg>
+
 <script src="js/imageStore.js"></script>
 <script src="js/auth.js"></script>
 <script src="js/app.js"></script>
