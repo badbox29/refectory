@@ -327,10 +327,19 @@ const PLACEHOLDER_ART =
   '<svg class="rf-ph" aria-hidden="true" focusable="false"><rect width="100%" height="100%" fill="url(#rf-utensils)"/></svg>';
 
 const LEFTOVERS_PREFIX = 'leftovers:';
+// A "fend for yourselves" night points at no recipe at all — it's the absence
+// of a plan, not a reference to one. Stored as a bare sentinel in the slot.
+const FEND_ENTRY = 'fend';
+function isFendEntry(entry) { return entry === FEND_ENTRY; }
+
+// Badge wording — one place each to change it
+const LEFTOVERS_LABEL = 'Leftovers';
+const FEND_LABEL      = 'Fend For Yourselves';
 function isLeftoverEntry(entry) {
   return typeof entry === 'string' && entry.startsWith(LEFTOVERS_PREFIX);
 }
 function slotRecipeId(entry) {
+  if (isFendEntry(entry)) return null;
   return isLeftoverEntry(entry) ? entry.slice(LEFTOVERS_PREFIX.length) : entry;
 }
 function makeLeftoverEntry(recipeId) { return LEFTOVERS_PREFIX + recipeId; }
@@ -1355,6 +1364,7 @@ function getTodaysMeals() {
   for (const slot of MEAL_SLOTS) {
     const entry = dayPlan[slot];
     if (!entry) continue;
+    if (isFendEntry(entry)) { meals.push({ slot, recipe: null, fend: true }); continue; }
     const recipe = getRecipe(slotRecipeId(entry));
     if (recipe) meals.push({ slot, recipe, leftover: isLeftoverEntry(entry) });
   }
@@ -1378,18 +1388,20 @@ function renderTodaysMealsDrawer() {
     return;
   }
 
-  body.innerHTML = `<div class="todays-meals-grid">${meals.map(({ slot, recipe, leftover }) => `
-    <div class="todays-meal-card" data-id="${esc(recipe.id)}">
-      <div class="todays-meal-card-img" data-img-id="${esc(recipe.id)}">${PLACEHOLDER_ART}</div>
+  body.innerHTML = `<div class="todays-meals-grid">${meals.map(({ slot, recipe, leftover, fend }) => `
+    <div class="todays-meal-card"${fend ? '' : ` data-id="${esc(recipe.id)}"`}>
+      <div class="todays-meal-card-img"${fend ? '' : ` data-img-id="${esc(recipe.id)}"`}>${PLACEHOLDER_ART}</div>
       <div class="todays-meal-card-body">
         <span class="meal-type-badge meal-type-${esc(slot)}">${esc(capitalise(slot))}</span>
-        ${leftover ? '<span class="leftovers-badge">Leftovers</span>' : ''}
-        <div class="todays-meal-card-title">${esc(recipe.title)}</div>
+        ${fend ? `<span class="fend-badge">${FEND_LABEL}</span>` : ''}
+        ${leftover ? `<span class="leftovers-badge">${LEFTOVERS_LABEL}</span>` : ''}
+        ${fend ? '' : `<div class="todays-meal-card-title">${esc(recipe.title)}</div>`}
       </div>
     </div>
   `).join('')}</div>`;
 
   body.querySelectorAll('.todays-meal-card').forEach(card => {
+    if (!card.dataset.id) return;
     card.addEventListener('click', () => {
       closeModal('todays-meals-overlay');
       openRecipeDetail(card.dataset.id);
@@ -1432,7 +1444,7 @@ function suggestRandomMealSlot(weekKey, dayIdx, slot) {
   const plan = getWeekPlan(weekKey);
   const usedIds = [];
   for (const day of Object.values(plan)) {
-    for (const entry of Object.values(day)) { if (entry) usedIds.push(slotRecipeId(entry)); }
+    for (const entry of Object.values(day)) { const id = slotRecipeId(entry); if (id) usedIds.push(id); }
   }
 
   const allRecipes = Object.values(App.data.recipes || {});
@@ -1467,7 +1479,7 @@ function setMealSlot(weekKey, dayIdx, slot, recipeId) {
     App.data.mealplan[weekKey][dayIdx][slot] = recipeId;
     // Record last cooked date — but eating leftovers isn't cooking, so a
     // leftovers entry leaves the original cook date alone.
-    if (!isLeftoverEntry(recipeId)) {
+    if (!isLeftoverEntry(recipeId) && !isFendEntry(recipeId)) {
       const r = getRecipe(recipeId);
       if (r) { r.lastCooked = Date.now(); saveRecipe(r); }
     }
@@ -1526,16 +1538,23 @@ function renderPlannerMobile() {
       const entry  = plan[di]?.[slot];
       const rid    = slotRecipeId(entry);
       const isLeft = isLeftoverEntry(entry);
+      const isFend = isFendEntry(entry);
       const r      = rid ? getRecipe(rid) : null;
       return `
         <div class="planner-mobile-slot">
           <div class="planner-mobile-slot-label">${capitalise(slot)}</div>
           <div class="planner-mobile-slot-content">
-            ${r
+            ${isFend
+              ? `<div class="plan-recipe plan-recipe-mobile plan-recipe-fend">
+                   <div class="plan-recipe-img plan-recipe-img-fend">${PLACEHOLDER_ART}</div>
+                   <span class="fend-badge">${FEND_LABEL}</span>
+                   <button class="plan-remove" data-day="${di}" data-slot="${slot}" title="Remove">✕</button>
+                 </div>`
+              : r
               ? `<div class="plan-recipe plan-recipe-mobile${isLeft ? ' plan-recipe-leftover' : ''}" data-id="${esc(rid)}">
                    <div class="plan-recipe-img" data-plan-img="${esc(rid)}"></div>
                    <div class="plan-recipe-img-placeholder">${PLACEHOLDER_ART}</div>
-                   ${isLeft ? '<span class="leftovers-badge">Leftovers</span>' : ''}
+                   ${isLeft ? `<span class="leftovers-badge">${LEFTOVERS_LABEL}</span>` : ''}
                    <div class="plan-recipe-title">${esc(r.title)}</div>
                    <button class="plan-remove" data-day="${di}" data-slot="${slot}" title="Remove">✕</button>
                  </div>`
@@ -1582,6 +1601,7 @@ function renderPlannerMobile() {
 
   // Wire recipe card clicks
   dayEl.querySelectorAll('.plan-recipe').forEach(el => {
+    if (!el.dataset.id) return;
     el.addEventListener('click', () => openRecipeDetail(el.dataset.id));
   });
 
@@ -1635,14 +1655,21 @@ function renderPlanner() {
             const entry  = plan[di]?.[slot];
             const rid    = slotRecipeId(entry);
             const isLeft = isLeftoverEntry(entry);
+            const isFend = isFendEntry(entry);
             const r      = rid ? getRecipe(rid) : null;
             return `
               <td class="plan-cell" data-day="${di}" data-slot="${slot}">
-                ${r
+                ${isFend
+                  ? `<div class="plan-recipe plan-recipe-fend">
+                       <div class="plan-recipe-img plan-recipe-img-fend">${PLACEHOLDER_ART}</div>
+                       <span class="fend-badge">${FEND_LABEL}</span>
+                       <button class="plan-remove" data-day="${di}" data-slot="${slot}" title="Remove">✕</button>
+                     </div>`
+                  : r
                   ? `<div class="plan-recipe${isLeft ? ' plan-recipe-leftover' : ''}" data-id="${esc(rid)}">
                        <div class="plan-recipe-img" data-plan-img="${esc(rid)}"></div>
                        <div class="plan-recipe-img-placeholder">${PLACEHOLDER_ART}</div>
-                       ${isLeft ? '<span class="leftovers-badge">Leftovers</span>' : ''}
+                       ${isLeft ? `<span class="leftovers-badge">${LEFTOVERS_LABEL}</span>` : ''}
                        <div class="plan-recipe-title">${esc(r.title)}</div>
                        <button class="plan-remove" data-day="${di}" data-slot="${slot}" title="Remove">✕</button>
                      </div>`
@@ -1691,6 +1718,7 @@ function renderPlanner() {
 
   // Click card to view recipe
   table.querySelectorAll('.plan-recipe').forEach(el => {
+    if (!el.dataset.id) return;
     el.addEventListener('click', () => openRecipeDetail(el.dataset.id));
   });
 
@@ -1759,6 +1787,17 @@ function openPickRecipeModal(weekKey, dayIdx, slot, mode) {
 
   const showAll = document.getElementById('pick-show-all');
   showAll.style.display = 'none';
+
+  // "No planned meal" skips recipe selection entirely
+  const fendBtn = document.getElementById('pick-fend');
+  fendBtn.style.display = isLeftovers ? '' : 'none';
+  fendBtn.onclick = () => {
+    if (_pickTarget) {
+      setMealSlot(_pickTarget.weekKey, _pickTarget.dayIdx, _pickTarget.slot, FEND_ENTRY);
+      if (isMobilePlanner()) renderPlannerMobile(); else renderPlanner();
+    }
+    closeModal('modal-pick-recipe');
+  };
 
   if (isLeftovers) {
     const recent = getRecentlyPlanned(7);
@@ -2132,8 +2171,9 @@ function gatherAllShoppingItems() {
     const plan = getWeekPlan(wk);
     for (const day of Object.values(plan)) {
       for (const entry of Object.values(day)) {
-        // Leftovers are already-cooked food — nothing to buy for them
-        if (entry && !isLeftoverEntry(entry)) recipeIds.add(entry);
+        // Leftovers are already-cooked food, fend nights aren't a meal —
+        // neither contributes anything to buy
+        if (entry && !isLeftoverEntry(entry) && !isFendEntry(entry)) recipeIds.add(entry);
       }
     }
   }
@@ -2263,8 +2303,9 @@ function renderShoppingList() {
     const plan = getWeekPlan(wk);
     for (const day of Object.values(plan)) {
       for (const entry of Object.values(day)) {
-        // Leftovers are already-cooked food — nothing to buy for them
-        if (entry && !isLeftoverEntry(entry)) recipeIds.add(entry);
+        // Leftovers are already-cooked food, fend nights aren't a meal —
+        // neither contributes anything to buy
+        if (entry && !isLeftoverEntry(entry) && !isFendEntry(entry)) recipeIds.add(entry);
       }
     }
   }
