@@ -315,6 +315,26 @@ const DAY_NAMES  = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const FULL_DAYS  = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 const MEAL_SLOTS = ['breakfast', 'lunch', 'dinner', 'snack'];
 
+// ─── Leftovers ────────────────────────────────────────────────────
+// A meal slot holds a recipe id string. A leftovers entry is that same
+// string with a prefix, so the mealplan shape never changes and sync,
+// merge and export keep working untouched. Leftovers point at the recipe
+// they came from, but don't re-stamp lastCooked and contribute no
+// ingredients to the shopping list.
+// Full-bleed placeholder for recipes with no image. Fills its container and
+// picks up --green-soft, so it tracks the light/dark theme.
+const PLACEHOLDER_ART =
+  '<svg class="rf-ph" aria-hidden="true" focusable="false"><rect width="100%" height="100%" fill="url(#rf-utensils)"/></svg>';
+
+const LEFTOVERS_PREFIX = 'leftovers:';
+function isLeftoverEntry(entry) {
+  return typeof entry === 'string' && entry.startsWith(LEFTOVERS_PREFIX);
+}
+function slotRecipeId(entry) {
+  return isLeftoverEntry(entry) ? entry.slice(LEFTOVERS_PREFIX.length) : entry;
+}
+function makeLeftoverEntry(recipeId) { return LEFTOVERS_PREFIX + recipeId; }
+
 // ─── Current view state ───────────────────────────────────────────
 
 const View = {
@@ -379,7 +399,7 @@ function deleteRecipe(id) {
   for (const wk of Object.keys(App.data.mealplan)) {
     for (const day of Object.keys(App.data.mealplan[wk])) {
       for (const slot of MEAL_SLOTS) {
-        if (App.data.mealplan[wk][day][slot] === id) {
+        if (slotRecipeId(App.data.mealplan[wk][day][slot]) === id) {
           delete App.data.mealplan[wk][day][slot];
         }
       }
@@ -643,7 +663,7 @@ function renderRecipes() {
     <div class="recipe-card${View.selectMode ? ' select-mode' : ''}${View.selectedRecipeIds.has(r.id) ? ' is-selected' : ''}" data-id="${esc(r.id)}">
       ${View.selectMode ? `<div class="recipe-card-select-overlay"><input type="checkbox" class="recipe-select-cb" data-id="${esc(r.id)}" ${View.selectedRecipeIds.has(r.id) ? 'checked' : ''}/></div>` : ''}
       <div class="recipe-card-img" data-img-id="${esc(r.id)}">
-        <div class="recipe-card-placeholder">🍽️</div>
+        <div class="recipe-card-placeholder">${PLACEHOLDER_ART}</div>
         ${q && matchSources[r.id] ? renderMatchPill(matchSources[r.id]) : ''}
       </div>
       <div class="recipe-card-body">
@@ -1333,10 +1353,10 @@ function getTodaysMeals() {
 
   const meals = [];
   for (const slot of MEAL_SLOTS) {
-    const rid = dayPlan[slot];
-    if (!rid) continue;
-    const recipe = getRecipe(rid);
-    if (recipe) meals.push({ slot, recipe });
+    const entry = dayPlan[slot];
+    if (!entry) continue;
+    const recipe = getRecipe(slotRecipeId(entry));
+    if (recipe) meals.push({ slot, recipe, leftover: isLeftoverEntry(entry) });
   }
   return meals;
 }
@@ -1358,11 +1378,12 @@ function renderTodaysMealsDrawer() {
     return;
   }
 
-  body.innerHTML = `<div class="todays-meals-grid">${meals.map(({ slot, recipe }) => `
+  body.innerHTML = `<div class="todays-meals-grid">${meals.map(({ slot, recipe, leftover }) => `
     <div class="todays-meal-card" data-id="${esc(recipe.id)}">
-      <div class="todays-meal-card-img" data-img-id="${esc(recipe.id)}">🍽️</div>
+      <div class="todays-meal-card-img" data-img-id="${esc(recipe.id)}">${PLACEHOLDER_ART}</div>
       <div class="todays-meal-card-body">
         <span class="meal-type-badge meal-type-${esc(slot)}">${esc(capitalise(slot))}</span>
+        ${leftover ? '<span class="leftovers-badge">Leftovers</span>' : ''}
         <div class="todays-meal-card-title">${esc(recipe.title)}</div>
       </div>
     </div>
@@ -1411,7 +1432,7 @@ function suggestRandomMealSlot(weekKey, dayIdx, slot) {
   const plan = getWeekPlan(weekKey);
   const usedIds = [];
   for (const day of Object.values(plan)) {
-    for (const rid of Object.values(day)) { if (rid) usedIds.push(rid); }
+    for (const entry of Object.values(day)) { if (entry) usedIds.push(slotRecipeId(entry)); }
   }
 
   const allRecipes = Object.values(App.data.recipes || {});
@@ -1444,9 +1465,12 @@ function setMealSlot(weekKey, dayIdx, slot, recipeId) {
   if (!App.data.mealplan[weekKey][dayIdx]) App.data.mealplan[weekKey][dayIdx] = {};
   if (recipeId) {
     App.data.mealplan[weekKey][dayIdx][slot] = recipeId;
-    // Record last cooked date on the recipe
-    const r = getRecipe(recipeId);
-    if (r) { r.lastCooked = Date.now(); saveRecipe(r); }
+    // Record last cooked date — but eating leftovers isn't cooking, so a
+    // leftovers entry leaves the original cook date alone.
+    if (!isLeftoverEntry(recipeId)) {
+      const r = getRecipe(recipeId);
+      if (r) { r.lastCooked = Date.now(); saveRecipe(r); }
+    }
   } else {
     delete App.data.mealplan[weekKey][dayIdx][slot];
   }
@@ -1499,22 +1523,26 @@ function renderPlannerMobile() {
   dayEl.innerHTML = `
     <div class="planner-mobile-date-label">${dateLabel}</div>
     ${MEAL_SLOTS.map(slot => {
-      const rid = plan[di]?.[slot];
-      const r   = rid ? getRecipe(rid) : null;
+      const entry  = plan[di]?.[slot];
+      const rid    = slotRecipeId(entry);
+      const isLeft = isLeftoverEntry(entry);
+      const r      = rid ? getRecipe(rid) : null;
       return `
         <div class="planner-mobile-slot">
           <div class="planner-mobile-slot-label">${capitalise(slot)}</div>
           <div class="planner-mobile-slot-content">
             ${r
-              ? `<div class="plan-recipe plan-recipe-mobile" data-id="${esc(rid)}">
+              ? `<div class="plan-recipe plan-recipe-mobile${isLeft ? ' plan-recipe-leftover' : ''}" data-id="${esc(rid)}">
                    <div class="plan-recipe-img" data-plan-img="${esc(rid)}"></div>
-                   <div class="plan-recipe-img-placeholder">🍽️</div>
+                   <div class="plan-recipe-img-placeholder">${PLACEHOLDER_ART}</div>
+                   ${isLeft ? '<span class="leftovers-badge">Leftovers</span>' : ''}
                    <div class="plan-recipe-title">${esc(r.title)}</div>
                    <button class="plan-remove" data-day="${di}" data-slot="${slot}" title="Remove">✕</button>
                  </div>`
               : `<div class="plan-add-wrap plan-add-wrap-mobile">
                    <button class="plan-add plan-add-mobile" data-day="${di}" data-slot="${slot}">+ Add Recipe</button>
                    <button class="plan-dice plan-dice-mobile" data-day="${di}" data-slot="${slot}" title="Random recipe">🎲 Suggest</button>
+                   <button class="plan-leftover plan-leftover-mobile" data-day="${di}" data-slot="${slot}" title="Leftovers">♻ Leftovers</button>
                  </div>`
             }
           </div>
@@ -1535,6 +1563,13 @@ function renderPlannerMobile() {
       e.stopPropagation();
       setMealSlot(wk, parseInt(btn.dataset.day), btn.dataset.slot, null);
       renderPlannerMobile();
+    });
+  });
+
+  // Wire leftovers buttons (mobile)
+  dayEl.querySelectorAll('.plan-leftover').forEach(btn => {
+    btn.addEventListener('click', () => {
+      openPickRecipeModal(wk, parseInt(btn.dataset.day), btn.dataset.slot, 'leftovers');
     });
   });
 
@@ -1597,20 +1632,24 @@ function renderPlanner() {
         <tr>
           <td class="slot-label">${capitalise(slot)}</td>
           ${[0,1,2,3,4,5,6].map(di => {
-            const rid = plan[di]?.[slot];
-            const r   = rid ? getRecipe(rid) : null;
+            const entry  = plan[di]?.[slot];
+            const rid    = slotRecipeId(entry);
+            const isLeft = isLeftoverEntry(entry);
+            const r      = rid ? getRecipe(rid) : null;
             return `
               <td class="plan-cell" data-day="${di}" data-slot="${slot}">
                 ${r
-                  ? `<div class="plan-recipe" data-id="${esc(rid)}">
+                  ? `<div class="plan-recipe${isLeft ? ' plan-recipe-leftover' : ''}" data-id="${esc(rid)}">
                        <div class="plan-recipe-img" data-plan-img="${esc(rid)}"></div>
-                       <div class="plan-recipe-img-placeholder">🍽️</div>
+                       <div class="plan-recipe-img-placeholder">${PLACEHOLDER_ART}</div>
+                       ${isLeft ? '<span class="leftovers-badge">Leftovers</span>' : ''}
                        <div class="plan-recipe-title">${esc(r.title)}</div>
                        <button class="plan-remove" data-day="${di}" data-slot="${slot}" title="Remove">✕</button>
                      </div>`
                   : `<div class="plan-add-wrap">
                        <button class="plan-add" data-day="${di}" data-slot="${slot}" title="Add recipe">+</button>
                        <button class="plan-dice" data-day="${di}" data-slot="${slot}" title="Random recipe">🎲</button>
+                       <button class="plan-leftover" data-day="${di}" data-slot="${slot}" title="Leftovers">♻</button>
                      </div>`
                 }
               </td>`;
@@ -1643,6 +1682,13 @@ function renderPlanner() {
     });
   });
 
+  // Leftovers buttons (desktop)
+  table.querySelectorAll('.plan-leftover').forEach(btn => {
+    btn.addEventListener('click', () => {
+      openPickRecipeModal(wk, parseInt(btn.dataset.day), btn.dataset.slot, 'leftovers');
+    });
+  });
+
   // Click card to view recipe
   table.querySelectorAll('.plan-recipe').forEach(el => {
     el.addEventListener('click', () => openRecipeDetail(el.dataset.id));
@@ -1672,8 +1718,71 @@ function capitalise(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
 let _pickTarget = null;
 
-function openPickRecipeModal(weekKey, dayIdx, slot) {
-  _pickTarget = { weekKey, dayIdx, slot };
+// Recipes planned in the last `days` days, most recent first. Used to fill
+// the leftovers picker — what you actually cooked recently is almost always
+// what's in the fridge.
+function getRecentlyPlanned(days = 7) {
+  const seen = new Map();
+  const now  = new Date();
+  for (let i = 0; i < days; i++) {
+    const d = new Date(now);
+    d.setDate(now.getDate() - i);
+    const dayPlan = getWeekPlan(getISOWeekKey(d))[(d.getDay() + 6) % 7] || {};
+    for (const slot of MEAL_SLOTS) {
+      const id = slotRecipeId(dayPlan[slot]);
+      if (!id || !getRecipe(id)) continue;
+      const ts = d.getTime();
+      if (!seen.has(id) || seen.get(id) < ts) seen.set(id, ts);
+    }
+  }
+  return [...seen.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([id]) => getRecipe(id));
+}
+
+function openPickRecipeModal(weekKey, dayIdx, slot, mode) {
+  _pickTarget = { weekKey, dayIdx, slot, mode: mode || 'recipe' };
+  const isLeftovers = _pickTarget.mode === 'leftovers';
+
+  document.getElementById('pick-recipe-title').textContent =
+    isLeftovers ? 'Add Leftovers' : 'Choose a Recipe';
+
+  const hint = document.getElementById('pick-recipe-hint');
+  hint.style.display = isLeftovers ? '' : 'none';
+
+  // The inline toggle is the shortcut from the normal picker; redundant when
+  // you already came in through the leftovers button.
+  const toggle = document.getElementById('pick-leftovers-toggle');
+  const asLeft = document.getElementById('pick-as-leftovers');
+  if (asLeft) asLeft.checked = false;
+  if (toggle) toggle.style.display = isLeftovers ? 'none' : 'flex';
+
+  const showAll = document.getElementById('pick-show-all');
+  showAll.style.display = 'none';
+
+  if (isLeftovers) {
+    const recent = getRecentlyPlanned(7);
+    if (recent.length) {
+      hint.textContent = 'Planned in the last 7 days:';
+      renderPickGrid(recent);
+      showAll.style.display = '';
+      showAll.textContent = 'Other — show all recipes';
+      showAll.onclick = () => {
+        hint.textContent = 'All recipes:';
+        showAll.style.display = 'none';
+        renderPickGrid(getRecipes());
+        filterPickRecipes(document.getElementById('pick-recipe-search').value);
+      };
+    } else {
+      hint.textContent = 'Nothing planned in the last 7 days — pick any recipe:';
+      renderPickGrid(getRecipes());
+    }
+    document.getElementById('pick-recipe-search').value = '';
+    filterPickRecipes('');
+    openModal('modal-pick-recipe');
+    return;
+  }
+
   const recipes   = getRecipes();
   const grid      = document.getElementById('pick-recipe-grid');
   const emptyMsg  = document.getElementById('pick-recipe-empty');
@@ -1683,35 +1792,43 @@ function openPickRecipeModal(weekKey, dayIdx, slot) {
     emptyMsg.style.display = '';
   } else {
     emptyMsg.style.display = 'none';
-    grid.innerHTML = recipes.map(r => `
-      <div class="pick-recipe-item" data-id="${esc(r.id)}">
-        <div class="pick-img" data-pick-img="${esc(r.id)}">🍽️</div>
-        <div class="pick-title">${esc(r.title)}</div>
-      </div>
-    `).join('');
-
-    // Async-load pick grid images from IndexedDB
-    grid.querySelectorAll('[data-pick-img]').forEach(async imgEl => {
-      const dataUrl = await resolveImage(imgEl.dataset.pickImg);
-      if (dataUrl) {
-        imgEl.style.backgroundImage = `url('${dataUrl}')`;
-        imgEl.textContent = '';
-      }
-    });
-    grid.querySelectorAll('.pick-recipe-item').forEach(item => {
-      item.addEventListener('click', () => {
-        if (_pickTarget) {
-          setMealSlot(_pickTarget.weekKey, _pickTarget.dayIdx, _pickTarget.slot, item.dataset.id);
-          renderPlanner();
-        }
-        closeModal('modal-pick-recipe');
-      });
-    });
+    renderPickGrid(recipes);
   }
 
   document.getElementById('pick-recipe-search').value = '';
   filterPickRecipes('');
   openModal('modal-pick-recipe');
+}
+
+function renderPickGrid(recipes) {
+  const grid = document.getElementById('pick-recipe-grid');
+  grid.innerHTML = recipes.map(r => `
+    <div class="pick-recipe-item" data-id="${esc(r.id)}">
+      <div class="pick-img" data-pick-img="${esc(r.id)}">${PLACEHOLDER_ART}</div>
+      <div class="pick-title">${esc(r.title)}</div>
+    </div>
+  `).join('');
+
+  grid.querySelectorAll('[data-pick-img]').forEach(async imgEl => {
+    const dataUrl = await resolveImage(imgEl.dataset.pickImg);
+    if (dataUrl) {
+      imgEl.style.backgroundImage = `url('${dataUrl}')`;
+      imgEl.textContent = '';
+    }
+  });
+
+  grid.querySelectorAll('.pick-recipe-item').forEach(item => {
+    item.addEventListener('click', () => {
+      if (_pickTarget) {
+        const asLeftovers = _pickTarget.mode === 'leftovers'
+          || document.getElementById('pick-as-leftovers')?.checked;
+        const entry = asLeftovers ? makeLeftoverEntry(item.dataset.id) : item.dataset.id;
+        setMealSlot(_pickTarget.weekKey, _pickTarget.dayIdx, _pickTarget.slot, entry);
+        if (isMobilePlanner()) renderPlannerMobile(); else renderPlanner();
+      }
+      closeModal('modal-pick-recipe');
+    });
+  });
 }
 
 function openAddToPlanModal(recipeId) {
@@ -2014,8 +2131,9 @@ function gatherAllShoppingItems() {
   for (const wk of weeks) {
     const plan = getWeekPlan(wk);
     for (const day of Object.values(plan)) {
-      for (const rid of Object.values(day)) {
-        if (rid) recipeIds.add(rid);
+      for (const entry of Object.values(day)) {
+        // Leftovers are already-cooked food — nothing to buy for them
+        if (entry && !isLeftoverEntry(entry)) recipeIds.add(entry);
       }
     }
   }
@@ -2144,8 +2262,9 @@ function renderShoppingList() {
   for (const wk of weeks) {
     const plan = getWeekPlan(wk);
     for (const day of Object.values(plan)) {
-      for (const rid of Object.values(day)) {
-        if (rid) recipeIds.add(rid);
+      for (const entry of Object.values(day)) {
+        // Leftovers are already-cooked food — nothing to buy for them
+        if (entry && !isLeftoverEntry(entry)) recipeIds.add(entry);
       }
     }
   }
@@ -2622,7 +2741,7 @@ function renderCookbooks() {
     return `
       <div class="cookbook-card" data-id="${esc(cb.id)}">
         <div class="cookbook-card-mosaic">
-          ${previews.map(rid => `<div class="cookbook-mosaic-cell" data-mosaic-img="${esc(rid)}">🍽️</div>`).join('')}
+          ${previews.map(rid => `<div class="cookbook-mosaic-cell" data-mosaic-img="${esc(rid)}">${PLACEHOLDER_ART}</div>`).join('')}
           ${previews.length === 0 ? '<div class="cookbook-mosaic-empty">📚</div>' : ''}
         </div>
         <div class="cookbook-card-body">
@@ -2721,7 +2840,7 @@ function renderCookbookDetail(id) {
       return `
         <div class="recipe-card" data-id="${esc(rid)}">
           <div class="recipe-card-img" data-img-id="${esc(rid)}">
-            <div class="recipe-card-placeholder">🍽️</div>
+            <div class="recipe-card-placeholder">${PLACEHOLDER_ART}</div>
           </div>
           <div class="recipe-card-body">
             <div class="recipe-card-title">${esc(r.title)}</div>
@@ -2808,7 +2927,7 @@ function openCookbookPick(cookbookId) {
 
     g.innerHTML = recipes.map(r => `
       <div class="pick-recipe-item" data-id="${esc(r.id)}">
-        <div class="pick-img" data-pick-img="${esc(r.id)}">🍽️</div>
+        <div class="pick-img" data-pick-img="${esc(r.id)}">${PLACEHOLDER_ART}</div>
         <div class="pick-title">${esc(r.title)}</div>
       </div>`).join('');
 
