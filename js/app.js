@@ -356,6 +356,15 @@ function getRecipes() {
 
 function getRecipe(id) { return App.data.recipes?.[id] || null; }
 
+// Resolve a recipe's image for display. Locally cached bytes win (Mealie
+// imports, pasted data URLs); otherwise fall back to the remote link stored
+// on the recipe record, which syncs across devices.
+async function resolveImage(id) {
+  const local = await ImageStore.get(id);
+  if (local) return local;
+  return getRecipe(id)?.imageUrl || null;
+}
+
 function saveRecipe(recipe) {
   recipe.updatedAt = Date.now();
   if (!recipe.createdAt) recipe.createdAt = recipe.updatedAt;
@@ -670,7 +679,7 @@ function renderRecipes() {
 
   // Async-load card images from IndexedDB (non-blocking)
   grid.querySelectorAll('[data-img-id]').forEach(async imgEl => {
-    const dataUrl = await ImageStore.get(imgEl.dataset.imgId);
+    const dataUrl = await resolveImage(imgEl.dataset.imgId);
     if (dataUrl) {
       imgEl.style.backgroundImage = `url('${dataUrl}')`;
       imgEl.querySelector('.recipe-card-placeholder')?.remove();
@@ -979,7 +988,7 @@ function openRecipeDetail(id) {
   const imgEl = document.getElementById('detail-image');
   imgEl.style.display = 'none';
   imgEl.src = '';
-  ImageStore.get(id).then(dataUrl => {
+  resolveImage(id).then(dataUrl => {
     if (dataUrl) { imgEl.src = dataUrl; imgEl.style.display = ''; }
   });
 
@@ -1186,7 +1195,7 @@ function openRecipeEditor(id = null, prefill = null) {
   form.querySelector('#editor-tags').value        = (recipe.tags || []).join(', ');
   form.querySelector('#editor-source').value      = recipe.source      || '';
   form.querySelector('#editor-source-url').value  = recipe.sourceUrl   || '';
-  form.querySelector('#editor-image-url').value   = recipe.image || '';
+  form.querySelector('#editor-image-url').value   = recipe.imageUrl || recipe.image || '';
 
   // Ingredients
   renderEditorIngredients(recipe.ingredients || [{ name: '', amount: '', unit: '' }]);
@@ -1266,6 +1275,7 @@ function collectEditorData() {
     tags,
     source:      form.querySelector('#editor-source').value.trim(),
     sourceUrl:   form.querySelector('#editor-source-url').value.trim(),
+    imageUrl:    form.querySelector('#editor-image-url').value.trim(),
     ingredients,
     steps,
   };
@@ -1287,12 +1297,16 @@ function saveEditorRecipe() {
   if (!View.editingId) View.editingId = genId();
   const id       = View.editingId;
   const existing = getRecipe(id) || {};
+
+  // Remote image links live on the recipe record so they sync across devices.
+  // A pasted data: URL is raw bytes — those stay in IndexedDB, never in
+  // localStorage and never pushed to the worker.
+  if (data.imageUrl.startsWith('data:')) {
+    ImageStore.set(id, data.imageUrl);
+    data.imageUrl = '';
+  }
   saveRecipe({ ...existing, ...data, id });
 
-  // Save image URL to IndexedDB — kept out of recipe data / localStorage
-  const form   = document.getElementById('recipe-editor-form');
-  const imgUrl = form?.querySelector('#editor-image-url')?.value.trim();
-  if (imgUrl) ImageStore.set(id, imgUrl);
   closeModal('modal-recipe-editor');
   View.editingId = null;
   if (btn) btn.disabled = false;
@@ -1363,7 +1377,7 @@ function renderTodaysMealsDrawer() {
 
   // Async-load card images from IndexedDB (non-blocking)
   body.querySelectorAll('[data-img-id]').forEach(async imgEl => {
-    const dataUrl = await ImageStore.get(imgEl.dataset.imgId);
+    const dataUrl = await resolveImage(imgEl.dataset.imgId);
     if (dataUrl) {
       imgEl.style.backgroundImage = `url('${dataUrl}')`;
       imgEl.textContent = '';
@@ -1538,7 +1552,7 @@ function renderPlannerMobile() {
 
   // Async-load images
   dayEl.querySelectorAll('[data-plan-img]').forEach(async imgEl => {
-    const dataUrl = await ImageStore.get(imgEl.dataset.planImg);
+    const dataUrl = await resolveImage(imgEl.dataset.planImg);
     if (dataUrl) {
       imgEl.style.backgroundImage = `url('${dataUrl}')`;
       imgEl.closest('.plan-recipe')?.querySelector('.plan-recipe-img-placeholder')?.remove();
@@ -1636,7 +1650,7 @@ function renderPlanner() {
 
   // Async-load plan card images from IndexedDB
   table.querySelectorAll('[data-plan-img]').forEach(async imgEl => {
-    const dataUrl = await ImageStore.get(imgEl.dataset.planImg);
+    const dataUrl = await resolveImage(imgEl.dataset.planImg);
     if (dataUrl) {
       imgEl.style.backgroundImage = `url('${dataUrl}')`;
       imgEl.closest('.plan-recipe')?.querySelector('.plan-recipe-img-placeholder')?.remove();
@@ -1678,7 +1692,7 @@ function openPickRecipeModal(weekKey, dayIdx, slot) {
 
     // Async-load pick grid images from IndexedDB
     grid.querySelectorAll('[data-pick-img]').forEach(async imgEl => {
-      const dataUrl = await ImageStore.get(imgEl.dataset.pickImg);
+      const dataUrl = await resolveImage(imgEl.dataset.pickImg);
       if (dataUrl) {
         imgEl.style.backgroundImage = `url('${dataUrl}')`;
         imgEl.textContent = '';
@@ -2621,7 +2635,7 @@ function renderCookbooks() {
 
   // Async-load mosaic images
   grid.querySelectorAll('[data-mosaic-img]').forEach(async cell => {
-    const dataUrl = await ImageStore.get(cell.dataset.mosaicImg);
+    const dataUrl = await resolveImage(cell.dataset.mosaicImg);
     if (dataUrl) {
       cell.style.backgroundImage = `url('${dataUrl}')`;
       cell.textContent = '';
@@ -2725,7 +2739,7 @@ function renderCookbookDetail(id) {
 
     // Async-load images
     grid.querySelectorAll('[data-img-id]').forEach(async imgEl => {
-      const dataUrl = await ImageStore.get(imgEl.dataset.imgId);
+      const dataUrl = await resolveImage(imgEl.dataset.imgId);
       if (dataUrl) {
         imgEl.style.backgroundImage = `url('${dataUrl}')`;
         imgEl.querySelector('.recipe-card-placeholder')?.remove();
@@ -2799,7 +2813,7 @@ function openCookbookPick(cookbookId) {
       </div>`).join('');
 
     g.querySelectorAll('[data-pick-img]').forEach(async imgEl => {
-      const dataUrl = await ImageStore.get(imgEl.dataset.pickImg);
+      const dataUrl = await resolveImage(imgEl.dataset.pickImg);
       if (dataUrl) { imgEl.style.backgroundImage = `url('${dataUrl}')`; imgEl.textContent = ''; }
     });
 
@@ -2898,6 +2912,8 @@ async function runExport(idsOverride = null) {
     for (const id of ids) {
       const dataUrl = await ImageStore.get(id);
       if (!dataUrl) continue;
+      // Only cached bytes go in the zip; remote links ride along in recipes.json
+      if (!dataUrl.startsWith('data:')) continue;
       // dataUrl is "data:image/webp;base64,{b64}" — extract the raw base64
       const b64 = dataUrl.split(',')[1];
       if (b64) { imgFolder.file(`${id}.webp`, b64, { base64: true }); imgCount++; }
@@ -3465,7 +3481,7 @@ async function printRecipe(id) {
 
   // Image
   const imgEl = document.getElementById('print-image');
-  const dataUrl = await ImageStore.get(id);
+  const dataUrl = await resolveImage(id);
   if (dataUrl) {
     imgEl.src = dataUrl;
     imgEl.style.display = '';
@@ -3601,6 +3617,31 @@ function onGuestReady(data) {
   renderAll();
 }
 
+// ─── One-time migration: promote remote image links out of IndexedDB ──
+// Historically every image — remote link or raw bytes — was written to
+// IndexedDB, which is per-device and never syncs. A link is ~100 bytes and
+// belongs on the recipe record so it travels with the rest of the data.
+// Bytes stay where they are.
+async function migrateImageUrls() {
+  if ((App.data.imageUrlMigration || 0) >= 1) return;
+  let moved = 0;
+  for (const id of Object.keys(App.data.recipes || {})) {
+    const r = App.data.recipes[id];
+    if (!r || r.imageUrl) continue;
+    let val;
+    try { val = await ImageStore.get(id); } catch { continue; }
+    if (!val || val.startsWith('data:')) continue;
+    r.imageUrl = val;
+    moved++;
+  }
+  App.data.imageUrlMigration = 1;
+  scheduleSave();
+  if (moved) {
+    renderAll();
+    showToast(`Recovered ${moved} image link${moved === 1 ? '' : 's'} ✓`);
+  }
+}
+
 function renderAll() {
   renderRecipes();
   if (View.activeSection === 'planner')   renderPlanner();
@@ -3677,7 +3718,11 @@ async function boot() {
     for (const [id, localR] of Object.entries(localRecipes)) {
       const remoteR = remoteRecipes[id];
       if (!remoteR || (localR.updatedAt || 0) >= (remoteR.updatedAt || 0)) {
-        merged[id] = localR;
+        // Local wins, but don't discard an image link the remote copy has
+        // and this device hasn't migrated yet.
+        merged[id] = (!localR.imageUrl && remoteR?.imageUrl)
+          ? { ...localR, imageUrl: remoteR.imageUrl }
+          : localR;
       }
     }
     App.data = mergeData({ ...remote, recipes: merged });
@@ -3692,6 +3737,7 @@ async function boot() {
   if (!ok) return;
 
   renderAll();
+  migrateImageUrls();
   if (!Auth.isGuest()) startSyncPing();
 }
 
