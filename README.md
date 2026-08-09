@@ -1,6 +1,6 @@
 # Refectory — Recipe Keeper & Meal Planner
 
-A personal recipe box and meal planning tool. Import recipes from Mealie backups or paste any recipe URL for automatic scraping. Organize with cookbooks, tags, and ratings. Plan your week, generate a smart shopping list, and print recipe cards that look like they came from a real recipe box. No build tools, no npm, no accounts — just static files and a Cloudflare Worker backend for image-free cross-device sync.
+A personal recipe box and meal planning tool. Import recipes from Mealie backups or paste any recipe URL for automatic scraping. Organize with cookbooks, tags, and ratings. Plan your week, generate a smart shopping list, and print recipe cards that look like they came from a real recipe box. No build tools, no npm, no accounts — just static files and a Cloudflare Worker backend for cross-device sync.
 
 #### Demo:
 https://badbox29.github.io/refectory/
@@ -15,7 +15,7 @@ https://badbox29.github.io/refectory/
 ## Features
 
 - **Recipe URL scraper** — paste any recipe link; Refectory fetches the page through your Worker and parses JSON-LD structured data (with an Open Graph fallback) into title, ingredients, steps, times, tags, and image
-- **Mealie backup import** — drag in a Mealie `.zip` backup; parses `database.json`, joins ingredient/unit/food tables, pulls images, and merges tags with categories
+- **Mealie import, four ways** — drag in a Mealie `.zip` backup (parses `database.json`, joins ingredient/unit/food tables, pulls images, merges tags with categories), paste raw recipe JSON, or connect straight to a running Mealie instance with a URL and API key
 - **Duplicate detection on import & entry** — title-similarity matching (token overlap with a containment boost for "X" vs "X Recipe" style near-duplicates) warns when a recipe you're adding looks like one already in your library, with one-click links to the existing match — never blocks saving, just flags it
 - **Manual recipe entry** — full editor with ingredient rows (amount/unit/name), numbered steps, tags, source attribution, and an embeddable image URL
 - **Serving scaler** — live-recalculates ingredient quantities as you adjust the serving count, including fraction-aware string parsing for imported recipes
@@ -27,19 +27,22 @@ https://badbox29.github.io/refectory/
 - **Tag filtering** — collapsible tag panel with search, so libraries with hundreds of tags stay navigable
 - **Tag merge tool** — a dedicated manager listing every tag with its recipe count; search, multi-select, and merge any number of near-duplicate tags ("Mediterranean chicken salad" / "mediterranean chicken salad") into one canonical name across the whole library in a single pass, with a select-all for the currently filtered results
 - **Bulk tag editing** — toggle select mode on the recipe grid, multi-select any combination of recipes (optionally narrowed by a search first), and add or remove a tag across the entire selection at once; bulk-add to a cookbook and bulk delete/export are available from the same action bar
-- **Ingredient-aware search** — search matches ingredient list contents in addition to title, description, and tags, so "chicken spinach" surfaces any recipe containing both as ingredients even if neither word appears in the title; a match-source pill on each result shows whether it hit on title, description, tags, or ingredients
+- **Ingredient-aware search** — search matches ingredient list contents in addition to title, description, and tags, so "chicken spinach" surfaces any recipe containing both as ingredients even if neither word appears in the title; a match-source pill flags results that hit on ingredients, description, or tags (a plain title match needs no explanation, so it gets no pill)
 - **Cookbooks** — curated recipe collections separate from tags, each with a thumbnail mosaic of its contents
 - **Weekly meal planner** — drag-free slot-based planning across Breakfast/Lunch/Dinner/Snack for all seven days, with a single-day mobile view on narrow screens
+- **Leftovers & fend-for-yourselves nights** — mark a slot as leftovers of a specific recipe, or as no planned meal at all. Leftovers open a picker seeded with everything planned in the last 7 days (most recent first) with the full library one click away; fend nights skip the picker entirely. Neither adds ingredients to the shopping list, and leftovers don't re-stamp the original recipe's last-cooked date. Both render as colour-coded badges on the planner card, so a week reads at a glance without a placeholder recipe cluttering your library
 - **Random recipe suggestion** — 🎲 button fills an empty slot with a recipe matching that slot's meal type, falling back to untyped or any recipe if no match exists, and avoiding repeats already planned that week
 - **Smart shopping list** — aggregates ingredients across the next two weeks of planned meals, merges matching quantities and units (handles unicode fractions, abbreviation variants, and prep-descriptor differences), and lists multiple source recipes per item
 - **Multiple shopping lists with store assignment** — create named lists (e.g. "Costco," "Farmer's Market") and assign any item — recipe-derived or manual — to one with a tap; everything still lives in one underlying list, so nothing needs to be re-entered, it's just sorted into tabs. Stays invisible (no tabs shown) until you create your first custom list
 - **Manual shopping items** — add anything not generated from a recipe; check off and clear independently
 - **Recipe printing** — single-page, recipe-box-style print layout (or Save as PDF) with ingredients, numbered steps, timing, and personal notes
 - **Shopping list printing** — dedicated print stylesheet for the smart-merged list; pick one list or several, each renders as its own clean two-column checklist page with a store-assignment pill per item
-- **Image storage via IndexedDB** — recipe photos never touch `localStorage` or the Worker; they live in the browser's IndexedDB so large imports never hit a storage quota
-- **Full backup & restore** — export a `.zip` with recipe data and images for a full portable backup, or export images-only to carry photos to a second synced device
+- **Two-tier image storage** — a recipe's image link lives on the recipe record and syncs with everything else, so a photo added on one device appears on all of them; image *files* (from Mealie backups) stay in the browser's IndexedDB, never touching `localStorage` or the Worker, so large imports never hit a storage quota. Local files win at display time, so syncing never downgrades a photo you already have
+- **Re-pull images** — an import tab that refetches missing images from each recipe's source URL, in bulk. Scans for recipes with no image on this device, shows how many are recoverable and how many have no source to recover from, then fetches four at a time with live progress, a cancel button, and a per-recipe result log. Recovered links are written to the recipe, so one repair run propagates everywhere — no backup file to shuttle between devices
+- **Full-bleed placeholder art** — recipes without an image get a tiled utensil pattern drawn from one inline SVG definition, themed to match light or dark mode
+- **Full backup & restore** — export a `.zip` with recipe data and image files for a full portable backup, or export images-only to carry photos to a second synced device
 - **Dark mode** — full light/dark theme toggle; header and navigation stay a constant deep green in both modes
-- **Mobile responsive** — tested breakpoints for tablets, mid-size phones, and folding phones (closed and open)
+- **Mobile responsive** — breakpoints at 860px, 640px, and 420px, covering tablets, mid-size phones, and folding phones closed and open
 - **Cross-device sync** — token-based KV sync via Cloudflare Worker, with an optional one-way upgrade path from token to Google sign-in
 
 ---
@@ -124,7 +127,14 @@ Your sync token is your identity in KV. It's generated automatically on first lo
 - On your **primary browser**: open Settings, copy your **Sync Token**, and save it somewhere safe.
 - On a **new browser or device**: during account setup choose **Load existing account → Continue with token**, enter your Worker URL and paste your token. Both browsers now share the same recipe data.
 
-Recipe data, meal plans, and cookbooks sync automatically once a Worker URL and token are set. **Images do not sync** — they're stored locally in IndexedDB on each device. Use the **Export → Images Only** option to carry photos to a second device (see Image Storage below).
+Recipe data, meal plans, cookbooks, and image *links* sync automatically once a Worker URL and token are set.
+
+Image **files** do not sync — they live in IndexedDB on each device. This only affects recipes imported from a Mealie backup, since those arrive as actual image files. Recipes scraped from a URL or entered by hand store a link instead, and links travel with the rest of your data.
+
+Two ways to close the gap on a new device:
+
+- **Import → Re-pull Images** refetches images from each recipe's source URL and writes the results to the recipe itself, so the repair syncs to every device. Fastest option, and it needs no files — but it only helps recipes that have a source URL, and old links do rot.
+- **Export → Images Only** produces a `.zip` of this device's image files to import elsewhere. Slower and manual, but exact and complete.
 
 ---
 
@@ -159,7 +169,18 @@ Token accounts can be upgraded to Google sign-in for a friendlier identity than 
 
 Recipe data, meal plans, cookbooks, and account preferences are stored in Cloudflare KV under your user token (or Google-linked key). Nothing is stored server-side beyond what you explicitly save.
 
-`localStorage` holds a local copy of all recipe data **except images** — it's the fallback when the Worker is unreachable and the source for instant page loads. **Recipe images are stored exclusively in the browser's IndexedDB**, never in `localStorage` and never pushed to the Worker. This keeps large recipe collections with full photo libraries well under any storage quota, but means images must be exported/imported separately when moving to a new device (see Setup → Cross-Device Sync).
+`localStorage` holds a local copy of all recipe data — it's the fallback when the Worker is unreachable and the source for instant page loads.
+
+Images are split across two stores depending on what they are:
+
+| | Where it lives | Syncs? |
+|---|---|---|
+| Image **link** (URL imports, manual entry, re-pull results) | On the recipe record, alongside title and ingredients | Yes |
+| Image **file** (Mealie backup imports, pasted data URLs) | Browser IndexedDB only | No |
+
+A link is around a hundred bytes, so it costs nothing to carry through KV. A file is measured in kilobytes each and would blow past the `localStorage` quota and bloat every sync, so those stay put. At display time a local file always wins over a link, meaning a synced link can never replace a photo you already hold locally.
+
+Images that exist only as files need either a re-pull or an images-only export to reach a second device (see Setup → Cross-Device Sync).
 
 ---
 
@@ -186,9 +207,9 @@ When importing a Mealie backup `.zip`, the following mapping is applied:
 | `tags` + `categories` | `tags[]` (merged, deduplicated) |
 | `recipes.org_url` | `source` / `sourceUrl` |
 | `prep_time`, `cook_time`, `total_time`, `recipe_yield` | timing fields + servings |
-| `data/recipes/{uuid}/images/tiny-original.webp` | `image` (stored in IndexedDB) |
+| `data/recipes/{uuid}/images/tiny-original.webp` | image file (stored in IndexedDB) |
 
-URL-scraped recipes follow the same target schema, populated from a page's JSON-LD `Recipe` structured data where available.
+URL-scraped recipes follow the same target schema, populated from a page's JSON-LD `Recipe` structured data where available, with the page's `og:image` as an image-link fallback. The **Re-pull Images** tab reuses this same extraction path against an existing recipe's stored source URL.
 
 ---
 
