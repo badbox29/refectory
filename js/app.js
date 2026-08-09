@@ -3019,8 +3019,8 @@ function openMealieImport() {
 }
 
 function switchMealieTab(tab) {
-  const panels = { backup: 'mealie-backup-panel', json: 'mealie-json-panel', api: 'mealie-api-panel', refectory: 'mealie-refectory-panel' };
-  const btns   = { backup: 'mealie-tab-backup',   json: 'mealie-tab-json',   api: 'mealie-tab-api',   refectory: 'mealie-tab-refectory'   };
+  const panels = { backup: 'mealie-backup-panel', json: 'mealie-json-panel', api: 'mealie-api-panel', refectory: 'mealie-refectory-panel', repull: 'mealie-repull-panel' };
+  const btns   = { backup: 'mealie-tab-backup',   json: 'mealie-tab-json',   api: 'mealie-tab-api',   refectory: 'mealie-tab-refectory',    repull: 'mealie-tab-repull'   };
   Object.entries(panels).forEach(([key, id]) => {
     const el = document.getElementById(id);
     if (el) el.style.display = key === tab ? '' : 'none';
@@ -3029,6 +3029,188 @@ function switchMealieTab(tab) {
     const el = document.getElementById(id);
     if (el) el.classList.toggle('active', key === tab);
   });
+  if (tab === 'repull' && !_repull.running) refreshRepullCounts();
+}
+
+// ─── Re-pull images from source URLs ──────────────────────────────
+// Refetches each recipe's source page through the worker's scrape proxy and
+// pulls a fresh image link out of it. The link is written to the recipe
+// record (not IndexedDB), so a repair run on any one device propagates to
+// every device through the normal sync. Locally cached image bytes always
+// win at display time, so this never overwrites a real image file.
+
+const REPULL_CONCURRENCY = 4;
+let _repull = { running: false, cancel: false, scan: null };
+
+// Pull an image URL out of a fetched page: JSON-LD first, then OG/Twitter meta.
+function extractImageFromHtml(html, pageUrl) {
+  let img = '';
+  try { img = parseRecipeFromHtml(html, pageUrl)?.image || ''; } catch {}
+  if (!img) {
+    try {
+      const doc  = new DOMParser().parseFromString(html, 'text/html');
+      const meta = (n) => doc.querySelector(`meta[property="${n}"]`)?.content
+                       || doc.querySelector(`meta[name="${n}"]`)?.content || '';
+      img = meta('og:image') || meta('twitter:image') || '';
+    } catch {}
+  }
+  if (!img) return '';
+  // Resolve protocol-relative and root-relative paths against the page
+  try { return new URL(img, pageUrl).href; } catch { return ''; }
+}
+
+// A recipe has an image if this device has bytes for it OR the record has a link.
+async function recipeHasImage(r) {
+  try { if (await ImageStore.get(r.id)) return true; } catch {}
+  return !!r.imageUrl;
+}
+
+async function scanRepullTargets() {
+  const recipes    = Object.values(App.data.recipes || {});
+  const gaps       = [];   // missing an image AND recoverable
+  const gapsNoSrc  = [];   // missing an image with nothing to fetch from
+  for (const r of recipes) {
+    if (await recipeHasImage(r)) continue;
+    (r.sourceUrl ? gaps : gapsNoSrc).push(r.id);
+  }
+  return {
+    total:      recipes.length,
+    withSource: recipes.filter(r => r.sourceUrl).length,
+    gaps,
+    gapsNoSrc,
+  };
+}
+
+async function refreshRepullCounts() {
+  const el = document.getElementById('repull-counts');
+  if (!el) return;
+  el.textContent = 'Scanning…';
+  const s = _repull.scan = await scanRepullTargets();
+  const missing = s.gaps.length + s.gapsNoSrc.length;
+
+  const lines = [`<strong>${s.total}</strong> recipes · <strong>${missing}</strong> missing an image`];
+  if (s.gaps.length) {
+    lines.push(`<strong style="color:var(--green-mid);">${s.gaps.length}</strong> can be recovered from a source URL`);
+  }
+  if (s.gapsNoSrc.length) {
+    lines.push(`${s.gapsNoSrc.length} have no source URL — these need an image added by hand`);
+  }
+  if (!missing) lines.push('Nothing missing on this device.');
+  el.innerHTML = lines.join('<br/>');
+
+  // Button reflects exactly how many pages a run would fetch
+  const allBox   = document.getElementById('repull-all');
+  const startBtn = document.getElementById('btn-repull-start');
+  const count    = allBox?.checked ? s.withSource : s.gaps.length;
+  if (startBtn) {
+    startBtn.disabled    = !count;
+    startBtn.textContent = count ? `Start (${count})` : 'Nothing to re-pull';
+  }
+}
+
+function repullLog(msg, color) {
+  const log = document.getElementById('repull-log');
+  if (!log) return;
+  log.style.display = '';
+  const line = document.createElement('div');
+  if (color) line.style.color = color;
+  line.textContent = msg;
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function runImageRepull() {
+  if (_repull.running) return;
+
+  const base = getWorkerUrl().replace(/\/+$/, '');
+  const statusEl = document.getElementById('mealie-import-status');
+  if (!base) {
+    statusEl.style.color = 'var(--red)';
+    statusEl.textContent = 'No worker URL configured — go to Settings first.';
+    return;
+  }
+
+  const all  = document.getElementById('repull-all')?.checked;
+  const scan = _repull.scan || (await scanRepullTargets());
+  const ids  = all
+    ? Object.values(App.data.recipes || {}).filter(r => r.sourceUrl).map(r => r.id)
+    : scan.gaps;
+
+  if (!ids.length) {
+    statusEl.style.color = 'var(--muted)';
+    statusEl.textContent = 'Nothing to re-pull.';
+    return;
+  }
+
+  _repull.running = true;
+  _repull.cancel  = false;
+
+  const startBtn  = document.getElementById('btn-repull-start');
+  const cancelBtn = document.getElementById('btn-repull-cancel');
+  const wrap      = document.getElementById('repull-progress-wrap');
+  const bar       = document.getElementById('repull-progress-bar');
+  const text      = document.getElementById('repull-progress-text');
+  const log       = document.getElementById('repull-log');
+
+  if (startBtn)  startBtn.disabled   = true;
+  if (cancelBtn) cancelBtn.style.display = '';
+  if (wrap)      wrap.style.display  = '';
+  if (log)     { log.innerHTML = ''; log.style.display = 'none'; }
+  statusEl.textContent = '';
+
+  let idx = 0, done = 0, ok = 0, noImg = 0, failed = 0;
+
+  const tick = () => {
+    const pct = Math.round((done / ids.length) * 100);
+    if (bar)  bar.style.width = pct + '%';
+    if (text) text.textContent = `${done} of ${ids.length} · ${ok} recovered · ${noImg} no image · ${failed} failed`;
+  };
+  tick();
+
+  const worker = async () => {
+    while (idx < ids.length && !_repull.cancel) {
+      const r = getRecipe(ids[idx++]);
+      if (!r || !r.sourceUrl) { done++; tick(); continue; }
+      const label = (r.title || 'Untitled').slice(0, 55);
+      try {
+        const res  = await fetch(`${base}/scrape?url=${encodeURIComponent(r.sourceUrl)}`);
+        const data = await res.json();
+        if (!res.ok || !data.html) throw new Error(data.error || `HTTP ${res.status}`);
+        const img = extractImageFromHtml(data.html, data.finalUrl || r.sourceUrl);
+        if (img) {
+          r.imageUrl = img;
+          ok++;
+          repullLog(`✓ ${label}`, 'var(--green-mid)');
+        } else {
+          noImg++;
+          repullLog(`— ${label} — page loaded, no image found`);
+        }
+      } catch (e) {
+        failed++;
+        repullLog(`✕ ${label} — ${e.message || 'fetch failed'}`, 'var(--red)');
+      }
+      done++;
+      tick();
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(REPULL_CONCURRENCY, ids.length) }, worker)
+  );
+
+  if (ok) { scheduleSave(); renderAll(); }
+
+  _repull.running = false;
+  if (cancelBtn) cancelBtn.style.display = 'none';
+  if (startBtn)  startBtn.disabled = false;
+
+  statusEl.style.color = ok ? 'var(--green-mid)' : 'var(--muted)';
+  statusEl.textContent = _repull.cancel
+    ? `Stopped — ${ok} recovered before cancelling.`
+    : `Done — ${ok} recovered, ${noImg} with no image, ${failed} failed.`;
+  if (ok) showToast(`Recovered ${ok} image${ok === 1 ? '' : 's'} ✓`);
+
+  await refreshRepullCounts();
 }
 
 function setMealieDropZoneIdle() {
@@ -3937,6 +4119,10 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('mealie-tab-json')?.addEventListener('click',       () => switchMealieTab('json'));
   document.getElementById('mealie-tab-api')?.addEventListener('click',        () => switchMealieTab('api'));
   document.getElementById('mealie-tab-refectory')?.addEventListener('click',  () => switchMealieTab('refectory'));
+  document.getElementById('mealie-tab-repull')?.addEventListener('click',     () => switchMealieTab('repull'));
+  document.getElementById('btn-repull-start')?.addEventListener('click',      runImageRepull);
+  document.getElementById('btn-repull-cancel')?.addEventListener('click',     () => { _repull.cancel = true; });
+  document.getElementById('repull-all')?.addEventListener('change',           () => { if (!_repull.running) refreshRepullCounts(); });
 
   // Drop zone
   const dropZone = document.getElementById('mealie-drop-zone');
