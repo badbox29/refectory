@@ -30,6 +30,8 @@ const AUTH_RATE_LIMIT     = 20;
 const AUTH_RATE_LIMIT_WIN = 3600;
 const RATE_LIMIT          = 120;
 const RATE_LIMIT_WINDOW   = 60;
+const SCRAPE_RATE_LIMIT   = 60;   // scrapes per window, per IP
+const SCRAPE_RATE_WINDOW  = 60;   // seconds
 
 // ── Response helpers ───────────────────────────────────────────────────────
 
@@ -44,6 +46,9 @@ function buildCors(origin) {
     'Access-Control-Allow-Origin':  origin,
     'Access-Control-Allow-Methods': 'GET, PUT, POST, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Timestamp, X-Signature',
+    // Without this the browser hides these from JS entirely — only CORS-safelisted
+    // response headers are readable by default.
+    'Access-Control-Expose-Headers': 'Retry-After, X-RateLimit-Remaining, X-Account-Migrated, X-Token-Migrated',
     'Vary': 'Origin',
     'Cache-Control': 'no-store',
   };
@@ -362,6 +367,44 @@ async function writeLegacyPointer(parsed, newToken, env) {
   return parsed;
 }
 
+// ── Rate limiting (scrape) ─────────────────────────────────────────────────
+
+// Timestamp-array window, matching the storage limiter. The previous counter
+// reset its own TTL on every write, so the expiry slid forward indefinitely
+// and the bucket only cleared after a full window of total silence — meaning
+// ten scrapes spread across an evening would still trip it.
+//
+// Returns null when allowed, or { retryAfter } when the caller must wait.
+async function scrapeRateLimit(env, ip) {
+  const kv    = env[KV_BINDING];
+  const key   = `scrape:${ip}`;
+  const now   = Math.floor(Date.now() / 1000);
+  const win   = now - SCRAPE_RATE_WINDOW;
+
+  let ts = [];
+  const stored = await kv.get(key, { type: 'text' });
+  if (stored) {
+    try {
+      const parsed = JSON.parse(stored);
+      if (Array.isArray(parsed)) ts = parsed.filter(t => t > win);
+    } catch {
+      // Legacy plain-integer counter from the previous scheme — drop it
+    }
+  }
+
+  if (ts.length >= SCRAPE_RATE_LIMIT) {
+    // Oldest entry ages out of the window first; that's when a slot frees up
+    const retryAfter = Math.max(1, ts[0] + SCRAPE_RATE_WINDOW - now);
+    return { retryAfter };
+  }
+
+  ts.push(now);
+  // TTL covers the window from *this* write; entries older than the window are
+  // filtered on read anyway, so a slightly generous TTL is harmless.
+  await kv.put(key, JSON.stringify(ts), { expirationTtl: SCRAPE_RATE_WINDOW * 2 });
+  return null;
+}
+
 // ── Rate limiting (storage) ────────────────────────────────────────────────
 
 async function checkStorageRateLimit(token, env, cors) {
@@ -441,12 +484,15 @@ export default {
         let parsed;
         try { parsed = new URL(targetUrl); } catch { return respond(JSON.stringify({ error: 'Invalid URL' }), 400, cors); }
         if (!['http:', 'https:'].includes(parsed.protocol)) return respond(JSON.stringify({ error: 'Only http/https URLs allowed' }), 400, cors);
-        // Rate-limit by IP (reuse existing mechanism, 10 req/min bucket)
-        const rlKey = `scrape:${ip}`;
-        const rlRaw = await env.REFECTORY_KV.get(rlKey);
-        const rlCount = rlRaw ? parseInt(rlRaw) : 0;
-        if (rlCount >= 10) return respond(JSON.stringify({ error: 'Rate limit — try again shortly' }), 429, cors);
-        await env.REFECTORY_KV.put(rlKey, String(rlCount + 1), { expirationTtl: 60 });
+        // Rate-limit by IP, sliding window
+        const rl = await scrapeRateLimit(env, ip);
+        if (rl) {
+          return respond(
+            JSON.stringify({ error: `Rate limit — retry in ${rl.retryAfter}s`, retryAfter: rl.retryAfter }),
+            429,
+            { ...cors, 'Retry-After': String(rl.retryAfter) }
+          );
+        }
         try {
           const res = await fetch(targetUrl, {
             headers: {
@@ -455,7 +501,9 @@ export default {
               'Accept-Language': 'en-US,en;q=0.9',
             },
             redirect: 'follow',
-            cf: { cacheTtl: 300, cacheEverything: false },
+            // cacheEverything is required for HTML to be cached at all; with it
+            // off the cacheTtl below was a no-op.
+            cf: { cacheTtl: 900, cacheEverything: true },
           });
           if (!res.ok) return respond(JSON.stringify({ error: `Fetch failed: ${res.status}` }), 502, cors);
           const html = await res.text();
