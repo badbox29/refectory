@@ -3199,8 +3199,48 @@ function switchMealieTab(tab) {
 // every device through the normal sync. Locally cached image bytes always
 // win at display time, so this never overwrites a real image file.
 
-const REPULL_CONCURRENCY = 4;
+const REPULL_CONCURRENCY  = 4;   // starting width; drops to 1 once throttled
+const REPULL_MAX_RETRIES  = 6;   // per recipe, rate-limit rejections only
+const REPULL_BACKOFF_MS   = 3000; // first wait, doubles each time, capped
+const REPULL_BACKOFF_CAP  = 60000;
 let _repull = { running: false, cancel: false, scan: null };
+
+// A worker's rate limiter rejects the whole burst, not one request, so a hit
+// has to pause every in-flight fetch — not just the one that bounced.
+let _repullGate = null;
+
+function isRateLimited(res, data) {
+  if (res.status === 429) return true;
+  return /rate.?limit|too many/i.test(data?.error || '');
+}
+
+// Prefer the server's own figure when it sends one — the worker knows exactly
+// when a slot frees up, so guessing with exponential backoff is a fallback.
+function repullRetryAfterMs(res, data) {
+  const header = parseInt(res.headers.get('Retry-After') || '', 10);
+  if (Number.isFinite(header) && header > 0) return (header + 1) * 1000;
+  if (Number.isFinite(data?.retryAfter) && data.retryAfter > 0) return (data.retryAfter + 1) * 1000;
+  return null;
+}
+
+async function repullWaitForGate() {
+  while (_repullGate) await _repullGate;
+}
+
+// Pause all workers for `ms`. Concurrent callers share one wait rather than
+// stacking their own on top of it.
+function repullPause(ms, onTick) {
+  if (_repullGate) return _repullGate;
+  _repullGate = (async () => {
+    const until = Date.now() + ms;
+    while (Date.now() < until && !_repull.cancel) {
+      onTick?.(Math.ceil((until - Date.now()) / 1000));
+      await new Promise(r => setTimeout(r, 250));
+    }
+    _repullGate = null;
+  })();
+  return _repullGate;
+}
 
 // Pull an image URL out of a fetched page: JSON-LD first, then OG/Twitter meta.
 function extractImageFromHtml(html, pageUrl) {
@@ -3304,6 +3344,7 @@ async function runImageRepull() {
 
   _repull.running = true;
   _repull.cancel  = false;
+  _repullGate     = null;
 
   const startBtn  = document.getElementById('btn-repull-start');
   const cancelBtn = document.getElementById('btn-repull-cancel');
@@ -3327,35 +3368,77 @@ async function runImageRepull() {
   };
   tick();
 
-  const worker = async () => {
+  let throttled = false;   // once true, stay single-file for the rest of the run
+  let backoff   = REPULL_BACKOFF_MS;
+
+  const worker = async (slot) => {
     while (idx < ids.length && !_repull.cancel) {
+      // After a throttle, only the first worker keeps going — the rest retire
+      // rather than immediately re-tripping the limiter.
+      if (throttled && slot > 0) return;
+      await repullWaitForGate();
+      if (_repull.cancel) return;
+
       const r = getRecipe(ids[idx++]);
       if (!r || !r.sourceUrl) { done++; tick(); continue; }
       const label = (r.title || 'Untitled').slice(0, 55);
-      try {
-        const res  = await fetch(`${base}/scrape?url=${encodeURIComponent(r.sourceUrl)}`);
-        const data = await res.json();
-        if (!res.ok || !data.html) throw new Error(data.error || `HTTP ${res.status}`);
-        const img = extractImageFromHtml(data.html, data.finalUrl || r.sourceUrl);
-        if (img) {
-          r.imageUrl = img;
-          ok++;
-          repullLog(`✓ ${label}`, 'var(--green-mid)');
-        } else {
-          noImg++;
-          repullLog(`— ${label} — page loaded, no image found`);
+
+      let attempt = 0;
+      for (;;) {
+        if (_repull.cancel) return;
+        try {
+          const res  = await fetch(`${base}/scrape?url=${encodeURIComponent(r.sourceUrl)}`);
+          const data = await res.json().catch(() => ({}));
+
+          if (isRateLimited(res, data)) {
+            if (++attempt > REPULL_MAX_RETRIES) {
+              failed++;
+              repullLog(`✕ ${label} — still rate limited after ${REPULL_MAX_RETRIES} retries`, 'var(--red)');
+              break;
+            }
+            throttled = true;
+            const advised = repullRetryAfterMs(res, data);
+            const wait = advised ?? Math.min(backoff, REPULL_BACKOFF_CAP);
+            // Only escalate the guess when we're actually guessing
+            if (advised === null) backoff = Math.min(backoff * 2, REPULL_BACKOFF_CAP);
+            await repullPause(wait, (secs) => {
+              if (text) text.textContent =
+                `Rate limited — waiting ${secs}s · ${done} of ${ids.length} · ${ok} recovered`;
+            });
+            tick();
+            continue;   // same recipe, fresh attempt
+          }
+
+          if (!res.ok || !data.html) throw new Error(data.error || `HTTP ${res.status}`);
+
+          const img = extractImageFromHtml(data.html, data.finalUrl || r.sourceUrl);
+          if (img) {
+            r.imageUrl = img;
+            ok++;
+            repullLog(`✓ ${label}`, 'var(--green-mid)');
+          } else {
+            noImg++;
+            repullLog(`— ${label} — page loaded, no image found`);
+          }
+          // A clean response means the limiter has forgiven us; ease back off
+          backoff = REPULL_BACKOFF_MS;
+          break;
+        } catch (e) {
+          failed++;
+          repullLog(`✕ ${label} — ${e.message || 'fetch failed'}`, 'var(--red)');
+          break;
         }
-      } catch (e) {
-        failed++;
-        repullLog(`✕ ${label} — ${e.message || 'fetch failed'}`, 'var(--red)');
       }
+
       done++;
       tick();
+      // Once throttled, space out requests so we drip rather than burst
+      if (throttled && idx < ids.length) await new Promise(r => setTimeout(r, 1200));
     }
   };
 
   await Promise.all(
-    Array.from({ length: Math.min(REPULL_CONCURRENCY, ids.length) }, worker)
+    Array.from({ length: Math.min(REPULL_CONCURRENCY, ids.length) }, (_, i) => worker(i))
   );
 
   if (ok) { scheduleSave(); renderAll(); }
