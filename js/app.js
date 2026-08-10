@@ -3199,15 +3199,33 @@ function switchMealieTab(tab) {
 // every device through the normal sync. Locally cached image bytes always
 // win at display time, so this never overwrites a real image file.
 
-const REPULL_CONCURRENCY  = 4;   // starting width; drops to 1 once throttled
-const REPULL_MAX_RETRIES  = 6;   // per recipe, rate-limit rejections only
-const REPULL_BACKOFF_MS   = 3000; // first wait, doubles each time, capped
+const REPULL_CONCURRENCY  = 4;    // parallel fetches; pacing below is the real throttle
+const REPULL_MAX_RETRIES  = 6;    // per recipe, rate-limit rejections only
+const REPULL_BACKOFF_MS   = 3000; // fallback wait when the server sends no Retry-After
 const REPULL_BACKOFF_CAP  = 60000;
+// The worker allows 60 scrapes/min per IP. Starting a request every 1050ms
+// holds ~57/min: fast enough to be worth parallelising, slack enough that
+// clock skew and retries don't trip the limiter. Concurrency still helps —
+// it keeps the pipeline full while individual pages are slow to respond.
+const REPULL_MIN_INTERVAL_MS = 1050;
+
 let _repull = { running: false, cancel: false, scan: null };
 
-// A worker's rate limiter rejects the whole burst, not one request, so a hit
-// has to pause every in-flight fetch — not just the one that bounced.
+// A rate limiter rejects the whole burst, not one request, so a hit has to
+// pause every in-flight fetch — not just the one that bounced.
 let _repullGate = null;
+
+// Shared scheduler: workers reserve the next start slot rather than sleeping a
+// fixed amount each, so the request rate stays even no matter how many workers
+// there are or how long any single page takes.
+let _repullNextSlot = 0;
+
+async function repullTakeSlot() {
+  const now  = Date.now();
+  const slot = Math.max(now, _repullNextSlot);
+  _repullNextSlot = slot + REPULL_MIN_INTERVAL_MS;
+  if (slot > now) await new Promise(r => setTimeout(r, slot - now));
+}
 
 function isRateLimited(res, data) {
   if (res.status === 429) return true;
@@ -3231,6 +3249,9 @@ async function repullWaitForGate() {
 // stacking their own on top of it.
 function repullPause(ms, onTick) {
   if (_repullGate) return _repullGate;
+  // Push every worker's next slot past the pause so nobody fires the instant
+  // the gate opens and immediately re-trips the limiter.
+  _repullNextSlot = Math.max(_repullNextSlot, Date.now() + ms);
   _repullGate = (async () => {
     const until = Date.now() + ms;
     while (Date.now() < until && !_repull.cancel) {
@@ -3345,6 +3366,7 @@ async function runImageRepull() {
   _repull.running = true;
   _repull.cancel  = false;
   _repullGate     = null;
+  _repullNextSlot = 0;
 
   const startBtn  = document.getElementById('btn-repull-start');
   const cancelBtn = document.getElementById('btn-repull-cancel');
@@ -3361,21 +3383,25 @@ async function runImageRepull() {
 
   let idx = 0, done = 0, ok = 0, noImg = 0, failed = 0;
 
+  const started = Date.now();
   const tick = () => {
     const pct = Math.round((done / ids.length) * 100);
-    if (bar)  bar.style.width = pct + '%';
-    if (text) text.textContent = `${done} of ${ids.length} · ${ok} recovered · ${noImg} no image · ${failed} failed`;
+    if (bar) bar.style.width = pct + '%';
+    if (!text) return;
+    let eta = '';
+    if (done >= 3 && done < ids.length) {
+      const secs = Math.round(((Date.now() - started) / done) * (ids.length - done) / 1000);
+      eta = secs > 90 ? ` · ~${Math.ceil(secs / 60)} min left` : ` · ~${secs}s left`;
+    }
+    text.textContent =
+      `${done} of ${ids.length} · ${ok} recovered · ${noImg} no image · ${failed} failed${eta}`;
   };
   tick();
 
-  let throttled = false;   // once true, stay single-file for the rest of the run
-  let backoff   = REPULL_BACKOFF_MS;
+  let backoff = REPULL_BACKOFF_MS;
 
-  const worker = async (slot) => {
+  const worker = async () => {
     while (idx < ids.length && !_repull.cancel) {
-      // After a throttle, only the first worker keeps going — the rest retire
-      // rather than immediately re-tripping the limiter.
-      if (throttled && slot > 0) return;
       await repullWaitForGate();
       if (_repull.cancel) return;
 
@@ -3387,6 +3413,8 @@ async function runImageRepull() {
       for (;;) {
         if (_repull.cancel) return;
         try {
+          await repullTakeSlot();
+          if (_repull.cancel) return;
           const res  = await fetch(`${base}/scrape?url=${encodeURIComponent(r.sourceUrl)}`);
           const data = await res.json().catch(() => ({}));
 
@@ -3396,7 +3424,6 @@ async function runImageRepull() {
               repullLog(`✕ ${label} — still rate limited after ${REPULL_MAX_RETRIES} retries`, 'var(--red)');
               break;
             }
-            throttled = true;
             const advised = repullRetryAfterMs(res, data);
             const wait = advised ?? Math.min(backoff, REPULL_BACKOFF_CAP);
             // Only escalate the guess when we're actually guessing
@@ -3432,13 +3459,11 @@ async function runImageRepull() {
 
       done++;
       tick();
-      // Once throttled, space out requests so we drip rather than burst
-      if (throttled && idx < ids.length) await new Promise(r => setTimeout(r, 1200));
     }
   };
 
   await Promise.all(
-    Array.from({ length: Math.min(REPULL_CONCURRENCY, ids.length) }, (_, i) => worker(i))
+    Array.from({ length: Math.min(REPULL_CONCURRENCY, ids.length) }, worker)
   );
 
   if (ok) { scheduleSave(); renderAll(); }
