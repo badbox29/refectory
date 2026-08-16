@@ -165,13 +165,25 @@ function renderStorageBanner() {
   el.innerHTML = `
     <strong>⚠️ Changes are not being saved.</strong>
     ${App.storageError === 'quota'
-      ? `This browser's storage for this site is full, so edits only last until you reload.
-         Refectory is using ${mb(mine)} MB of ${mb(total)} MB in use here — the rest belongs
-         to other pages on the same address, and storage is shared between them.`
+      ? `This site's storage is <em>full</em> — edits only last until you reload.
+         Browsers cap it at a few megabytes per web address, and
+         <strong>${mb(total)} MB is already used</strong> here.
+         Refectory accounts for ${mb(mine)} MB of that; the rest belongs to other
+         pages on the same address, which share the same limit.`
       : `Storage is unavailable (${esc(App.storageError || 'unknown')}), so edits only last
          until you reload.`}
-    <button class="btn btn-sm btn-outline" id="storage-banner-export">Export a backup now</button>`;
+    <span class="storage-banner-actions">
+      <button class="btn btn-sm btn-outline" id="storage-banner-export">Export a backup now</button>
+      <button class="btn btn-sm btn-outline" id="storage-banner-retry">Check again</button>
+    </span>`;
   el.querySelector('#storage-banner-export')?.addEventListener('click', () => openExportModal());
+  // Without this the banner can't clear itself: the flag only resets on a
+  // successful write, so after freeing space it would linger until something
+  // else happened to save.
+  el.querySelector('#storage-banner-retry')?.addEventListener('click', () => {
+    if (saveLocal()) showToast('Storage is working again — changes are being saved ✓');
+    else showToast('Still out of space. Free some up, then check again.');
+  });
 }
 
 // ─── Worker sync ──────────────────────────────────────────────────
