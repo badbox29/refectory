@@ -252,7 +252,12 @@
       <h2 class="modal-title" id="modal-editor-title">New Recipe</h2>
       <button class="modal-close" title="Close">✕</button>
     </div>
+    <div id="editor-queue-tabs" class="editor-queue-tabs" style="display:none;"></div>
     <div class="modal-body editor-scroll">
+      <div id="editor-heuristic-warning" class="editor-warning" style="display:none;">
+        ⚠ This page had no recipe data. Ingredients and steps were read from the
+        page itself and may be wrong — please check them before saving.
+      </div>
       <form id="recipe-editor-form" onsubmit="return false;">
 
         <div class="editor-two-col">
@@ -408,6 +413,10 @@
         <label class="form-label" style="margin-bottom:.3rem;display:flex;align-items:center;gap:.5rem;">
           <input type="checkbox" id="mealie-import-images" checked/>
           Embed recipe images (base64) — skippable if you want faster import
+        </label>
+        <label class="form-label" style="margin-bottom:.3rem;display:flex;align-items:center;gap:.5rem;">
+          <input type="checkbox" id="mealie-import-plans" checked/>
+          Import meal plan history, ratings and favorites
         </label>
       </div>
 
@@ -824,6 +833,7 @@
     <div class="modal-body">
       <p class="f13 lh muted" style="margin-bottom:.75rem;" id="variant-hint"></p>
       <div id="variant-list"></div>
+      <button class="btn btn-outline w100" id="variant-import-all" style="margin-top:.25rem;"></button>
     </div>
   </div>
 </div>
