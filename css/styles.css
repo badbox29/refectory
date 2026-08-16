@@ -2839,3 +2839,58 @@ body.modal-open { overflow: hidden; }
   color: var(--ink);
   margin-bottom: .75rem;
 }
+
+/* ── Meal plan templates ─────────────────────────────────────── */
+.tpl-save-box {
+  background: var(--cream);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: .75rem;
+  margin-bottom: 1rem;
+}
+.tpl-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  margin-bottom: .4rem;
+  flex-wrap: wrap;
+}
+.tpl-mode {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+  font-size: .8rem;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.tpl-mode input { cursor: pointer; }
+.tpl-row {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  padding: .6rem .7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  margin-bottom: .5rem;
+  background: var(--white);
+}
+.tpl-row:hover { border-color: var(--green-soft); }
+.tpl-row-main { flex: 1; min-width: 0; }
+.tpl-row-name {
+  font-weight: 600;
+  font-size: .92rem;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tpl-row-meta { font-size: .78rem; color: var(--muted); margin-top: .15rem; }
+.tpl-missing { color: var(--saffron); }
+.tpl-row-actions { display: flex; gap: .35rem; flex-shrink: 0; }
+
+@media (max-width: 520px) {
+  .tpl-row { flex-wrap: wrap; }
+  .tpl-row-actions { width: 100%; justify-content: flex-end; }
+}
