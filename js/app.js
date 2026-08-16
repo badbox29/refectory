@@ -223,6 +223,12 @@ function openModal(id) {
 }
 
 function closeModal(id) {
+  // Leaving the editor by any route abandons an in-progress import review.
+  // Hooking this here rather than on the ✕ covers the cancel button and the
+  // duplicate-warning jump too, so no route can strand a half-reviewed queue.
+  if (id === 'modal-recipe-editor' && typeof editorQueueActive === 'function' && editorQueueActive()) {
+    clearEditorQueue();
+  }
   const el = document.getElementById(id);
   if (el) {
     el.classList.remove('open');
@@ -1263,6 +1269,113 @@ function renderDuplicateWarning(title, excludeId = null) {
 }
 
 
+// ─── Editor import queue ─────────────────────────────────────────
+// When a page yields several recipes they load into the editor as tabs rather
+// than being saved blind — a heuristic parse is a guess, and guesses deserve a
+// look before they land in the collection. The editor form is already a clean
+// two-way mapping (openRecipeEditor paints a recipe object in, collectEditorData
+// reads one back out), so switching tabs is just "read the current one back,
+// paint the next one". On-screen edits survive a switch because switching *is*
+// a save into memory.
+const EditorQueue = { items: [], active: -1 };
+
+function editorQueueActive() { return EditorQueue.items.length > 0; }
+
+// Fold the on-screen form back into the queue entry it came from. Spreading
+// over the original preserves fields the form doesn't surface — the heuristic
+// flag, importedFrom, createdAt.
+function stashActiveTab() {
+  const i = EditorQueue.active;
+  if (i < 0 || !EditorQueue.items[i]) return;
+  EditorQueue.items[i] = { ...EditorQueue.items[i], ...collectEditorData() };
+}
+
+function openEditorQueue(list) {
+  EditorQueue.items  = list.map(r => ({ ...r, imageUrl: r.imageUrl || r.image || '' }));
+  EditorQueue.active = -1;
+  switchEditorTab(0);
+}
+
+function switchEditorTab(idx) {
+  if (idx < 0 || idx >= EditorQueue.items.length || idx === EditorQueue.active) return;
+  stashActiveTab();
+  EditorQueue.active = idx;
+  openRecipeEditor(null, EditorQueue.items[idx]);
+}
+
+// Remove a tab. `savedTitle` is set when it left via Save rather than Discard.
+// `landOn` is the post-splice index to open next; leave it null to take the
+// slot the removed tab vacated, which is what you want when the tab being
+// removed is the one on screen. Discarding a *different* tab has to pass the
+// adjusted index of the one being edited instead — otherwise removing an
+// earlier tab shifts it down and the user gets dropped onto a neighbour with
+// their edits silently left behind.
+function closeEditorTab(idx, savedTitle, landOn = null) {
+  EditorQueue.items.splice(idx, 1);
+
+  if (!EditorQueue.items.length) {
+    EditorQueue.active = -1;
+    renderEditorQueueTabs();
+    closeModal('modal-recipe-editor');
+    showToast(savedTitle ? `Saved “${savedTitle}” — all done ✓` : 'Import review finished');
+    if (View.activeSection !== 'recipes') showSection('recipes');
+    return;
+  }
+
+  const next = Math.min(landOn == null ? idx : landOn, EditorQueue.items.length - 1);
+  EditorQueue.active = -1;   // nothing on screen maps to a tab now, so don't stash
+  switchEditorTab(next);
+  const left = EditorQueue.items.length;
+  showToast(savedTitle
+    ? `Saved “${savedTitle}” · ${left} left to review`
+    : `Discarded · ${left} left to review`);
+}
+
+function renderEditorQueueTabs() {
+  const bar = document.getElementById('editor-queue-tabs');
+  if (!bar) return;
+  if (!EditorQueue.items.length) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+  bar.style.display = '';
+  bar.innerHTML = EditorQueue.items.map((r, i) => `
+    <div class="eq-tab${i === EditorQueue.active ? ' is-active' : ''}" data-idx="${i}"
+         title="${esc(r.title || 'Untitled')}">
+      <span class="eq-tab-label">${esc(r.title || 'Untitled')}</span>
+      <button class="eq-tab-close" data-close="${i}" title="Discard this one">✕</button>
+    </div>`).join('');
+
+  bar.querySelectorAll('.eq-tab').forEach(el => {
+    el.addEventListener('click', e => {
+      if (e.target.closest('.eq-tab-close')) return;
+      switchEditorTab(parseInt(el.dataset.idx));
+    });
+  });
+  bar.querySelectorAll('.eq-tab-close').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const i = parseInt(btn.dataset.close);
+      if (i === EditorQueue.active) {
+        // Discarding the tab on screen throws its edits away — that's the
+        // point of discard, so don't stash it first.
+        EditorQueue.active = -1;
+        closeEditorTab(i, null);
+      } else {
+        // Discarding a different tab keeps the current one open, but removing
+        // an earlier tab shifts its index down by one.
+        stashActiveTab();
+        const stay = i < EditorQueue.active ? EditorQueue.active - 1 : EditorQueue.active;
+        EditorQueue.active = -1;
+        closeEditorTab(i, null, stay);
+      }
+    });
+  });
+}
+
+function clearEditorQueue() {
+  EditorQueue.items  = [];
+  EditorQueue.active = -1;
+  renderEditorQueueTabs();
+}
+
 function openRecipeEditor(id = null, prefill = null) {
   const recipe = id ? (getRecipe(id) || {}) : (prefill || {});
   View.editingId = id;
@@ -1286,7 +1399,16 @@ function openRecipeEditor(id = null, prefill = null) {
   // Steps
   renderEditorSteps(recipe.steps || [{ text: '' }]);
 
-  document.getElementById('modal-editor-title').textContent = id ? 'Edit Recipe' : 'New Recipe';
+  const modalTitle = document.getElementById('modal-editor-title');
+  if (modalTitle) {
+    modalTitle.textContent = editorQueueActive()
+      ? `Review Imports — ${EditorQueue.active + 1} of ${EditorQueue.items.length}`
+      : (id ? 'Edit Recipe' : 'New Recipe');
+  }
+  renderEditorQueueTabs();
+
+  const warnEl = document.getElementById('editor-heuristic-warning');
+  if (warnEl) warnEl.style.display = recipe.heuristic ? '' : 'none';
 
   // Duplicate detection — check immediately (covers scraped/prefilled titles)
   // and re-check live as the user types a title manually.
@@ -1391,11 +1513,18 @@ function saveEditorRecipe() {
     data.imageUrl = '';
   }
   saveRecipe({ ...existing, ...data, id });
-
-  closeModal('modal-recipe-editor');
   View.editingId = null;
   if (btn) btn.disabled = false;
   renderRecipes();
+
+  // Reviewing an import queue: drop the tab just saved and move to the next
+  // rather than dismissing the editor, which would strand the rest.
+  if (editorQueueActive() && EditorQueue.active >= 0) {
+    closeEditorTab(EditorQueue.active, data.title);
+    return;
+  }
+
+  closeModal('modal-recipe-editor');
   showToast(existing.id ? 'Recipe updated ✓' : 'Recipe saved ✓');
   if (View.activeSection !== 'recipes') showSection('recipes');
 }
@@ -2758,6 +2887,34 @@ function openRecipeVariantPicker(list) {
       openScrapedRecipe(list[parseInt(btn.dataset.idx)]);
     });
   });
+
+  // Review-all: load every version into the editor as tabs. Nothing is written
+  // until each tab is saved, so this is a shortcut through the picker, not a
+  // bypass of review — which matters most for heuristic parses, where the
+  // ingredients are a guess about which list on the page was the right one.
+  const allBtn = document.getElementById('variant-import-all');
+  if (allBtn) {
+    allBtn.textContent = `Review all ${list.length} in the editor`;
+    allBtn.onclick = () => {
+      closeModal('modal-recipe-variant');
+      // Titles fall back to the page title when a version has no heading of
+      // its own, so several can arrive identical — number those, or they're
+      // indistinguishable both in the tab strip and afterwards in the grid.
+      const counts = {};
+      list.forEach(r => { const k = (r.title || '').toLowerCase(); counts[k] = (counts[k] || 0) + 1; });
+      const seen = {};
+      const prepared = list.map(r => {
+        const k = (r.title || '').toLowerCase();
+        if (counts[k] > 1) {
+          seen[k] = (seen[k] || 0) + 1;
+          return { ...r, title: `${r.title} (${seen[k]})` };
+        }
+        return r;
+      });
+      openEditorQueue(prepared);
+    };
+  }
+
   openModal('modal-recipe-variant');
 }
 
@@ -2855,18 +3012,22 @@ function extractFromHtmlHeuristic(doc, sourceUrl) {
   });
   if (!marks.length) return [];
 
-  // Nearest list after position i, skipping nav-ish lists of links
-  const listAfter = (i, prefer) => {
-    for (let j = i + 1; j < all.length && j < i + 25; j++) {
+  // First usable list after position `from`, never scanning past `stopAt`.
+  // The hard bound is what keeps one recipe's steps from being satisfied by
+  // the next recipe's ingredient list: a recipe with a single instruction
+  // would otherwise fail the minimum-items check and the scan would run on
+  // into the following section and silently steal its list.
+  const listAfter = (from, stopAt, minItems) => {
+    const limit = Math.min(stopAt == null ? all.length : stopAt, all.length);
+    for (let j = from + 1; j < limit; j++) {
       const el = all[j];
       if (el.tagName !== 'UL' && el.tagName !== 'OL') continue;
       const items = Array.from(el.querySelectorAll(':scope > li'));
-      if (items.length < 2) continue;
-      // A list that's mostly links is navigation, not a recipe
+      if (items.length < minItems) continue;
+      // A list that's mostly bare links is navigation, not a recipe
       const linky = items.filter(li => li.querySelector('a') &&
         (li.textContent || '').trim() === (li.querySelector('a')?.textContent || '').trim());
       if (linky.length > items.length / 2) continue;
-      if (prefer && el.tagName !== prefer && j > i + 6) continue;
       return { el, items: items.map(li => (li.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean) };
     }
     return null;
@@ -2892,16 +3053,25 @@ function extractFromHtmlHeuristic(doc, sourceUrl) {
   const out = [];
   for (let m = 0; m < marks.length; m++) {
     if (marks[m].kind !== 'ing') continue;
-    const ing = listAfter(marks[m].i, 'UL');
-    if (!ing || ing.items.length < 2) continue;
+
+    // Ingredients must appear before the next label of any kind — usually
+    // this recipe's own "Instructions" heading. Two items minimum, since a
+    // one-line list is far more often page furniture than a recipe.
+    const nextMark = marks[m + 1];
+    const ing = listAfter(marks[m].i, nextMark ? nextMark.i : null, 2);
+    if (!ing) continue;
 
     // Steps come from the first instruction label after this ingredient
-    // block, but only if it appears before the next recipe's ingredients —
+    // block, and only if it appears before the next recipe's ingredients —
     // otherwise we'd staple recipe 1's steps onto recipe 2.
-    const nextIng = marks.slice(m + 1).find(x => x.kind === 'ing');
+    const nextIng  = marks.slice(m + 1).find(x => x.kind === 'ing');
     const stepMark = marks.slice(m + 1).find(x =>
       x.kind === 'step' && (!nextIng || x.i < nextIng.i));
-    const steps = stepMark ? listAfter(stepMark.i, 'OL') : null;
+    // One step is a legitimate recipe; the bound above stops a short list
+    // from reaching into the next section.
+    const steps = stepMark
+      ? listAfter(stepMark.i, nextIng ? nextIng.i : null, 1)
+      : null;
 
     const title = titleBefore(marks[m].i) || pageTitle;
     if (!title) continue;
@@ -3924,13 +4094,14 @@ async function handleMealieZipFile(file) {
 }
 
 async function triggerMealieZipImport(file) {
-  const btn         = document.getElementById('mealie-import-zip-btn');
-  const embedImages = document.getElementById('mealie-import-images')?.checked ?? true;
-  const status      = document.getElementById('mealie-import-status');
+  const btn          = document.getElementById('mealie-import-zip-btn');
+  const embedImages  = document.getElementById('mealie-import-images')?.checked ?? true;
+  const importExtras = document.getElementById('mealie-import-plans')?.checked ?? true;
+  const status       = document.getElementById('mealie-import-status');
 
   if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
 
-  const result = await importFromMealieBackup(file, embedImages);
+  const result = await importFromMealieBackup(file, embedImages, importExtras);
 
   if (btn) { btn.disabled = false; btn.textContent = 'Import from Backup'; }
 
@@ -3938,7 +4109,14 @@ async function triggerMealieZipImport(file) {
     saveLocal();
     renderAll();
     closeModal('modal-mealie-import');
-    showToast(`✅ Imported ${result.count} recipes from Mealie backup`);
+    const bits = [`${result.count} recipes`];
+    if (result.plans?.placed) bits.push(`${result.plans.placed} planned meals`);
+    if (result.favCount)      bits.push(`${result.favCount} favorites`);
+    if (result.rateCount)     bits.push(`${result.rateCount} ratings`);
+    showToast(`✅ Imported ${bits.join(', ')} from Mealie backup`);
+    if (result.plans?.unmatched) {
+      console.warn(`[Refectory] ${result.plans.unmatched} meal plan entries referenced recipes not in the backup`);
+    }
     // Push to worker immediately — don't wait for the next sync interval
     if (!Auth.isGuest()) {
       App.pendingSync = true;
@@ -3954,7 +4132,85 @@ async function triggerMealieZipImport(file) {
 
 // ─── Mealie backup zip parser ─────────────────────────────────────
 
-async function importFromMealieBackup(file, embedImages) {
+// ─── Mealie meal plan import ──────────────────────────────────────
+// Mealie stores one row per planned dish keyed by calendar date, and allows
+// several rows on the same date and meal type — cooking two dinners so one can
+// be frozen is a normal plan, not a mistake. Refectory slots hold multiple
+// entries, so nothing has to be dropped.
+const MEALIE_SLOT_MAP = { breakfast: 'breakfast', lunch: 'lunch', dinner: 'dinner', side: 'snack' };
+
+// "2024-05-13" -> a local-midnight Date. Deliberately not new Date(str): that
+// parses a bare ISO date as UTC, which in any negative-offset zone lands on the
+// previous day locally and would shift every entry a day earlier.
+function parseLocalDate(s) {
+  const [y, m, d] = String(s).split('-').map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(y, m - 1, d);
+}
+
+function importMealieMealPlans(data, idMap) {
+  const rows = (data.group_meal_plans || []).filter(r => r.recipe_id && r.date);
+  if (!rows.length) return { placed: 0, skipped: 0, slots: 0, unmatched: 0 };
+
+  // created_at order decides position within a slot, so the dish planned first
+  // stays first — that's the one the day reads as its main meal.
+  rows.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+
+  const staged  = {};
+  const cooked  = {};
+  const todayMs = new Date().setHours(23, 59, 59, 999);
+  let placed = 0, unmatched = 0, skipped = 0;
+
+  for (const row of rows) {
+    const newId = idMap[row.recipe_id];
+    if (!newId) { unmatched++; continue; }
+    const date = parseLocalDate(row.date);
+    if (!date) { skipped++; continue; }
+
+    const wk   = getISOWeekKey(date);
+    const day  = (date.getDay() + 6) % 7;            // Mon=0, matches the planner
+    const slot = MEALIE_SLOT_MAP[row.entry_type] || 'dinner';
+
+    staged[wk]            = staged[wk]            || {};
+    staged[wk][day]       = staged[wk][day]       || {};
+    staged[wk][day][slot] = staged[wk][day][slot] || [];
+    staged[wk][day][slot].push(newId);
+    placed++;
+
+    // A meal planned for next week hasn't been cooked yet, so future dates must
+    // not stamp lastCooked.
+    const ts = date.getTime();
+    if (ts <= todayMs && (!cooked[newId] || cooked[newId] < ts)) cooked[newId] = ts;
+  }
+
+  // Write staged slots wholesale rather than appending, so running the import
+  // twice doesn't double every entry.
+  if (!App.data.mealplan) App.data.mealplan = {};
+  let slots = 0;
+  for (const [wk, days] of Object.entries(staged)) {
+    App.data.mealplan[wk] = App.data.mealplan[wk] || {};
+    for (const [day, slotsObj] of Object.entries(days)) {
+      App.data.mealplan[wk][day] = App.data.mealplan[wk][day] || {};
+      for (const [slot, entries] of Object.entries(slotsObj)) {
+        const packed = packSlot(entries);
+        if (packed === null) continue;
+        App.data.mealplan[wk][day][slot] = packed;
+        slots++;
+      }
+    }
+  }
+
+  // lastCooked comes from the plan history, never Date.now() — importing three
+  // years of meals must not mark every recipe as cooked today.
+  for (const [id, ts] of Object.entries(cooked)) {
+    const r = App.data.recipes?.[id];
+    if (r && (!r.lastCooked || r.lastCooked < ts)) r.lastCooked = ts;
+  }
+
+  return { placed, skipped, slots, unmatched };
+}
+
+async function importFromMealieBackup(file, embedImages, importExtras = true) {
   const status = (msg, err) => {
     const el = document.getElementById('mealie-import-status');
     if (el) { el.textContent = msg; el.style.color = err ? 'var(--red)' : ''; }
@@ -3989,6 +4245,34 @@ async function importFromMealieBackup(file, embedImages) {
   (data.tags || []).forEach(t => { tagMap[t.id] = t.name; });
   const catMap = {};
   (data.categories || []).forEach(c => { catMap[c.id] = c.name; });
+
+  // Nutrition is one row per recipe. Mealie stores every figure as a string and
+  // blanks as empty string, so coerce and drop anything non-numeric.
+  const nutriByRecipe = {};
+  (data.recipe_nutrition || []).forEach(n => {
+    const num = v => { const f = parseFloat(v); return Number.isFinite(f) ? f : null; };
+    const vals = {
+      calories: num(n.calories),
+      fat:      num(n.fat_content),
+      protein:  num(n.protein_content),
+      carbs:    num(n.carbohydrate_content),
+      fiber:    num(n.fiber_content),
+      sodium:   num(n.sodium_content),
+      sugar:    num(n.sugar_content),
+    };
+    if (Object.values(vals).every(v => v === null)) return;
+    nutriByRecipe[n.recipe_id] = Object.fromEntries(
+      Object.entries(vals).filter(([, v]) => v !== null));
+  });
+
+  // Favorites are per-user in Mealie, but a Refectory install is one shared
+  // household record — so take the union across everyone in the group.
+  const favIds = new Set((data.users_to_favorites || []).map(f => f.recipe_id));
+
+  // Mealie id -> Refectory id, built as recipes are written. Meal plan rows
+  // reference Mealie ids, so this is what lets the plan import resolve them
+  // without persisting a source id on every recipe.
+  const idMap = {};
 
   // Group relational tables by recipe_id
   const ingrByRecipe = {}, instrByRecipe = {}, notesByRecipe = {};
@@ -4084,6 +4368,13 @@ ${t}`;
     const existing = Object.values(App.data.recipes)
       .find(ex => ex.importedFrom === 'mealie-backup' && ex.title === r.name);
     const newId    = existing ? existing.id : genId();
+    idMap[rid]     = newId;
+
+    // Rating carries over as-is (Mealie uses the same 0–5 scale). Favorite is
+    // Mealie's own per-user flag, unioned across the household.
+    const rating    = Number.isFinite(r.rating) ? r.rating : 0;
+    const favorite  = favIds.has(rid);
+    const nutrition = nutriByRecipe[rid] || null;
 
     // Image — read from zip and store in IndexedDB (not in App.data / localStorage)
     if (embedImages) {
@@ -4121,6 +4412,13 @@ ${t}`;
         importedFrom: 'mealie-backup',
         updatedAt:   Date.now(),
       });
+      if (importExtras) {
+        // Only overwrite a local rating when Mealie actually has one, so a
+        // rating added in Refectory isn't wiped by a re-import.
+        if (rating)    existing.rating   = rating;
+        if (favorite)  existing.favorite = true;
+        if (nutrition) existing.nutrition = nutrition;
+      }
       count++;
     } else {
       App.data.recipes[newId] = {
@@ -4137,14 +4435,33 @@ ${t}`;
         importedFrom: 'mealie-backup',
         createdAt:   Date.now(),
         updatedAt:   Date.now(),
+        ...(importExtras && rating    ? { rating }           : {}),
+        ...(importExtras && favorite  ? { favorite: true }   : {}),
+        ...(importExtras && nutrition ? { nutrition }        : {}),
       };
       count++;
     }
   }
 
   if (!count) return { ok: false, error: 'No recipes were found in the backup.' };
+
+  // Meal plans go last — they resolve against idMap, so every recipe has to
+  // exist first.
+  let plans = null, favCount = 0, rateCount = 0, nutriCount = 0;
+  if (importExtras) {
+    status('Importing meal plans…');
+    plans = importMealieMealPlans(data, idMap);
+    for (const mealieId of Object.keys(idMap)) {
+      const rec = App.data.recipes[idMap[mealieId]];
+      if (!rec) continue;
+      if (rec.favorite)  favCount++;
+      if (rec.rating)    rateCount++;
+      if (rec.nutrition) nutriCount++;
+    }
+  }
+
   scheduleSave();
-  return { ok: true, count, skipped };
+  return { ok: true, count, skipped, plans, favCount, rateCount, nutriCount };
 }
 
 async function importFromMealieJson(jsonText) {
