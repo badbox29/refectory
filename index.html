@@ -73,6 +73,9 @@
 
   <!-- ── Main content ────────────────────────────────────────── -->
   <main class="app-main">
+    <!-- Persistent warning when writes aren't reaching storage. Sits above
+         every section, since it applies to the whole app rather than one view. -->
+    <div id="storage-banner" class="storage-banner" style="display:none;"></div>
 
     <!-- ── Recipes section ─────────────────────────────────── -->
     <section id="section-recipes" class="section active">
@@ -794,6 +797,13 @@
           <span class="muted" style="display:block;font-size:.82rem;">Paste a link — we'll fetch the recipe automatically</span>
         </span>
       </button>
+      <button class="new-recipe-option" id="choice-paste-text">
+        <span class="new-recipe-option-icon">📋</span>
+        <span>
+          <strong>Paste recipe text</strong>
+          <span class="muted" style="display:block;font-size:.82rem;">Copied from a message, PDF or anywhere else</span>
+        </span>
+      </button>
       <button class="new-recipe-option" id="choice-create-manual">
         <span class="new-recipe-option-icon">✏️</span>
         <span>
@@ -837,6 +847,31 @@
       <p class="f13 lh muted" style="margin-bottom:.75rem;" id="variant-hint"></p>
       <div id="variant-list"></div>
       <button class="btn btn-outline w100" id="variant-import-all" style="margin-top:.25rem;"></button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Paste recipe text ───────────────────────────────────────── -->
+<div class="modal-overlay" id="modal-paste-recipe" role="dialog" aria-modal="true">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <h2 class="modal-title">Paste Recipe Text</h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="f13 lh muted" style="margin-bottom:.6rem;">
+        Paste the whole thing — title, ingredients and directions. Headings like
+        “Ingredients” and “Directions” are used to split it up. You'll get a
+        chance to check everything before saving.
+      </p>
+      <textarea class="input" id="paste-recipe-text" rows="14"
+                style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;"
+                placeholder="Slow Cooker Chili&#10;&#10;Ingredients&#10;1 lb ground beef&#10;2 cans diced tomatoes&#10;&#10;Directions&#10;Brown the beef.&#10;Add everything to the slow cooker."></textarea>
+      <div class="f13" id="paste-recipe-hint" style="min-height:1.3rem;margin-top:.4rem;"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="paste-recipe-cancel">Cancel</button>
+      <button class="btn btn-primary" id="paste-recipe-go">Review &amp; Add</button>
     </div>
   </div>
 </div>
