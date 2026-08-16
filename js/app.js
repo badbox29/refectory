@@ -2694,24 +2694,18 @@ async function fetchAndScrapeUrl() {
     if (!res.ok || !data.html) throw new Error(data.error || 'Could not fetch that page.');
 
     statusEl.textContent = 'Parsing recipe data…';
-    const recipe = parseRecipeFromHtml(data.html, data.finalUrl || url);
+    const found = parseRecipesFromHtml(data.html, data.finalUrl || url);
 
-    if (!recipe) {
+    if (!found.length) {
       statusEl.style.color = 'var(--red)';
       statusEl.textContent = 'No recipe found on that page. Try a different URL or create manually.';
       btn.disabled = false;
       return;
     }
 
-    // Success — open editor pre-filled
     closeModal('modal-url-import');
-    // If recipe has an image URL, store it to IndexedDB for display
-    if (recipe.image) {
-      const tempId = '_scrape_preview';
-      ImageStore.set(tempId, recipe.image);
-      recipe._scrapeImageUrl = recipe.image;
-    }
-    openRecipeEditor(null, recipe);
+    if (found.length > 1) openRecipeVariantPicker(found);
+    else                  openScrapedRecipe(found[0]);
 
   } catch(e) {
     statusEl.style.color = 'var(--red)';
@@ -2723,34 +2717,219 @@ async function fetchAndScrapeUrl() {
 
 // ── HTML parser — JSON-LD first, Open Graph fallback ─────────────
 
-function parseRecipeFromHtml(html, sourceUrl) {
+// Hand a scraped recipe to the editor. A heuristic parse is a guess, so the
+// user gets told rather than being left to discover mangled ingredients later.
+function openScrapedRecipe(recipe) {
+  if (recipe.image) {
+    ImageStore.set('_scrape_preview', recipe.image);
+    recipe._scrapeImageUrl = recipe.image;
+  }
+  openRecipeEditor(null, recipe);
+  if (recipe.heuristic) {
+    showToast('⚠ This page had no recipe data — ingredients and steps were guessed from the page. Please check them.');
+  }
+}
+
+function openRecipeVariantPicker(list) {
+  const wrap = document.getElementById('variant-list');
+  const hint = document.getElementById('variant-hint');
+  if (!wrap) { openScrapedRecipe(list[0]); return; }
+
+  if (hint) {
+    hint.textContent = list.some(r => r.heuristic)
+      ? `This page has no recipe data, so ${list.length} possible recipes were read from the page itself. Pick one — check it carefully after importing.`
+      : `This page contains ${list.length} recipes. Pick the one you want.`;
+  }
+
+  wrap.innerHTML = list.map((r, i) => `
+    <button class="variant-option" data-idx="${i}">
+      <div class="variant-title">${esc(r.title)}</div>
+      <div class="variant-meta">
+        ${r.ingredients.length} ingredient${r.ingredients.length === 1 ? '' : 's'}
+        · ${r.steps.length} step${r.steps.length === 1 ? '' : 's'}
+        ${r.servings ? ` · serves ${esc(String(r.servings))}` : ''}
+      </div>
+      ${r.ingredients.length ? `<div class="variant-preview">${esc(r.ingredients.slice(0, 3).join(', '))}${r.ingredients.length > 3 ? '…' : ''}</div>` : ''}
+    </button>`).join('');
+
+  wrap.querySelectorAll('.variant-option').forEach(btn => {
+    btn.addEventListener('click', () => {
+      closeModal('modal-recipe-variant');
+      openScrapedRecipe(list[parseInt(btn.dataset.idx)]);
+    });
+  });
+  openModal('modal-recipe-variant');
+}
+
+// Returns every recipe found on the page, best source first. A page can
+// legitimately carry several — a blog post comparing three variations of the
+// same drink, say — so the caller decides which one the user wanted rather
+// than this silently picking the first.
+function parseRecipesFromHtml(html, sourceUrl) {
   const parser = new DOMParser();
   const doc    = parser.parseFromString(html, 'text/html');
+  const found  = [];
 
-  // 1. Try JSON-LD structured data
+  // 1. JSON-LD structured data — authoritative when present
   const scripts = doc.querySelectorAll('script[type="application/ld+json"]');
   for (const script of scripts) {
     try {
       const raw = JSON.parse(script.textContent);
-      // May be a single object or an array or a @graph
       const candidates = [];
       if (Array.isArray(raw)) candidates.push(...raw);
       else if (raw['@graph']) candidates.push(...raw['@graph']);
       else candidates.push(raw);
 
       for (const obj of candidates) {
-        const type = obj['@type'];
+        const type  = obj['@type'];
         const types = Array.isArray(type) ? type : [type];
         if (types.some(t => String(t).toLowerCase().includes('recipe'))) {
           const recipe = extractFromJsonLd(obj, sourceUrl);
-          if (recipe?.title) return recipe;
+          if (recipe?.title) found.push(recipe);
         }
       }
     } catch { /* malformed JSON-LD — skip */ }
   }
+  if (found.length) return dedupeRecipes(found);
 
-  // 2. Open Graph / meta fallback
-  return extractFromMeta(doc, sourceUrl);
+  // 2. Heuristic scrape of the page body. Only reached when the page carries
+  // no Recipe schema at all — a blog post with the ingredients in a plain
+  // <ul>. This is guesswork by nature, so results are flagged `heuristic`
+  // and the editor warns the user to check them.
+  const guessed = extractFromHtmlHeuristic(doc, sourceUrl);
+  if (guessed.length) return dedupeRecipes(guessed);
+
+  // 3. Open Graph / meta — title, description and image only
+  const meta = extractFromMeta(doc, sourceUrl);
+  return meta ? [meta] : [];
+}
+
+// Kept for callers that only ever want one (image re-pull, for instance)
+function parseRecipeFromHtml(html, sourceUrl) {
+  return parseRecipesFromHtml(html, sourceUrl)[0] || null;
+}
+
+function dedupeRecipes(list) {
+  const seen = new Set();
+  return list.filter(r => {
+    const key = (r.title || '').toLowerCase().trim() + '|' + (r.ingredients || []).length;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+// ── Heuristic body scrape ────────────────────────────────────────
+const ING_RE   = /^\s*ingredients?\b/i;
+const STEP_RE  = /^\s*(instructions?|directions?|method|steps?|how to make|preparation)\b/i;
+const HEAD_SEL = 'h1,h2,h3,h4,h5,h6,strong,b,p,div,span,dt';
+
+function extractFromHtmlHeuristic(doc, sourceUrl) {
+  const body = doc.body;
+  if (!body) return [];
+
+  // Everything in document order, so "the next list after this label" is a
+  // real question we can answer without guessing at DOM nesting.
+  const all = Array.from(body.querySelectorAll(HEAD_SEL + ',ul,ol'));
+
+  // A label is a short element whose own text (not its children's) matches.
+  const labelText = (el) => {
+    const t = (el.textContent || '').trim();
+    return t.length && t.length <= 60 ? t : '';
+  };
+
+  const marks = [];
+  all.forEach((el, i) => {
+    const t = labelText(el);
+    if (!t) return;
+    const kind = ING_RE.test(t) ? 'ing' : STEP_RE.test(t) ? 'step' : null;
+    if (!kind) return;
+    // A label like <p><strong>Ingredients:</strong></p> matches twice, once
+    // for the paragraph and once for its child. Left as two marks, the second
+    // looks like the start of another recipe and collapses the window used to
+    // find this one's steps — so collapse a wrapper and its child into a
+    // single mark, keeping the innermost since it sits closest to the list.
+    const prev = marks[marks.length - 1];
+    if (prev && prev.kind === kind && prev.el.contains(el)) { marks[marks.length - 1] = { i, kind, el }; return; }
+    marks.push({ i, kind, el });
+  });
+  if (!marks.length) return [];
+
+  // Nearest list after position i, skipping nav-ish lists of links
+  const listAfter = (i, prefer) => {
+    for (let j = i + 1; j < all.length && j < i + 25; j++) {
+      const el = all[j];
+      if (el.tagName !== 'UL' && el.tagName !== 'OL') continue;
+      const items = Array.from(el.querySelectorAll(':scope > li'));
+      if (items.length < 2) continue;
+      // A list that's mostly links is navigation, not a recipe
+      const linky = items.filter(li => li.querySelector('a') &&
+        (li.textContent || '').trim() === (li.querySelector('a')?.textContent || '').trim());
+      if (linky.length > items.length / 2) continue;
+      if (prefer && el.tagName !== prefer && j > i + 6) continue;
+      return { el, items: items.map(li => (li.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean) };
+    }
+    return null;
+  };
+
+  // Nearest heading above position i gives the recipe its name
+  const titleBefore = (i) => {
+    for (let j = i - 1; j >= 0 && j > i - 30; j--) {
+      const el = all[j];
+      if (!/^H[1-4]$/.test(el.tagName)) continue;
+      const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (t && t.length <= 120 && !ING_RE.test(t) && !STEP_RE.test(t)) return t;
+    }
+    return '';
+  };
+
+  const pageTitle = (doc.querySelector('meta[property="og:title"]')?.content
+                  || doc.title || '').trim();
+  const metaImg = pickSecureImage(
+    doc.querySelector('meta[property="og:image:secure_url"]')?.content,
+    doc.querySelector('meta[property="og:image"]')?.content);
+
+  const out = [];
+  for (let m = 0; m < marks.length; m++) {
+    if (marks[m].kind !== 'ing') continue;
+    const ing = listAfter(marks[m].i, 'UL');
+    if (!ing || ing.items.length < 2) continue;
+
+    // Steps come from the first instruction label after this ingredient
+    // block, but only if it appears before the next recipe's ingredients —
+    // otherwise we'd staple recipe 1's steps onto recipe 2.
+    const nextIng = marks.slice(m + 1).find(x => x.kind === 'ing');
+    const stepMark = marks.slice(m + 1).find(x =>
+      x.kind === 'step' && (!nextIng || x.i < nextIng.i));
+    const steps = stepMark ? listAfter(stepMark.i, 'OL') : null;
+
+    const title = titleBefore(marks[m].i) || pageTitle;
+    if (!title) continue;
+
+    // Servings, if the page states it near the heading
+    let servings = '';
+    for (let j = Math.max(0, marks[m].i - 6); j < marks[m].i; j++) {
+      const t = (all[j].textContent || '').trim();
+      const hit = t.length < 40 && t.match(/servings?\s*[:\-]?\s*(\d+)/i);
+      if (hit) { servings = hit[1]; break; }
+    }
+
+    out.push({
+      title,
+      description: '',
+      servings,
+      prepTime: '', cookTime: '', totalTime: '',
+      ingredients: ing.items,
+      steps: steps ? steps.items : [],
+      tags: [],
+      source: new URL(sourceUrl).hostname,
+      sourceUrl,
+      image: metaImg,
+      importedFrom: 'url',
+      heuristic: true,
+    });
+  }
+  return out;
 }
 
 function extractFromJsonLd(obj, sourceUrl) {
@@ -2819,9 +2998,20 @@ function extractFromJsonLd(obj, sourceUrl) {
     tags:        [...new Set(tags)],
     source:      new URL(sourceUrl).hostname,
     sourceUrl,
-    image:       typeof image === 'string' ? image : '',
+    image:       pickSecureImage(typeof image === 'string' ? image : ''),
     importedFrom: 'url',
   };
+}
+
+// Pages often advertise the same image twice: og:image over plain http and
+// og:image:secure_url over https. Taking og:image first stores a URL the
+// browser then has to upgrade itself, which logs a mixed-content warning and
+// fails outright on hosts that don't redirect. Prefer the secure form, and
+// upgrade a bare http:// link on the way in — the browser is going to request
+// https regardless, so storing http only hides what's actually happening.
+function pickSecureImage(...candidates) {
+  const url = candidates.find(Boolean) || '';
+  return url.startsWith('http://') ? 'https://' + url.slice(7) : url;
 }
 
 function extractFromMeta(doc, sourceUrl) {
@@ -2844,7 +3034,7 @@ function extractFromMeta(doc, sourceUrl) {
     tags:        [],
     source:      new URL(sourceUrl).hostname,
     sourceUrl,
-    image:       meta('og:image') || '',
+    image:       pickSecureImage(meta('og:image:secure_url'), meta('og:image')),
     importedFrom: 'url',
   };
 }
@@ -3369,7 +3559,7 @@ function extractImageFromHtml(html, pageUrl) {
       const doc  = new DOMParser().parseFromString(html, 'text/html');
       const meta = (n) => doc.querySelector(`meta[property="${n}"]`)?.content
                        || doc.querySelector(`meta[name="${n}"]`)?.content || '';
-      img = meta('og:image') || meta('twitter:image') || '';
+      img = pickSecureImage(meta('og:image:secure_url'), meta('og:image'), meta('twitter:image'));
     } catch {}
   }
   if (!img) return '';
@@ -3734,14 +3924,13 @@ async function handleMealieZipFile(file) {
 }
 
 async function triggerMealieZipImport(file) {
-  const btn          = document.getElementById('mealie-import-zip-btn');
-  const embedImages  = document.getElementById('mealie-import-images')?.checked ?? true;
-  const importExtras = document.getElementById('mealie-import-plans')?.checked ?? true;
-  const status       = document.getElementById('mealie-import-status');
+  const btn         = document.getElementById('mealie-import-zip-btn');
+  const embedImages = document.getElementById('mealie-import-images')?.checked ?? true;
+  const status      = document.getElementById('mealie-import-status');
 
   if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
 
-  const result = await importFromMealieBackup(file, embedImages, importExtras);
+  const result = await importFromMealieBackup(file, embedImages);
 
   if (btn) { btn.disabled = false; btn.textContent = 'Import from Backup'; }
 
@@ -3749,14 +3938,7 @@ async function triggerMealieZipImport(file) {
     saveLocal();
     renderAll();
     closeModal('modal-mealie-import');
-    const bits = [`${result.count} recipes`];
-    if (result.plans?.placed) bits.push(`${result.plans.placed} planned meals`);
-    if (result.favCount)      bits.push(`${result.favCount} favorites`);
-    if (result.rateCount)     bits.push(`${result.rateCount} ratings`);
-    showToast(`✅ Imported ${bits.join(', ')} from Mealie backup`);
-    if (result.plans?.unmatched) {
-      console.warn(`[Refectory] ${result.plans.unmatched} meal plan entries referenced recipes not in the backup`);
-    }
+    showToast(`✅ Imported ${result.count} recipes from Mealie backup`);
     // Push to worker immediately — don't wait for the next sync interval
     if (!Auth.isGuest()) {
       App.pendingSync = true;
@@ -3772,85 +3954,7 @@ async function triggerMealieZipImport(file) {
 
 // ─── Mealie backup zip parser ─────────────────────────────────────
 
-// ─── Mealie meal plan import ──────────────────────────────────────
-// Mealie stores one row per planned dish keyed by calendar date, and allows
-// several rows on the same date and meal type — cooking two dinners so one
-// can be frozen is a normal plan, not a mistake. Refectory slots hold
-// multiple entries, so nothing has to be dropped.
-const MEALIE_SLOT_MAP = { breakfast: 'breakfast', lunch: 'lunch', dinner: 'dinner', side: 'snack' };
-
-// "2024-05-13" -> a local-midnight Date. Deliberately not new Date(str):
-// that parses a bare ISO date as UTC, which in any negative-offset zone
-// lands on the previous day locally and would shift entries a day earlier.
-function parseLocalDate(s) {
-  const [y, m, d] = String(s).split('-').map(Number);
-  if (!y || !m || !d) return null;
-  return new Date(y, m - 1, d);
-}
-
-function importMealieMealPlans(data, idMap) {
-  const rows = (data.group_meal_plans || []).filter(r => r.recipe_id && r.date);
-  if (!rows.length) return { placed: 0, skipped: 0, slots: 0, unmatched: 0 };
-
-  // created_at order decides position within a slot, so the dish planned
-  // first stays first — that's the one the day reads as its main meal.
-  rows.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
-
-  const staged  = {};           // weekKey -> dayIdx -> slot -> [entries]
-  const cooked  = {};           // refectory id -> latest past plan date (ms)
-  const todayMs = new Date().setHours(23, 59, 59, 999);
-  let placed = 0, unmatched = 0, skipped = 0;
-
-  for (const row of rows) {
-    const newId = idMap[row.recipe_id];
-    if (!newId) { unmatched++; continue; }
-    const date = parseLocalDate(row.date);
-    if (!date) { skipped++; continue; }
-
-    const wk   = getISOWeekKey(date);
-    const day  = (date.getDay() + 6) % 7;               // Mon=0, matches the planner
-    const slot = MEALIE_SLOT_MAP[row.entry_type] || 'dinner';
-
-    staged[wk]            = staged[wk]            || {};
-    staged[wk][day]       = staged[wk][day]       || {};
-    staged[wk][day][slot] = staged[wk][day][slot] || [];
-    staged[wk][day][slot].push(newId);
-    placed++;
-
-    // A meal planned for next week hasn't been cooked yet, so future dates
-    // must not stamp lastCooked.
-    const ts = date.getTime();
-    if (ts <= todayMs && (!cooked[newId] || cooked[newId] < ts)) cooked[newId] = ts;
-  }
-
-  // Write staged slots wholesale rather than appending, so running the import
-  // twice doesn't double every entry.
-  if (!App.data.mealplan) App.data.mealplan = {};
-  let slots = 0;
-  for (const [wk, days] of Object.entries(staged)) {
-    App.data.mealplan[wk] = App.data.mealplan[wk] || {};
-    for (const [day, slotsObj] of Object.entries(days)) {
-      App.data.mealplan[wk][day] = App.data.mealplan[wk][day] || {};
-      for (const [slot, entries] of Object.entries(slotsObj)) {
-        const packed = packSlot(entries);
-        if (packed === null) continue;
-        App.data.mealplan[wk][day][slot] = packed;
-        slots++;
-      }
-    }
-  }
-
-  // lastCooked comes from the plan history, never Date.now() — importing three
-  // years of meals must not mark every recipe as cooked today.
-  for (const [id, ts] of Object.entries(cooked)) {
-    const r = App.data.recipes?.[id];
-    if (r && (!r.lastCooked || r.lastCooked < ts)) r.lastCooked = ts;
-  }
-
-  return { placed, skipped, slots, unmatched };
-}
-
-async function importFromMealieBackup(file, embedImages, importExtras = true) {
+async function importFromMealieBackup(file, embedImages) {
   const status = (msg, err) => {
     const el = document.getElementById('mealie-import-status');
     if (el) { el.textContent = msg; el.style.color = err ? 'var(--red)' : ''; }
@@ -3885,39 +3989,6 @@ async function importFromMealieBackup(file, embedImages, importExtras = true) {
   (data.tags || []).forEach(t => { tagMap[t.id] = t.name; });
   const catMap = {};
   (data.categories || []).forEach(c => { catMap[c.id] = c.name; });
-
-  // Nutrition is one row per recipe. Mealie stores every figure as a string,
-  // and blanks as empty string, so coerce and drop anything non-numeric.
-  const nutriByRecipe = {};
-  (data.recipe_nutrition || []).forEach(n => {
-    const num = v => {
-      const f = parseFloat(v);
-      return Number.isFinite(f) ? f : null;
-    };
-    const vals = {
-      calories: num(n.calories),
-      fat:      num(n.fat_content),
-      protein:  num(n.protein_content),
-      carbs:    num(n.carbohydrate_content),
-      fiber:    num(n.fiber_content),
-      sodium:   num(n.sodium_content),
-      sugar:    num(n.sugar_content),
-    };
-    // Drop the record entirely if every field came back blank
-    if (Object.values(vals).every(v => v === null)) return;
-    nutriByRecipe[n.recipe_id] = Object.fromEntries(
-      Object.entries(vals).filter(([, v]) => v !== null)
-    );
-  });
-
-  // Favorites are per-user in Mealie, but a Refectory install is one shared
-  // household record — so take the union across everyone in the group.
-  const favIds = new Set((data.users_to_favorites || []).map(f => f.recipe_id));
-
-  // Mealie id -> Refectory id, built as recipes are written. Meal plan rows
-  // reference Mealie ids, so this is what lets the plan import resolve them
-  // without persisting a source id on every recipe.
-  const idMap = {};
 
   // Group relational tables by recipe_id
   const ingrByRecipe = {}, instrByRecipe = {}, notesByRecipe = {};
@@ -4013,13 +4084,6 @@ ${t}`;
     const existing = Object.values(App.data.recipes)
       .find(ex => ex.importedFrom === 'mealie-backup' && ex.title === r.name);
     const newId    = existing ? existing.id : genId();
-    idMap[rid]     = newId;
-
-    // Rating carries over as-is (Mealie uses the same 0–5 scale). Favorite is
-    // Mealie's own per-user favourite flag, unioned across the household.
-    const rating    = Number.isFinite(r.rating) ? r.rating : 0;
-    const favorite  = favIds.has(rid);
-    const nutrition = nutriByRecipe[rid] || null;
 
     // Image — read from zip and store in IndexedDB (not in App.data / localStorage)
     if (embedImages) {
@@ -4057,13 +4121,6 @@ ${t}`;
         importedFrom: 'mealie-backup',
         updatedAt:   Date.now(),
       });
-      if (importExtras) {
-        // Only overwrite a local rating if Mealie actually has one, so a
-        // rating added in Refectory isn't wiped by a re-import.
-        if (rating) existing.rating = rating;
-        if (favorite) existing.favorite = true;
-        if (nutrition) existing.nutrition = nutrition;
-      }
       count++;
     } else {
       App.data.recipes[newId] = {
@@ -4080,33 +4137,14 @@ ${t}`;
         importedFrom: 'mealie-backup',
         createdAt:   Date.now(),
         updatedAt:   Date.now(),
-        ...(importExtras && rating    ? { rating }    : {}),
-        ...(importExtras && favorite  ? { favorite: true } : {}),
-        ...(importExtras && nutrition ? { nutrition } : {}),
       };
       count++;
     }
   }
 
   if (!count) return { ok: false, error: 'No recipes were found in the backup.' };
-
-  // Meal plans go last — they resolve against idMap, so every recipe has to
-  // exist first.
-  let plans = null, favCount = 0, rateCount = 0, nutriCount = 0;
-  if (importExtras) {
-    status('Importing meal plans…');
-    plans = importMealieMealPlans(data, idMap);
-    for (const mealieId of Object.keys(idMap)) {
-      const r = App.data.recipes[idMap[mealieId]];
-      if (!r) continue;
-      if (r.favorite)  favCount++;
-      if (r.rating)    rateCount++;
-      if (r.nutrition) nutriCount++;
-    }
-  }
-
   scheduleSave();
-  return { ok: true, count, skipped, plans, favCount, rateCount, nutriCount };
+  return { ok: true, count, skipped };
 }
 
 async function importFromMealieJson(jsonText) {
