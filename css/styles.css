@@ -2966,3 +2966,14 @@ body.modal-open { overflow: hidden; }
 }
 .storage-banner strong { display: block; margin-bottom: .2rem; }
 .storage-banner .btn { margin-top: .5rem; }
+
+/* ── Duplicate cleanup ───────────────────────────────────────── */
+.dupe-row {
+  padding: .45rem .6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  margin-bottom: .35rem;
+  background: var(--white);
+}
+.dupe-title { font-weight: 600; font-size: .88rem; color: var(--ink); }
+.dupe-meta  { font-size: .76rem; color: var(--muted); margin-top: .1rem; }
