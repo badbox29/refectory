@@ -2820,6 +2820,7 @@ async function fetchAndScrapeUrl() {
   try {
     const res  = await fetch(`${base}/scrape?url=${encodeURIComponent(url)}`);
     const data = await res.json();
+    if (isBotBlocked(res, data)) throw new Error(BLOCKED_HINT);
     if (!res.ok || !data.html) throw new Error(data.error || 'Could not fetch that page.');
 
     statusEl.textContent = 'Parsing recipe data…';
@@ -3689,6 +3690,19 @@ function isRateLimited(res, data) {
   return /rate.?limit|too many/i.test(data?.error || '');
 }
 
+// A site refusing automated access is a different failure from a broken page
+// or a flaky network: retrying won't help, and the honest advice is to add the
+// recipe by hand. 429 is deliberately excluded — that one does clear on retry
+// and is handled by the backoff path.
+function isBotBlocked(res, data) {
+  if ([401, 403, 451].includes(res.status)) return true;
+  return /\b(403|forbidden|blocked|bot detect|captcha|access denied|just a moment)\b/i
+    .test(data?.error || '');
+}
+
+const BLOCKED_HINT = 'This site blocks automated access, so the page can\u2019t be fetched. ' +
+                     'You can still add the recipe by hand.';
+
 // Prefer the server's own figure when it sends one — the worker knows exactly
 // when a slot frees up, so guessing with exponential backoff is a fallback.
 function repullRetryAfterMs(res, data) {
@@ -3838,7 +3852,7 @@ async function runImageRepull() {
   if (log)     { log.innerHTML = ''; log.style.display = 'none'; }
   statusEl.textContent = '';
 
-  let idx = 0, done = 0, ok = 0, noImg = 0, failed = 0;
+  let idx = 0, done = 0, ok = 0, noImg = 0, failed = 0, blocked = 0;
 
   const started = Date.now();
   const tick = () => {
@@ -3851,7 +3865,8 @@ async function runImageRepull() {
       eta = secs > 90 ? ` · ~${Math.ceil(secs / 60)} min left` : ` · ~${secs}s left`;
     }
     text.textContent =
-      `${done} of ${ids.length} · ${ok} recovered · ${noImg} no image · ${failed} failed${eta}`;
+      `${done} of ${ids.length} · ${ok} recovered · ${noImg} no image · ${failed} failed` +
+      (blocked ? ` · ${blocked} blocked` : '') + eta;
   };
   tick();
 
@@ -3893,6 +3908,13 @@ async function runImageRepull() {
             continue;   // same recipe, fresh attempt
           }
 
+          if (isBotBlocked(res, data)) {
+            // No amount of retrying gets past a bot wall — record it and move
+            // on rather than burning the retry budget and the rate limiter.
+            blocked++;
+            repullLog(`⛔ ${label} — site blocks automated access`, 'var(--saffron)');
+            break;
+          }
           if (!res.ok || !data.html) throw new Error(data.error || `HTTP ${res.status}`);
 
           const img = extractImageFromHtml(data.html, data.finalUrl || r.sourceUrl);
@@ -3932,7 +3954,8 @@ async function runImageRepull() {
   statusEl.style.color = ok ? 'var(--green-mid)' : 'var(--muted)';
   statusEl.textContent = _repull.cancel
     ? `Stopped — ${ok} recovered before cancelling.`
-    : `Done — ${ok} recovered, ${noImg} with no image, ${failed} failed.`;
+    : `Done — ${ok} recovered, ${noImg} with no image, ${failed} failed` +
+      (blocked ? `, ${blocked} blocked by the site.` : '.');
   if (ok) showToast(`Recovered ${ok} image${ok === 1 ? '' : 's'} ✓`);
 
   await refreshRepullCounts();
