@@ -1967,6 +1967,20 @@ function formatWeekLabel(weekKey) {
   return `${fmt(start)} – ${fmt(end)}, ${start.getFullYear()}`;
 }
 
+// Label for a span of consecutive weeks. formatWeekLabel only ever describes
+// a single week, so a 4-week template save would show the first week's dates
+// and quietly misstate what it was about to capture.
+function formatWeekRangeLabel(startWeek, weeks) {
+  const start = weekStartDate(startWeek);
+  const end   = weekStartDate(addWeeks(startWeek, Math.max(1, weeks) - 1));
+  end.setDate(end.getDate() + 6);
+  const fmt = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  // Only repeat the year when the span crosses one
+  return start.getFullYear() === end.getFullYear()
+    ? `${fmt(start)} – ${fmt(end)}, ${start.getFullYear()}`
+    : `${fmt(start)}, ${start.getFullYear()} – ${fmt(end)}, ${end.getFullYear()}`;
+}
+
 function capitalise(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
 // ─── Pick recipe modal (for planner) ─────────────────────────────
@@ -3338,10 +3352,8 @@ function applyTemplate(id, startWeek, mode = 'replace') {
 // ─── Template UI ─────────────────────────────────────────────────
 
 function openTemplatesModal() {
-  const wk = View.currentWeek;
-  document.getElementById('tpl-save-from').textContent = formatWeekLabel(wk);
   document.getElementById('tpl-name').value = '';
-  updateTemplateSaveHint();
+  updateTemplateSaveHint();   // sets the range label to match the current span
   renderTemplateList();
   openModal('modal-templates');
 }
@@ -3352,6 +3364,11 @@ function updateTemplateSaveHint() {
   const hint = document.getElementById('tpl-save-hint');
   if (!hint) return;
   const weeks = parseInt(document.getElementById('tpl-weeks')?.value) || 1;
+
+  // Keep the range in the header honest about what the current span covers
+  const label = document.getElementById('tpl-save-from');
+  if (label) label.textContent = formatWeekRangeLabel(View.currentWeek, weeks);
+
   const slots = captureTemplateSlots(View.currentWeek, weeks);
   const meals = slots.reduce((n, s) => n + slotEntries(s.v).length, 0);
   const days  = new Set(slots.map(s => `${s.w}:${s.d}`)).size;
