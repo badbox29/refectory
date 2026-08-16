@@ -2606,13 +2606,73 @@ body.modal-open { overflow: hidden; }
   flex-direction: column;
   gap: .2rem;
 }
+/* When a slot holds more than one meal the 4/3 photo card is too tall — six
+   dinners is most of a screen. Multi-entry chips switch to the same
+   thumbnail-beside-title row the mobile planner already uses, just smaller.
+   Single-entry slots keep the photo card. */
 .plan-stack-multi .plan-recipe {
-  /* Shorter chips when several share a cell, so a stacked day still fits */
-  min-height: 0;
+  aspect-ratio: unset;
+  height: 2.6rem;
+  flex-direction: row;
 }
 .plan-stack-multi .plan-recipe-img,
-.plan-stack-multi .plan-recipe-img-placeholder {
-  height: 2.2rem;
+.plan-stack-multi .plan-recipe-img-placeholder,
+.plan-stack-multi .plan-recipe-img-fend {
+  position: relative;
+  inset: auto;
+  width: 2.6rem;
+  height: 100%;
+  flex-shrink: 0;
+  border-radius: var(--r-sm) 0 0 var(--r-sm);
+}
+.plan-stack-multi .plan-recipe-title {
+  position: relative;
+  background: none;
+  color: var(--ink);
+  font-size: .62rem;
+  line-height: 1.15;
+  padding: .2rem .3rem;
+  align-self: center;
+  flex: 1;
+  min-width: 0;
+}
+/* No room for the word "Leftovers" beside a title at this size — collapse it
+   to the same ♻ glyph the add strip already uses, pinned over the thumbnail. */
+.plan-stack-multi .plan-recipe-leftover .leftovers-badge {
+  top: .1rem;
+  left: .1rem;
+  right: auto;
+  font-size: 0;
+  padding: .1rem .25rem;
+  border-radius: 99px;
+  line-height: 1;
+  box-shadow: none;
+}
+.plan-stack-multi .plan-recipe-leftover .leftovers-badge::before {
+  content: '♻';
+  font-size: .6rem;
+}
+/* A fend chip has no title competing for space, so it keeps its full label. */
+.plan-stack-multi .plan-recipe-fend .fend-badge {
+  position: relative;
+  inset: auto;
+  align-self: center;
+  margin-left: .35rem;
+  font-size: .6rem;
+  padding: .15rem .4rem;
+  text-align: left;
+}
+.plan-stack-multi .plan-remove {
+  opacity: 0;
+}
+/* Mobile stacks are roomier but six 90px chips still sprawl — trim to 64. */
+.plan-stack-multi .plan-recipe-mobile { height: 64px; }
+.plan-stack-multi .plan-recipe-mobile .plan-recipe-img,
+.plan-stack-multi .plan-recipe-mobile .plan-recipe-img-placeholder,
+.plan-stack-multi .plan-recipe-mobile .plan-recipe-img-fend { width: 64px; }
+.plan-stack-multi .plan-recipe-mobile .plan-recipe-title {
+  font-size: .78rem;
+  padding: .4rem .6rem;
 }
 .plan-add-wrap-compact {
   flex-direction: row;
