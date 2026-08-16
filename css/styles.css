@@ -2750,3 +2750,31 @@ body.modal-open { overflow: hidden; }
 .fav-toggle input { cursor: pointer; }
 .fav-toggle-mark { color: #c2453f; font-size: 1.05rem; line-height: 1; }
 .fav-toggle-text { color: var(--muted); font-size: .85rem; }
+
+/* ── Recipe variant picker ───────────────────────────────────── */
+.variant-option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: .6rem .75rem;
+  margin-bottom: .5rem;
+  cursor: pointer;
+  transition: border-color .12s, box-shadow .12s;
+}
+.variant-option:hover {
+  border-color: var(--green-mid);
+  box-shadow: var(--shadow-sm);
+}
+.variant-title { font-weight: 600; font-size: .92rem; color: var(--ink); }
+.variant-meta  { font-size: .78rem; color: var(--muted); margin-top: .15rem; }
+.variant-preview {
+  font-size: .78rem;
+  color: var(--muted);
+  margin-top: .3rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
