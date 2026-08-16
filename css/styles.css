@@ -2977,3 +2977,5 @@ body.modal-open { overflow: hidden; }
 }
 .dupe-title { font-weight: 600; font-size: .88rem; color: var(--ink); }
 .dupe-meta  { font-size: .76rem; color: var(--muted); margin-top: .1rem; }
+.storage-banner em { font-style: normal; font-weight: 700; }
+.storage-banner-actions { display: inline-flex; gap: .4rem; flex-wrap: wrap; }
