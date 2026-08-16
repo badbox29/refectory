@@ -73,6 +73,15 @@ function defaultData() {
     mealplan:    {},
     // Cookbooks: { [id]: { id, name, description, recipeIds: [] } }
     cookbooks:   {},
+    // Meal plan templates: { [id]: { id, name, weeks, slots: [], createdAt, updatedAt } }
+    // A slot is { w, d, slot, v } — week index within the template (0-based),
+    // day of week (0=Mon), meal slot name, and the packed slot value.
+    // Deliberately anchored on week+weekday rather than day-of-month: meal
+    // planning is weekly-rhythmic (pizza Friday, Sunday roast), so a template
+    // loaded into a month starting on a Wednesday must keep Friday on Friday.
+    // Day-of-month offsets would slide the whole rhythm and also have no
+    // sensible answer for a 31-day template landing in February.
+    templates:   {},
     // Shopping stores (custom lists): { [id]: { id, name, createdAt } }
     shoppingStores: {},
     // Item → store assignment: { [itemKey]: storeId }
@@ -91,6 +100,7 @@ function mergeData(raw) {
     recipes:   (raw.recipes   && typeof raw.recipes   === 'object') ? raw.recipes   : d.recipes,
     mealplan:  (raw.mealplan  && typeof raw.mealplan  === 'object') ? raw.mealplan  : d.mealplan,
     cookbooks: (raw.cookbooks && typeof raw.cookbooks === 'object') ? raw.cookbooks : d.cookbooks,
+    templates: (raw.templates && typeof raw.templates === 'object') ? raw.templates : d.templates,
     shoppingStores: (raw.shoppingStores && typeof raw.shoppingStores === 'object') ? raw.shoppingStores : d.shoppingStores,
     itemStoreAssignments: (raw.itemStoreAssignments && typeof raw.itemStoreAssignments === 'object') ? raw.itemStoreAssignments : d.itemStoreAssignments,
   };
@@ -3210,6 +3220,218 @@ function extractFromMeta(doc, sourceUrl) {
   };
 }
 
+// ─── Meal plan templates ─────────────────────────────────────────
+// Capture a stretch of the planner under a name and drop it onto any other
+// week later. Templates store week index + day of week, never dates, so
+// loading one preserves the weekday rhythm wherever it lands.
+
+function getTemplates() {
+  return Object.values(App.data.templates || {})
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+
+function getTemplate(id) { return App.data.templates?.[id] || null; }
+
+// Read `weeks` consecutive weeks out of the planner starting at startWeek.
+function captureTemplateSlots(startWeek, weeks) {
+  const slots = [];
+  for (let w = 0; w < weeks; w++) {
+    const wk   = addWeeks(startWeek, w);
+    const plan = App.data.mealplan?.[wk];
+    if (!plan) continue;
+    for (let d = 0; d < 7; d++) {
+      const day = plan[d];
+      if (!day) continue;
+      for (const slot of MEAL_SLOTS) {
+        const entries = slotEntries(day[slot]);
+        if (!entries.length) continue;
+        slots.push({ w, d, slot, v: packSlot(entries) });
+      }
+    }
+  }
+  return slots;
+}
+
+function saveTemplate(name, startWeek, weeks) {
+  const slots = captureTemplateSlots(startWeek, weeks);
+  if (!slots.length) return { ok: false, error: 'Nothing planned in that range to save.' };
+  if (!App.data.templates) App.data.templates = {};
+  const id  = genId();
+  const now = Date.now();
+  App.data.templates[id] = {
+    id,
+    name: name.trim() || `Template ${new Date(now).toLocaleDateString()}`,
+    weeks,
+    slots,
+    createdAt: now,
+    updatedAt: now,
+  };
+  scheduleSave();
+  return { ok: true, id, count: slots.reduce((n, s) => n + slotEntries(s.v).length, 0) };
+}
+
+function deleteTemplate(id) {
+  if (!App.data.templates?.[id]) return;
+  delete App.data.templates[id];
+  scheduleSave();
+}
+
+// How many meals a template holds, and how many of those still resolve to a
+// recipe that exists. A template built months ago can reference recipes since
+// deleted, so the gap is worth showing before the user loads it.
+function templateStats(tpl) {
+  let total = 0, missing = 0;
+  for (const s of (tpl.slots || [])) {
+    for (const entry of slotEntries(s.v)) {
+      total++;
+      if (isFendEntry(entry)) continue;         // points at no recipe by design
+      if (!getRecipe(slotRecipeId(entry))) missing++;
+    }
+  }
+  return { total, missing, days: new Set((tpl.slots || []).map(s => `${s.w}:${s.d}`)).size };
+}
+
+// Apply a template onto the planner starting at `startWeek`.
+// mode 'replace' overwrites any slot the template has an entry for;
+// mode 'fill' leaves occupied slots alone and only fills empty ones.
+function applyTemplate(id, startWeek, mode = 'replace') {
+  const tpl = getTemplate(id);
+  if (!tpl) return { ok: false, error: 'Template not found.' };
+
+  if (!App.data.mealplan) App.data.mealplan = {};
+  let applied = 0, skippedMissing = 0, skippedOccupied = 0;
+
+  for (const s of (tpl.slots || [])) {
+    // Entries whose recipe has since been deleted are dropped rather than
+    // written as dead references — the planner would render them as blanks
+    // and the shopping list would silently ignore them.
+    const kept = slotEntries(s.v).filter(e => {
+      if (isFendEntry(e)) return true;
+      if (getRecipe(slotRecipeId(e))) return true;
+      skippedMissing++;
+      return false;
+    });
+    if (!kept.length) continue;
+
+    const wk = addWeeks(startWeek, s.w);
+    App.data.mealplan[wk]        = App.data.mealplan[wk] || {};
+    App.data.mealplan[wk][s.d]   = App.data.mealplan[wk][s.d] || {};
+    const day = App.data.mealplan[wk][s.d];
+
+    if (mode === 'fill' && slotEntries(day[s.slot]).length) {
+      skippedOccupied += kept.length;
+      continue;
+    }
+
+    const packed = packSlot(kept);
+    if (packed === null) continue;
+    day[s.slot] = packed;
+    applied += kept.length;
+  }
+
+  // Loading a plan is not cooking it — lastCooked stays untouched, exactly as
+  // in the Mealie history import.
+  scheduleSave();
+  return { ok: true, applied, skippedMissing, skippedOccupied };
+}
+
+// ─── Template UI ─────────────────────────────────────────────────
+
+function openTemplatesModal() {
+  const wk = View.currentWeek;
+  document.getElementById('tpl-save-from').textContent = formatWeekLabel(wk);
+  document.getElementById('tpl-name').value = '';
+  updateTemplateSaveHint();
+  renderTemplateList();
+  openModal('modal-templates');
+}
+
+// Tell the user what a save would actually capture before they commit — a
+// range with nothing planned in it is the most likely mistake here.
+function updateTemplateSaveHint() {
+  const hint = document.getElementById('tpl-save-hint');
+  if (!hint) return;
+  const weeks = parseInt(document.getElementById('tpl-weeks')?.value) || 1;
+  const slots = captureTemplateSlots(View.currentWeek, weeks);
+  const meals = slots.reduce((n, s) => n + slotEntries(s.v).length, 0);
+  const days  = new Set(slots.map(s => `${s.w}:${s.d}`)).size;
+  hint.textContent = meals
+    ? `Captures ${meals} meal${meals === 1 ? '' : 's'} across ${days} day${days === 1 ? '' : 's'}.`
+    : `Nothing planned in ${weeks === 1 ? 'this week' : `these ${weeks} weeks`} yet.`;
+  hint.style.color = meals ? 'var(--muted)' : 'var(--saffron)';
+}
+
+function renderTemplateList() {
+  const wrap = document.getElementById('tpl-list');
+  if (!wrap) return;
+  const list = getTemplates();
+  if (!list.length) {
+    wrap.innerHTML = `<div class="f13 muted" style="padding:.75rem 0;">
+      No templates yet. Plan a week you like, then save it here and load it onto any future week.</div>`;
+    return;
+  }
+
+  wrap.innerHTML = list.map(t => {
+    const st = templateStats(t);
+    return `
+    <div class="tpl-row" data-id="${esc(t.id)}">
+      <div class="tpl-row-main">
+        <div class="tpl-row-name">${esc(t.name)}</div>
+        <div class="tpl-row-meta">
+          ${t.weeks} week${t.weeks === 1 ? '' : 's'} · ${st.total} meal${st.total === 1 ? '' : 's'} · ${st.days} day${st.days === 1 ? '' : 's'}
+          ${st.missing ? `<span class="tpl-missing">· ${st.missing} recipe${st.missing === 1 ? '' : 's'} no longer exist${st.missing === 1 ? 's' : ''}</span>` : ''}
+        </div>
+      </div>
+      <div class="tpl-row-actions">
+        <button class="btn btn-primary btn-sm tpl-load" data-id="${esc(t.id)}">Load</button>
+        <button class="btn btn-icon tpl-delete" data-id="${esc(t.id)}" title="Delete template">🗑</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  wrap.querySelectorAll('.tpl-load').forEach(btn => {
+    btn.addEventListener('click', () => loadTemplateIntoPlanner(btn.dataset.id));
+  });
+  wrap.querySelectorAll('.tpl-delete').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const t = getTemplate(btn.dataset.id);
+      if (!t) return;
+      if (!confirm(`Delete the template “${t.name}”? This won't change any meal plans.`)) return;
+      deleteTemplate(btn.dataset.id);
+      renderTemplateList();
+      showToast('Template deleted');
+    });
+  });
+}
+
+function loadTemplateIntoPlanner(id) {
+  const tpl = getTemplate(id);
+  if (!tpl) return;
+  const mode = document.getElementById('tpl-fill-only')?.checked ? 'fill' : 'replace';
+  const target = View.currentWeek;
+
+  // Replacing can overwrite meals already planned, so say so before doing it.
+  if (mode === 'replace') {
+    const clashes = tpl.slots.filter(s =>
+      slotEntries(App.data.mealplan?.[addWeeks(target, s.w)]?.[s.d]?.[s.slot]).length).length;
+    if (clashes && !confirm(
+      `“${tpl.name}” will overwrite ${clashes} slot${clashes === 1 ? '' : 's'} that already ` +
+      `${clashes === 1 ? 'has' : 'have'} meals planned, starting ${formatWeekLabel(target)}.\n\n` +
+      `Tick “Only fill empty slots” first if you'd rather keep them.`)) return;
+  }
+
+  const res = applyTemplate(id, target, mode);
+  if (!res.ok) { showToast(res.error); return; }
+
+  closeModal('modal-templates');
+  renderAll();
+
+  const bits = [`Loaded ${res.applied} meal${res.applied === 1 ? '' : 's'}`];
+  if (res.skippedOccupied) bits.push(`${res.skippedOccupied} skipped (slot in use)`);
+  if (res.skippedMissing)  bits.push(`${res.skippedMissing} skipped (recipe deleted)`);
+  showToast(bits.join(' · '));
+}
+
 // ─── Cookbooks ────────────────────────────────────────────────────
 
 function getCookbooks() {
@@ -4827,6 +5049,18 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Recipe search
+  document.getElementById('planner-templates')?.addEventListener('click', openTemplatesModal);
+  document.getElementById('tpl-weeks')?.addEventListener('change', updateTemplateSaveHint);
+  document.getElementById('tpl-save-btn')?.addEventListener('click', () => {
+    const name  = document.getElementById('tpl-name')?.value || '';
+    const weeks = parseInt(document.getElementById('tpl-weeks')?.value) || 1;
+    const res   = saveTemplate(name, View.currentWeek, weeks);
+    if (!res.ok) { showToast(res.error); return; }
+    document.getElementById('tpl-name').value = '';
+    renderTemplateList();
+    showToast(`Saved template with ${res.count} meal${res.count === 1 ? '' : 's'} ✓`);
+  });
+
   document.getElementById('recipe-sort')?.addEventListener('change', e => {
     View.recipeSort = e.target.value;
     renderRecipes();
