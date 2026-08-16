@@ -424,6 +424,9 @@
           <input type="checkbox" id="mealie-import-plans" checked/>
           Import meal plan history, ratings and favorites
         </label>
+        <button class="btn btn-outline btn-sm w100" id="btn-find-dupes" style="margin-top:.5rem;">
+          🔍 Find duplicate recipes
+        </button>
       </div>
 
       <!-- JSON paste panel -->
@@ -847,6 +850,30 @@
       <p class="f13 lh muted" style="margin-bottom:.75rem;" id="variant-hint"></p>
       <div id="variant-list"></div>
       <button class="btn btn-outline w100" id="variant-import-all" style="margin-top:.25rem;"></button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Duplicate cleanup ───────────────────────────────────────── -->
+<div class="modal-overlay" id="modal-dedupe" role="dialog" aria-modal="true">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <h2 class="modal-title">Find Duplicate Recipes</h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="f13 lh muted" style="margin-bottom:.75rem;">
+        Recipes with the same name are usually the result of importing the same
+        library twice. Merging keeps the most complete copy of each, moves
+        across anything the other copy had, and repoints meal plans, cookbooks
+        and templates at the survivor before removing the extras.
+      </p>
+      <div id="dedupe-summary" class="f13" style="margin-bottom:.6rem;"></div>
+      <div id="dedupe-preview" style="max-height:16rem;overflow-y:auto;"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="dedupe-cancel">Cancel</button>
+      <button class="btn btn-primary" id="dedupe-go" disabled>Merge Duplicates</button>
     </div>
   </div>
 </div>
