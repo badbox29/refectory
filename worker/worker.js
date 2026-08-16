@@ -28,7 +28,8 @@ const KV_BINDING          = 'REFECTORY_KV';
 const KV_TTL              = 60 * 60 * 24 * 1825; // 5 years, resets on every write
 const HMAC_SALT           = 'refectory-hmac-v1'; // must never change after deployment
 const MAX_BODY_SIZE       = 5 * 1024 * 1024;      // 5 MB — recipe collections can be large
-const AUTH_RATE_LIMIT     = 20;
+const AUTH_RATE_LIMIT     = 60;    // interactive sign-in attempts, per IP per window
+const VERIFY_RATE_LIMIT   = 200;   // boot-time session checks — unattended, cheap, own budget
 const AUTH_RATE_LIMIT_WIN = 3600;
 const RATE_LIMIT          = 120;
 const RATE_LIMIT_WINDOW   = 60;
@@ -69,14 +70,24 @@ function isValidToken(token) {
 
 // ── IP rate limiting (auth routes) ─────────────────────────────────────────
 
-async function checkIpRateLimit(env, ip) {
-  const kv    = env[KV_BINDING];
-  const key   = `rl:ip:${ip}`;
-  const raw   = await kv.get(key, { type: 'text' });
-  const count = raw ? parseInt(raw, 10) : 0;
-  if (count >= AUTH_RATE_LIMIT) return false;
-  await kv.put(key, String(count + 1), { expirationTtl: AUTH_RATE_LIMIT_WIN * 2 });
-  return true;
+// Fixed-slot window: the key carries the time bucket, so a counter genuinely
+// expires after AUTH_RATE_LIMIT_WIN instead of drifting on a doubled TTL.
+// Returns { ok, retryAfter?, remaining? }.
+async function checkIpRateLimit(env, ip, opts = {}) {
+  const limit  = opts.limit  || AUTH_RATE_LIMIT;
+  const win    = opts.window || AUTH_RATE_LIMIT_WIN;
+  const bucket = opts.bucket || 'auth';
+  const now    = Math.floor(Date.now() / 1000);
+  const slot   = Math.floor(now / win);
+  const kv     = env[KV_BINDING];
+  const key    = `rl:ip:${bucket}:${ip}:${slot}`;
+  const raw    = await kv.get(key, { type: 'text' });
+  const count  = raw ? parseInt(raw, 10) : 0;
+  if (count >= limit) {
+    return { ok: false, retryAfter: Math.max(1, (slot + 1) * win - now) };
+  }
+  await kv.put(key, String(count + 1), { expirationTtl: Math.max(60, win + 60) });
+  return { ok: true, remaining: limit - count - 1 };
 }
 
 // ── HMAC signing (mirrors auth.js exactly) ─────────────────────────────────
@@ -175,9 +186,28 @@ async function handleAuth(url, method, request, env, cors, ip) {
     }), 200, cors);
   }
 
-  // All /auth/* routes are IP rate-limited
-  if (!(await checkIpRateLimit(env, ip))) {
-    return respond(JSON.stringify({ error: 'Too many requests — try again later' }), 429, cors);
+  // POST /auth/verify — boot-time session check. Fires unattended on nearly
+  // every boot (Google ID tokens live ~1h), so it gets its own generous budget
+  // rather than eating the interactive sign-in allowance.
+  if (url.pathname === '/auth/verify' && method === 'POST') {
+    const vrl = await checkIpRateLimit(env, ip, { bucket: 'verify', limit: VERIFY_RATE_LIMIT });
+    if (!vrl.ok) {
+      return respond(JSON.stringify({ ok: false, error: 'Too many requests — try again later' }),
+        429, { ...cors, 'Retry-After': String(vrl.retryAfter) });
+    }
+    let idToken;
+    try { idToken = (await request.json()).idToken; } catch { return respond(JSON.stringify({ error: 'Invalid body' }), 400, cors); }
+    if (!idToken) return respond(JSON.stringify({ error: 'idToken required' }), 400, cors);
+    const p = await verifyGoogleJWT(idToken, env.GOOGLE_CLIENT_ID);
+    if (!p) return respond(JSON.stringify({ ok: false, error: 'Token expired or invalid' }), 401, cors);
+    return respond(JSON.stringify({ ok: true, profile: p }), 200, cors);
+  }
+
+  // Remaining /auth/* routes are IP rate-limited
+  const rl = await checkIpRateLimit(env, ip);
+  if (!rl.ok) {
+    return respond(JSON.stringify({ error: 'Too many requests — try again later' }),
+      429, { ...cors, 'Retry-After': String(rl.retryAfter) });
   }
 
   // POST /auth/google
@@ -188,16 +218,6 @@ async function handleAuth(url, method, request, env, cors, ip) {
     const p = await verifyGoogleJWT(idToken, env.GOOGLE_CLIENT_ID);
     if (!p) return respond(JSON.stringify({ error: 'Invalid or expired Google token' }), 401, cors);
     return respond(JSON.stringify({ ok: true, kvKey: `google:${p.sub}`, profile: p }), 200, cors);
-  }
-
-  // POST /auth/verify
-  if (url.pathname === '/auth/verify' && method === 'POST') {
-    let idToken;
-    try { idToken = (await request.json()).idToken; } catch { return respond(JSON.stringify({ error: 'Invalid body' }), 400, cors); }
-    if (!idToken) return respond(JSON.stringify({ error: 'idToken required' }), 400, cors);
-    const p = await verifyGoogleJWT(idToken, env.GOOGLE_CLIENT_ID);
-    if (!p) return respond(JSON.stringify({ ok: false, error: 'Token expired or invalid' }), 401, cors);
-    return respond(JSON.stringify({ ok: true, profile: p }), 200, cors);
   }
 
   // POST /auth/migrate — FIX: requires HMAC proof of old token ownership
