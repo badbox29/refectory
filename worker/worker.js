@@ -13,6 +13,8 @@
  *   GET    /ping                — Health check (open CORS)
  *   GET    /auth/config         — Return Google Client ID for GIS bootstrap
  *   GET    /scrape              — Proxy-fetch a URL and return HTML for recipe scraping
+ *                                  (falls back to Browser Run when a site refuses
+ *                                   a plain fetch; requires a BROWSER binding)
  *   POST   /auth/google         — Verify Google ID token
  *   POST   /auth/verify         — Re-verify stored Google credential at boot
  *   POST   /auth/migrate        — Token → Google migration (HMAC-authenticated)
@@ -367,6 +369,93 @@ async function writeLegacyPointer(parsed, newToken, env) {
   return parsed;
 }
 
+// ── Scrape fetching ────────────────────────────────────────────────────────
+// The old User-Agent announced itself as "Refectory/1.0; recipe scraper",
+// which is a self-identifying bot signature — no fingerprinting needed for a
+// site to filter it. These are the headers a real browser sends on a top-level
+// navigation; the Sec-Fetch-* set in particular is a cheap tell when absent.
+const SCRAPE_UAS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0',
+];
+
+function scrapeHeaders(targetUrl) {
+  let origin = '';
+  try { origin = new URL(targetUrl).origin + '/'; } catch {}
+  return {
+    'User-Agent': SCRAPE_UAS[Math.floor(Math.random() * SCRAPE_UAS.length)],
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': origin,
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+  };
+}
+
+// Statuses that mean "we were refused", not "the page is broken". 429 is
+// excluded on purpose — that's a rate limit, it clears on its own, and
+// spending a browser on it would waste the allowance.
+const BLOCKED_STATUSES = [401, 403, 451, 503];
+
+// Fall back to a real headless browser. Cheap fetch is tried first and this
+// only runs when it comes back refused, because browser time is metered:
+// Workers Paid includes 10 browser hours a month, which is thousands of page
+// loads, but there's no reason to spend one on a site that isn't blocking us.
+// Returns null when the binding isn't configured, so the Worker keeps working
+// without it.
+// Browser Run wraps its payload: the body is {"success":true,"result":"<html>…"}
+// rather than raw HTML. Passing that through verbatim means the client parses a
+// JSON string as a document, finds no title and no structured data, and reports
+// "no recipe found" — a parse failure wearing the costume of a missing recipe.
+function unwrapBrowserBody(raw) {
+  if (!raw) return '';
+  const text = String(raw).trim();
+  if (text.startsWith('<')) return text;          // already raw HTML
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed === 'string') return parsed;
+    return parsed.result || parsed.html || parsed.content || '';
+  } catch {
+    return text;
+  }
+}
+
+// Some sites answer a browser with HTTP 200 and a courtesy page instead of the
+// article — "if you are experiencing an access issue, contact support" and the
+// like. That's a block wearing a success code, and treating it as a real page
+// sends the user hunting for a parser bug. A page with no <title> that's this
+// short is not an article.
+function looksLikeBlockPage(html) {
+  if (!html) return true;
+  if (html.length > 4000) return false;
+  const hasTitle = /<title[^>]*>\s*\S/i.test(html);
+  if (hasTitle && html.length > 1500) return false;
+  return /access issue|access denied|are you a robot|enable javascript|unusual traffic|verify you are human|support@/i
+    .test(html) || !hasTitle;
+}
+
+async function fetchViaBrowser(env, targetUrl) {
+  if (!env || !env.BROWSER || typeof env.BROWSER.quickAction !== 'function') return null;
+  try {
+    const res    = await env.BROWSER.quickAction('content', { url: targetUrl });
+    const html   = unwrapBrowserBody(await res.text());
+    const msUsed = res.headers?.get?.('X-Browser-Ms-Used') || null;
+    // Order matters: a block page is often short, so the emptiness check has
+    // to be strictly "nothing came back" or it swallows the block signal and
+    // reports a generic failure instead.
+    if (!html) return null;
+    if (looksLikeBlockPage(html)) return { blocked: true, msUsed };
+    return { html, msUsed };
+  } catch (e) {
+    console.error('Browser Run fallback failed:', e && e.message);
+    return null;
+  }
+}
+
 // ── Rate limiting (scrape) ─────────────────────────────────────────────────
 
 // Timestamp-array window, matching the storage limiter. The previous counter
@@ -495,23 +584,56 @@ export default {
         }
         try {
           const res = await fetch(targetUrl, {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (compatible; Refectory/1.0; recipe scraper)',
-              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-              'Accept-Language': 'en-US,en;q=0.9',
-            },
+            headers: scrapeHeaders(targetUrl),
             redirect: 'follow',
             // cacheEverything is required for HTML to be cached at all; with it
             // off the cacheTtl below was a no-op.
             cf: { cacheTtl: 900, cacheEverything: true },
           });
-          if (!res.ok) return respond(JSON.stringify({ error: `Fetch failed: ${res.status}` }), 502, cors);
-          const html = await res.text();
-          // Return HTML — client does all the parsing
-          return new Response(JSON.stringify({ ok: true, html, finalUrl: res.url }), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json', ...cors },
-          });
+
+          if (res.ok) {
+            const html = await res.text();
+            return new Response(
+              JSON.stringify({ ok: true, html, finalUrl: res.url, via: 'fetch' }),
+              { status: 200, headers: { 'Content-Type': 'application/json', ...cors } }
+            );
+          }
+
+          // Refused — try a real browser before giving up.
+          if (BLOCKED_STATUSES.includes(res.status)) {
+            const browsed = await fetchViaBrowser(env, targetUrl);
+            if (browsed && browsed.blocked) {
+              // A real browser was served a block page too — the refusal is by
+              // IP reputation, not headers, so nothing here will get past it.
+              return respond(JSON.stringify({
+                error: `Fetch failed: ${res.status} — site blocked automated access`,
+                blocked: true,
+                upstreamStatus: res.status,
+                browserTried: true,
+                browserMs: browsed.msUsed,
+              }), 502, cors);
+            }
+            if (browsed) {
+              return new Response(
+                JSON.stringify({ ok: true, html: browsed.html, finalUrl: targetUrl,
+                                 via: 'browser', browserMs: browsed.msUsed }),
+                { status: 200, headers: { 'Content-Type': 'application/json', ...cors } }
+              );
+            }
+            // `blocked` is the precise signal; the status stays in the message
+            // so older clients that only pattern-match the text still see it.
+            return respond(JSON.stringify({
+              error: `Fetch failed: ${res.status} — site blocked automated access`,
+              blocked: true,
+              upstreamStatus: res.status,
+            }), 502, cors);
+          }
+
+          return respond(JSON.stringify({
+            error: `Fetch failed: ${res.status}`,
+            upstreamStatus: res.status,
+          }), 502, cors);
+
         } catch(e) {
           return respond(JSON.stringify({ error: `Could not fetch URL: ${e.message}` }), 502, cors);
         }
