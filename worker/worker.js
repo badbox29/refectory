@@ -12,9 +12,9 @@
  *   GET    /                    — Health check (open CORS)
  *   GET    /ping                — Health check (open CORS)
  *   GET    /auth/config         — Return Google Client ID for GIS bootstrap
+ *   POST   /share               — Create a read-only, self-expiring meal plan link
+ *   GET    /share/{id}          — Public meal plan page (no auth, no Origin check)
  *   GET    /scrape              — Proxy-fetch a URL and return HTML for recipe scraping
- *                                  (falls back to Browser Run when a site refuses
- *                                   a plain fetch; requires a BROWSER binding)
  *   POST   /auth/google         — Verify Google ID token
  *   POST   /auth/verify         — Re-verify stored Google credential at boot
  *   POST   /auth/migrate        — Token → Google migration (HMAC-authenticated)
@@ -369,91 +369,260 @@ async function writeLegacyPointer(parsed, newToken, env) {
   return parsed;
 }
 
-// ── Scrape fetching ────────────────────────────────────────────────────────
-// The old User-Agent announced itself as "Refectory/1.0; recipe scraper",
-// which is a self-identifying bot signature — no fingerprinting needed for a
-// site to filter it. These are the headers a real browser sends on a top-level
-// navigation; the Sec-Fetch-* set in particular is a cheap tell when absent.
-const SCRAPE_UAS = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0',
-];
+// ── Meal plan sharing ──────────────────────────────────────────────────────
+// A share is a read-only, self-expiring window onto one date range of one
+// account. The record holds the owner's token so the page can read live data
+// — change the plan and the link reflects it — but the rendered page exposes
+// only dish name, image and description. No ingredients: telling a kid that
+// the thing they've happily eaten for years contains soy sauce is a good way
+// to stop them eating it.
+const SHARE_MAX_DAYS = 62;
 
-function scrapeHeaders(targetUrl) {
-  let origin = '';
-  try { origin = new URL(targetUrl).origin + '/'; } catch {}
-  return {
-    'User-Agent': SCRAPE_UAS[Math.floor(Math.random() * SCRAPE_UAS.length)],
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Referer': origin,
-    'Upgrade-Insecure-Requests': '1',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none',
-    'Sec-Fetch-User': '?1',
-  };
+function shareId() {
+  const b = new Uint8Array(18);
+  crypto.getRandomValues(b);
+  return [...b].map(x => x.toString(16).padStart(2, '0')).join('');
 }
 
-// Statuses that mean "we were refused", not "the page is broken". 429 is
-// excluded on purpose — that's a rate limit, it clears on its own, and
-// spending a browser on it would waste the allowance.
-const BLOCKED_STATUSES = [401, 403, 451, 503];
+function escHtml(v) {
+  return String(v == null ? '' : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
 
-// Fall back to a real headless browser. Cheap fetch is tried first and this
-// only runs when it comes back refused, because browser time is metered:
-// Workers Paid includes 10 browser hours a month, which is thousands of page
-// loads, but there's no reason to spend one on a site that isn't blocking us.
-// Returns null when the binding isn't configured, so the Worker keeps working
-// without it.
-// Browser Run wraps its payload: the body is {"success":true,"result":"<html>…"}
-// rather than raw HTML. Passing that through verbatim means the client parses a
-// JSON string as a document, finds no title and no structured data, and reports
-// "no recipe found" — a parse failure wearing the costume of a missing recipe.
-function unwrapBrowserBody(raw) {
-  if (!raw) return '';
-  const text = String(raw).trim();
-  if (text.startsWith('<')) return text;          // already raw HTML
-  try {
-    const parsed = JSON.parse(text);
-    if (typeof parsed === 'string') return parsed;
-    return parsed.result || parsed.html || parsed.content || '';
-  } catch {
-    return text;
+// ISO week key for a calendar date, matching the client's getISOWeekKey.
+// Built entirely from UTC components so the Worker — which runs in UTC —
+// derives the same week for a given Y-M-D as the browser does locally.
+function isoWeekKeyUTC(y, m, d) {
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + 3 - ((dt.getUTCDay() + 6) % 7));
+  const week1 = new Date(Date.UTC(dt.getUTCFullYear(), 0, 4));
+  const wn = 1 + Math.round(((dt - week1) / 86400000 - 3 + ((week1.getUTCDay() + 6) % 7)) / 7);
+  return `${dt.getUTCFullYear()}-W${String(wn).padStart(2, '0')}`;
+}
+
+function dayIndexUTC(y, m, d) {
+  return (new Date(Date.UTC(y, m - 1, d)).getUTCDay() + 6) % 7;   // Mon = 0
+}
+
+const SHARE_SLOTS = ['breakfast', 'lunch', 'dinner', 'snack'];
+const LEFTOVERS_PFX = 'leftovers:';
+
+function shareSlotEntries(v) {
+  if (v == null) return [];
+  return (Array.isArray(v) ? v : [v]).filter(Boolean);
+}
+
+function shortDesc(text, max = 180) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (t.length <= max) return t;
+  const cut = t.slice(0, max);
+  const sp  = cut.lastIndexOf(' ');
+  return (sp > max * 0.6 ? cut.slice(0, sp) : cut).replace(/[,;:.\s]+$/, '') + '…';
+}
+
+// Walk the shared date range and pull out what the page needs.
+function buildShareDays(profile, fromStr, toStr) {
+  const recipes = profile?.recipes || {};
+  const plan    = profile?.mealplan || {};
+  const [fy, fm, fd] = fromStr.split('-').map(Number);
+  const [ty, tm, td] = toStr.split('-').map(Number);
+  const start = Date.UTC(fy, fm - 1, fd);
+  const end   = Date.UTC(ty, tm - 1, td);
+  const days  = [];
+
+  for (let ts = start; ts <= end; ts += 86400000) {
+    const dt = new Date(ts);
+    const y = dt.getUTCFullYear(), m = dt.getUTCMonth() + 1, d = dt.getUTCDate();
+    const dayPlan = plan?.[isoWeekKeyUTC(y, m, d)]?.[dayIndexUTC(y, m, d)] || {};
+
+    const meals = [];
+    for (const slot of SHARE_SLOTS) {
+      for (const entry of shareSlotEntries(dayPlan[slot])) {
+        if (entry === 'fend') { meals.push({ slot, fend: true }); continue; }
+        const leftover = typeof entry === 'string' && entry.startsWith(LEFTOVERS_PFX);
+        const id = leftover ? entry.slice(LEFTOVERS_PFX.length) : entry;
+        const r  = recipes[id];
+        if (!r) continue;
+        meals.push({
+          slot,
+          leftover,
+          title: r.title || 'Untitled',
+          // Only remote links can render here — IndexedDB bytes are on her
+          // device and unreachable from the Worker.
+          image: /^https?:\/\//i.test(r.imageUrl || '') ? r.imageUrl : '',
+          desc:  shortDesc(r.description),
+        });
+      }
+    }
+    if (meals.length) {
+      days.push({
+        label: dt.toLocaleDateString('en-US',
+          { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' }),
+        meals,
+      });
+    }
   }
+  return days;
 }
 
-// Some sites answer a browser with HTTP 200 and a courtesy page instead of the
-// article — "if you are experiencing an access issue, contact support" and the
-// like. That's a block wearing a success code, and treating it as a real page
-// sends the user hunting for a parser bug. A page with no <title> that's this
-// short is not an article.
-function looksLikeBlockPage(html) {
-  if (!html) return true;
-  if (html.length > 4000) return false;
-  const hasTitle = /<title[^>]*>\s*\S/i.test(html);
-  if (hasTitle && html.length > 1500) return false;
-  return /access issue|access denied|are you a robot|enable javascript|unusual traffic|verify you are human|support@/i
-    .test(html) || !hasTitle;
-}
+function sharePage({ title, subtitle, days, expired }) {
+  const body = expired
+    ? `<div class="gone"><h1>This link has expired</h1>
+         <p>Meal plan links stop working at the end of the range they cover.
+            Ask for a fresh one.</p></div>`
+    : !days.length
+      ? `<div class="gone"><h1>${escHtml(title)}</h1><p>Nothing planned for these days yet.</p></div>`
+      : `<header><h1>${escHtml(title)}</h1><p class="sub">${escHtml(subtitle)}</p></header>
+         ${days.map(day => `
+           <section class="day">
+             <h2>${escHtml(day.label)}</h2>
+             ${day.meals.map(mm => mm.fend
+               ? `<article class="meal fend">
+                    <div class="txt"><span class="slot">${escHtml(mm.slot)}</span>
+                    <h3>Fend for yourselves</h3></div>
+                  </article>`
+               : `<article class="meal">
+                    ${mm.image
+                      ? `<img src="${escHtml(mm.image)}" alt="" loading="lazy" referrerpolicy="no-referrer"/>`
+                      : `<div class="noimg" aria-hidden="true">🍽</div>`}
+                    <div class="txt">
+                      <span class="slot">${escHtml(mm.slot)}${mm.leftover ? ' · leftovers' : ''}</span>
+                      <h3>${escHtml(mm.title)}</h3>
+                      ${mm.desc ? `<p>${escHtml(mm.desc)}</p>` : ''}
+                    </div>
+                  </article>`).join('')}
+           </section>`).join('')}`;
 
-async function fetchViaBrowser(env, targetUrl) {
-  if (!env || !env.BROWSER || typeof env.BROWSER.quickAction !== 'function') return null;
-  try {
-    const res    = await env.BROWSER.quickAction('content', { url: targetUrl });
-    const html   = unwrapBrowserBody(await res.text());
-    const msUsed = res.headers?.get?.('X-Browser-Ms-Used') || null;
-    // Order matters: a block page is often short, so the emptiness check has
-    // to be strictly "nothing came back" or it swallows the block signal and
-    // reports a generic failure instead.
-    if (!html) return null;
-    if (looksLikeBlockPage(html)) return { blocked: true, msUsed };
-    return { html, msUsed };
-  } catch (e) {
-    console.error('Browser Run fallback failed:', e && e.message);
-    return null;
+  return `<!doctype html><html lang="en"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="robots" content="noindex,nofollow"/>
+<title>${escHtml(expired ? 'Link expired' : title)}</title>
+<style>
+  :root { --ink:#2b2a26; --muted:#6f6b61; --cream:#faf7f0; --card:#fff;
+          --line:#e6e0d4; --green:#6b8c5a; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--cream); color:var(--ink); font:16px/1.5 -apple-system,
+         BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; padding:1rem;
+         max-width:640px; margin:0 auto; }
+  header { padding:.5rem 0 1rem; }
+  h1 { font-size:1.5rem; line-height:1.2; }
+  .sub { color:var(--muted); font-size:.9rem; margin-top:.2rem; }
+  .day { margin-bottom:1.5rem; }
+  .day h2 { font-size:.8rem; text-transform:uppercase; letter-spacing:.06em;
+            color:var(--green); font-weight:700; margin-bottom:.5rem;
+            padding-bottom:.3rem; border-bottom:1px solid var(--line); }
+  .meal { display:flex; gap:.75rem; background:var(--card);
+          border:1px solid var(--line); border-radius:10px;
+          padding:.6rem; margin-bottom:.5rem; }
+  .meal img, .noimg { width:76px; height:76px; flex:0 0 76px;
+          border-radius:7px; object-fit:cover; background:#efe9dd; }
+  .noimg { display:flex; align-items:center; justify-content:center;
+           font-size:1.6rem; opacity:.45; }
+  .txt { min-width:0; align-self:center; }
+  .slot { font-size:.68rem; text-transform:uppercase; letter-spacing:.05em;
+          color:var(--muted); font-weight:600; }
+  .meal h3 { font-size:1rem; line-height:1.25; margin:.1rem 0 .2rem; }
+  .meal p { font-size:.85rem; color:var(--muted); }
+  .fend .txt { align-self:center; }
+  .gone { text-align:center; padding:3rem 1rem; }
+  .gone h1 { margin-bottom:.5rem; }
+  .gone p { color:var(--muted); }
+  footer { text-align:center; color:var(--muted); font-size:.75rem;
+           padding:1.5rem 0 .5rem; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ece7dc; --muted:#a49e91; --cream:#22211d;
+            --card:#2c2b26; --line:#3b3931; --green:#93b47a; }
   }
+</style></head><body>${body}
+<footer>Shared from Refectory${expired ? '' : ' · this link expires automatically'}</footer>
+</body></html>`;
+}
+
+async function handleSharePage(id, env) {
+  const html = (b, status) => new Response(b, {
+    status,
+    headers: { 'Content-Type': 'text/html; charset=utf-8',
+               'Cache-Control': 'no-store',
+               'X-Robots-Tag': 'noindex, nofollow' },
+  });
+
+  if (!/^[a-f0-9]{24,64}$/.test(id || '')) return html(sharePage({ expired: true }), 404);
+
+  const raw = await env[KV_BINDING].get(`share:${id}`, { type: 'text' });
+  if (!raw) return html(sharePage({ expired: true }), 404);
+
+  let rec;
+  try { rec = JSON.parse(raw); } catch { return html(sharePage({ expired: true }), 404); }
+
+  // KV expiry is eventually consistent, so a link could outlive its TTL by a
+  // while. Check the stored timestamp too.
+  if (!rec.expiresAt || Date.now() > rec.expiresAt) {
+    return html(sharePage({ expired: true }), 410);
+  }
+
+  const profileRaw = await env[KV_BINDING].get(`user:${rec.token}:profile`, { type: 'text' });
+  if (!profileRaw) return html(sharePage({ expired: true }), 404);
+
+  let profile;
+  try { profile = JSON.parse(profileRaw); } catch { return html(sharePage({ expired: true }), 500); }
+
+  const days = buildShareDays(profile, rec.from, rec.to);
+  return html(sharePage({
+    title: rec.title || 'Meal Plan',
+    subtitle: rec.subtitle || `${rec.from} – ${rec.to}`,
+    days,
+  }), 200);
+}
+
+async function handleCreateShare(request, env, cors) {
+  const bodyText = await readBodyText(request);
+  if (bodyText === null) return respond(JSON.stringify({ error: 'Invalid or oversized body' }), 400, cors);
+  let b;
+  try { b = JSON.parse(bodyText); } catch { return respond(JSON.stringify({ error: 'Invalid JSON' }), 400, cors); }
+
+  const token = String(b.token || '');
+  if (!token) return respond(JSON.stringify({ error: 'token required' }), 400, cors);
+
+  // Same signing as every other write — only the account owner can publish a
+  // window onto their own data.
+  const auth = await checkAuth(request, token, cors, true, bodyText, env);
+  if (!auth.ok) return auth.res;
+
+  const dateOk = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
+  if (!dateOk(b.from) || !dateOk(b.to))
+    return respond(JSON.stringify({ error: 'from and to must be YYYY-MM-DD' }), 400, cors);
+  if (b.to < b.from)
+    return respond(JSON.stringify({ error: 'to is before from' }), 400, cors);
+
+  const spanDays = Math.round(
+    (Date.parse(b.to + 'T00:00:00Z') - Date.parse(b.from + 'T00:00:00Z')) / 86400000) + 1;
+  if (spanDays > SHARE_MAX_DAYS)
+    return respond(JSON.stringify({ error: `Range longer than ${SHARE_MAX_DAYS} days` }), 400, cors);
+
+  // The client computes expiry as midnight after the final day *in its own
+  // timezone* — the Worker has no idea where she is, so it can't derive this.
+  const expiresAt = Number(b.expiresAt);
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now())
+    return respond(JSON.stringify({ error: 'expiresAt must be in the future' }), 400, cors);
+  const maxExpiry = Date.now() + (SHARE_MAX_DAYS + 2) * 86400000;
+  if (expiresAt > maxExpiry)
+    return respond(JSON.stringify({ error: 'expiresAt too far ahead' }), 400, cors);
+
+  const id  = shareId();
+  const ttl = Math.max(60, Math.ceil((expiresAt - Date.now()) / 1000));
+  await env[KV_BINDING].put(`share:${id}`, JSON.stringify({
+    token,
+    from: b.from,
+    to:   b.to,
+    title:    String(b.title || '').slice(0, 120),
+    subtitle: String(b.subtitle || '').slice(0, 160),
+    expiresAt,
+    createdAt: Date.now(),
+  }), { expirationTtl: ttl });
+
+  return respond(JSON.stringify({ ok: true, id, expiresAt }), 200, cors);
 }
 
 // ── Rate limiting (scrape) ─────────────────────────────────────────────────
@@ -547,6 +716,21 @@ export default {
       });
     }
 
+    // GET /share/{id} — the public read-only page. Routed before the origin
+    // allowlist on purpose: this is opened by tapping a link, and a top-level
+    // browser navigation sends no Origin header, so the allowlist would 403
+    // every recipient. Safe because the handler takes no input beyond an
+    // unguessable id and returns only rendered HTML.
+    if (method === 'GET' && url.pathname.startsWith('/share/')) {
+      try {
+        return await handleSharePage(url.pathname.slice('/share/'.length), env);
+      } catch (err) {
+        console.error('Share page error:', err);
+        return new Response('<!doctype html><p>Something went wrong loading this meal plan.',
+          { status: 500, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+      }
+    }
+
     // Origin allowlist
     const allowedOrigins = (env.ALLOWED_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean);
     const origin         = getAllowedOrigin(request, allowedOrigins);
@@ -559,6 +743,11 @@ export default {
       if (url.pathname.startsWith('/auth/')) {
         const r = await handleAuth(url, method, request, env, cors, ip);
         if (r) return r;
+      }
+
+      // POST /share — create a link. Authenticated like any other write.
+      if (url.pathname === '/share' && method === 'POST') {
+        return await handleCreateShare(request, env, cors);
       }
 
       if (url.pathname.startsWith('/storage')) {
@@ -584,56 +773,23 @@ export default {
         }
         try {
           const res = await fetch(targetUrl, {
-            headers: scrapeHeaders(targetUrl),
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (compatible; Refectory/1.0; recipe scraper)',
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              'Accept-Language': 'en-US,en;q=0.9',
+            },
             redirect: 'follow',
             // cacheEverything is required for HTML to be cached at all; with it
             // off the cacheTtl below was a no-op.
             cf: { cacheTtl: 900, cacheEverything: true },
           });
-
-          if (res.ok) {
-            const html = await res.text();
-            return new Response(
-              JSON.stringify({ ok: true, html, finalUrl: res.url, via: 'fetch' }),
-              { status: 200, headers: { 'Content-Type': 'application/json', ...cors } }
-            );
-          }
-
-          // Refused — try a real browser before giving up.
-          if (BLOCKED_STATUSES.includes(res.status)) {
-            const browsed = await fetchViaBrowser(env, targetUrl);
-            if (browsed && browsed.blocked) {
-              // A real browser was served a block page too — the refusal is by
-              // IP reputation, not headers, so nothing here will get past it.
-              return respond(JSON.stringify({
-                error: `Fetch failed: ${res.status} — site blocked automated access`,
-                blocked: true,
-                upstreamStatus: res.status,
-                browserTried: true,
-                browserMs: browsed.msUsed,
-              }), 502, cors);
-            }
-            if (browsed) {
-              return new Response(
-                JSON.stringify({ ok: true, html: browsed.html, finalUrl: targetUrl,
-                                 via: 'browser', browserMs: browsed.msUsed }),
-                { status: 200, headers: { 'Content-Type': 'application/json', ...cors } }
-              );
-            }
-            // `blocked` is the precise signal; the status stays in the message
-            // so older clients that only pattern-match the text still see it.
-            return respond(JSON.stringify({
-              error: `Fetch failed: ${res.status} — site blocked automated access`,
-              blocked: true,
-              upstreamStatus: res.status,
-            }), 502, cors);
-          }
-
-          return respond(JSON.stringify({
-            error: `Fetch failed: ${res.status}`,
-            upstreamStatus: res.status,
-          }), 502, cors);
-
+          if (!res.ok) return respond(JSON.stringify({ error: `Fetch failed: ${res.status}` }), 502, cors);
+          const html = await res.text();
+          // Return HTML — client does all the parsing
+          return new Response(JSON.stringify({ ok: true, html, finalUrl: res.url }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json', ...cors },
+          });
         } catch(e) {
           return respond(JSON.stringify({ error: `Could not fetch URL: ${e.message}` }), 502, cors);
         }
