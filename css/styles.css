@@ -2619,6 +2619,7 @@ body.modal-open { overflow: hidden; }
 .plan-stack-multi .plan-recipe {
   aspect-ratio: unset;
   height: 2.6rem;
+  max-height: 2.6rem;
   flex-direction: row;
 }
 .plan-stack-multi .plan-recipe-img,
@@ -2637,13 +2638,25 @@ body.modal-open { overflow: hidden; }
   color: var(--ink);
   font-size: .62rem;
   line-height: 1.15;
-  padding: .2rem .3rem;
   align-self: center;
   flex: 1;
   min-width: 0;
   /* Break inside a word rather than overflow — some recipe titles are one
      very long word, and the columns are narrow. */
   overflow-wrap: anywhere;
+  /* Two lines, hard stop. The clamp is re-declared here because a flex item's
+     display can get blockified, which silently disables -webkit-line-clamp and
+     lets a third line render into the chip's clipped overflow — visible as a
+     sliver of cut-off text. max-height makes the cap structural rather than
+     relying on the clamp: 2 lines x 1.15 line-height = 2.3em, and with no
+     vertical padding that's exact under border-box. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  padding: 0 .3rem;
+  max-height: 2.3em;
 }
 /* No room for the word "Leftovers" beside a title at this size — collapse it
    to the same ♻ glyph the add strip already uses, pinned over the thumbnail. */
