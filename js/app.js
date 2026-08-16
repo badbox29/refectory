@@ -3734,13 +3734,14 @@ async function handleMealieZipFile(file) {
 }
 
 async function triggerMealieZipImport(file) {
-  const btn         = document.getElementById('mealie-import-zip-btn');
-  const embedImages = document.getElementById('mealie-import-images')?.checked ?? true;
-  const status      = document.getElementById('mealie-import-status');
+  const btn          = document.getElementById('mealie-import-zip-btn');
+  const embedImages  = document.getElementById('mealie-import-images')?.checked ?? true;
+  const importExtras = document.getElementById('mealie-import-plans')?.checked ?? true;
+  const status       = document.getElementById('mealie-import-status');
 
   if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
 
-  const result = await importFromMealieBackup(file, embedImages);
+  const result = await importFromMealieBackup(file, embedImages, importExtras);
 
   if (btn) { btn.disabled = false; btn.textContent = 'Import from Backup'; }
 
@@ -3748,7 +3749,14 @@ async function triggerMealieZipImport(file) {
     saveLocal();
     renderAll();
     closeModal('modal-mealie-import');
-    showToast(`✅ Imported ${result.count} recipes from Mealie backup`);
+    const bits = [`${result.count} recipes`];
+    if (result.plans?.placed) bits.push(`${result.plans.placed} planned meals`);
+    if (result.favCount)      bits.push(`${result.favCount} favorites`);
+    if (result.rateCount)     bits.push(`${result.rateCount} ratings`);
+    showToast(`✅ Imported ${bits.join(', ')} from Mealie backup`);
+    if (result.plans?.unmatched) {
+      console.warn(`[Refectory] ${result.plans.unmatched} meal plan entries referenced recipes not in the backup`);
+    }
     // Push to worker immediately — don't wait for the next sync interval
     if (!Auth.isGuest()) {
       App.pendingSync = true;
@@ -3764,7 +3772,85 @@ async function triggerMealieZipImport(file) {
 
 // ─── Mealie backup zip parser ─────────────────────────────────────
 
-async function importFromMealieBackup(file, embedImages) {
+// ─── Mealie meal plan import ──────────────────────────────────────
+// Mealie stores one row per planned dish keyed by calendar date, and allows
+// several rows on the same date and meal type — cooking two dinners so one
+// can be frozen is a normal plan, not a mistake. Refectory slots hold
+// multiple entries, so nothing has to be dropped.
+const MEALIE_SLOT_MAP = { breakfast: 'breakfast', lunch: 'lunch', dinner: 'dinner', side: 'snack' };
+
+// "2024-05-13" -> a local-midnight Date. Deliberately not new Date(str):
+// that parses a bare ISO date as UTC, which in any negative-offset zone
+// lands on the previous day locally and would shift entries a day earlier.
+function parseLocalDate(s) {
+  const [y, m, d] = String(s).split('-').map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(y, m - 1, d);
+}
+
+function importMealieMealPlans(data, idMap) {
+  const rows = (data.group_meal_plans || []).filter(r => r.recipe_id && r.date);
+  if (!rows.length) return { placed: 0, skipped: 0, slots: 0, unmatched: 0 };
+
+  // created_at order decides position within a slot, so the dish planned
+  // first stays first — that's the one the day reads as its main meal.
+  rows.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+
+  const staged  = {};           // weekKey -> dayIdx -> slot -> [entries]
+  const cooked  = {};           // refectory id -> latest past plan date (ms)
+  const todayMs = new Date().setHours(23, 59, 59, 999);
+  let placed = 0, unmatched = 0, skipped = 0;
+
+  for (const row of rows) {
+    const newId = idMap[row.recipe_id];
+    if (!newId) { unmatched++; continue; }
+    const date = parseLocalDate(row.date);
+    if (!date) { skipped++; continue; }
+
+    const wk   = getISOWeekKey(date);
+    const day  = (date.getDay() + 6) % 7;               // Mon=0, matches the planner
+    const slot = MEALIE_SLOT_MAP[row.entry_type] || 'dinner';
+
+    staged[wk]            = staged[wk]            || {};
+    staged[wk][day]       = staged[wk][day]       || {};
+    staged[wk][day][slot] = staged[wk][day][slot] || [];
+    staged[wk][day][slot].push(newId);
+    placed++;
+
+    // A meal planned for next week hasn't been cooked yet, so future dates
+    // must not stamp lastCooked.
+    const ts = date.getTime();
+    if (ts <= todayMs && (!cooked[newId] || cooked[newId] < ts)) cooked[newId] = ts;
+  }
+
+  // Write staged slots wholesale rather than appending, so running the import
+  // twice doesn't double every entry.
+  if (!App.data.mealplan) App.data.mealplan = {};
+  let slots = 0;
+  for (const [wk, days] of Object.entries(staged)) {
+    App.data.mealplan[wk] = App.data.mealplan[wk] || {};
+    for (const [day, slotsObj] of Object.entries(days)) {
+      App.data.mealplan[wk][day] = App.data.mealplan[wk][day] || {};
+      for (const [slot, entries] of Object.entries(slotsObj)) {
+        const packed = packSlot(entries);
+        if (packed === null) continue;
+        App.data.mealplan[wk][day][slot] = packed;
+        slots++;
+      }
+    }
+  }
+
+  // lastCooked comes from the plan history, never Date.now() — importing three
+  // years of meals must not mark every recipe as cooked today.
+  for (const [id, ts] of Object.entries(cooked)) {
+    const r = App.data.recipes?.[id];
+    if (r && (!r.lastCooked || r.lastCooked < ts)) r.lastCooked = ts;
+  }
+
+  return { placed, skipped, slots, unmatched };
+}
+
+async function importFromMealieBackup(file, embedImages, importExtras = true) {
   const status = (msg, err) => {
     const el = document.getElementById('mealie-import-status');
     if (el) { el.textContent = msg; el.style.color = err ? 'var(--red)' : ''; }
@@ -3799,6 +3885,39 @@ async function importFromMealieBackup(file, embedImages) {
   (data.tags || []).forEach(t => { tagMap[t.id] = t.name; });
   const catMap = {};
   (data.categories || []).forEach(c => { catMap[c.id] = c.name; });
+
+  // Nutrition is one row per recipe. Mealie stores every figure as a string,
+  // and blanks as empty string, so coerce and drop anything non-numeric.
+  const nutriByRecipe = {};
+  (data.recipe_nutrition || []).forEach(n => {
+    const num = v => {
+      const f = parseFloat(v);
+      return Number.isFinite(f) ? f : null;
+    };
+    const vals = {
+      calories: num(n.calories),
+      fat:      num(n.fat_content),
+      protein:  num(n.protein_content),
+      carbs:    num(n.carbohydrate_content),
+      fiber:    num(n.fiber_content),
+      sodium:   num(n.sodium_content),
+      sugar:    num(n.sugar_content),
+    };
+    // Drop the record entirely if every field came back blank
+    if (Object.values(vals).every(v => v === null)) return;
+    nutriByRecipe[n.recipe_id] = Object.fromEntries(
+      Object.entries(vals).filter(([, v]) => v !== null)
+    );
+  });
+
+  // Favorites are per-user in Mealie, but a Refectory install is one shared
+  // household record — so take the union across everyone in the group.
+  const favIds = new Set((data.users_to_favorites || []).map(f => f.recipe_id));
+
+  // Mealie id -> Refectory id, built as recipes are written. Meal plan rows
+  // reference Mealie ids, so this is what lets the plan import resolve them
+  // without persisting a source id on every recipe.
+  const idMap = {};
 
   // Group relational tables by recipe_id
   const ingrByRecipe = {}, instrByRecipe = {}, notesByRecipe = {};
@@ -3894,6 +4013,13 @@ ${t}`;
     const existing = Object.values(App.data.recipes)
       .find(ex => ex.importedFrom === 'mealie-backup' && ex.title === r.name);
     const newId    = existing ? existing.id : genId();
+    idMap[rid]     = newId;
+
+    // Rating carries over as-is (Mealie uses the same 0–5 scale). Favorite is
+    // Mealie's own per-user favourite flag, unioned across the household.
+    const rating    = Number.isFinite(r.rating) ? r.rating : 0;
+    const favorite  = favIds.has(rid);
+    const nutrition = nutriByRecipe[rid] || null;
 
     // Image — read from zip and store in IndexedDB (not in App.data / localStorage)
     if (embedImages) {
@@ -3931,6 +4057,13 @@ ${t}`;
         importedFrom: 'mealie-backup',
         updatedAt:   Date.now(),
       });
+      if (importExtras) {
+        // Only overwrite a local rating if Mealie actually has one, so a
+        // rating added in Refectory isn't wiped by a re-import.
+        if (rating) existing.rating = rating;
+        if (favorite) existing.favorite = true;
+        if (nutrition) existing.nutrition = nutrition;
+      }
       count++;
     } else {
       App.data.recipes[newId] = {
@@ -3947,14 +4080,33 @@ ${t}`;
         importedFrom: 'mealie-backup',
         createdAt:   Date.now(),
         updatedAt:   Date.now(),
+        ...(importExtras && rating    ? { rating }    : {}),
+        ...(importExtras && favorite  ? { favorite: true } : {}),
+        ...(importExtras && nutrition ? { nutrition } : {}),
       };
       count++;
     }
   }
 
   if (!count) return { ok: false, error: 'No recipes were found in the backup.' };
+
+  // Meal plans go last — they resolve against idMap, so every recipe has to
+  // exist first.
+  let plans = null, favCount = 0, rateCount = 0, nutriCount = 0;
+  if (importExtras) {
+    status('Importing meal plans…');
+    plans = importMealieMealPlans(data, idMap);
+    for (const mealieId of Object.keys(idMap)) {
+      const r = App.data.recipes[idMap[mealieId]];
+      if (!r) continue;
+      if (r.favorite)  favCount++;
+      if (r.rating)    rateCount++;
+      if (r.nutrition) nutriCount++;
+    }
+  }
+
   scheduleSave();
-  return { ok: true, count, skipped };
+  return { ok: true, count, skipped, plans, favCount, rateCount, nutriCount };
 }
 
 async function importFromMealieJson(jsonText) {
