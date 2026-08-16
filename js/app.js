@@ -3316,6 +3316,156 @@ function extractFromMeta(doc, sourceUrl) {
   };
 }
 
+// ─── Share meal plan ─────────────────────────────────────────────
+// Publishes a read-only window onto a date range. The worker renders the page
+// and reads live data, so the link stays current; it expires on its own at
+// midnight after the final day.
+
+function shareDateInputs() {
+  const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const sel = document.getElementById('share-range')?.value || 'week';
+
+  if (sel === 'custom') {
+    const from = parseLocalDate(document.getElementById('share-from')?.value || '');
+    const to   = parseLocalDate(document.getElementById('share-to')?.value || '');
+    if (!from || !to) return { error: 'Pick a start and end date.' };
+    if (to < from)    return { error: 'The end date is before the start date.' };
+    const days = Math.round((to - from) / 86400000) + 1;
+    if (days > 62)    return { error: 'Ranges longer than 62 days can’t be shared.' };
+    return { from, to, fromStr: iso(from), toStr: iso(to) };
+  }
+
+  const weeks = sel === 'week' ? 1 : parseInt(sel) || 1;
+  const from  = weekStartDate(View.currentWeek);
+  const to    = weekStartDate(addWeeks(View.currentWeek, weeks - 1));
+  to.setDate(to.getDate() + 6);
+  return { from, to, fromStr: iso(from), toStr: iso(to) };
+}
+
+// Midnight after the final day, in *her* timezone. The worker runs in UTC and
+// has no idea where she is, so this has to be computed client-side and sent.
+function shareExpiryFor(toDate) {
+  const end = new Date(toDate);
+  end.setHours(23, 59, 59, 999);
+  return end.getTime() + 1;
+}
+
+function shareRangeLabel(from, to) {
+  const fmt = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return from.getFullYear() === to.getFullYear()
+    ? `${fmt(from)} – ${fmt(to)}, ${from.getFullYear()}`
+    : `${fmt(from)}, ${from.getFullYear()} – ${fmt(to)}, ${to.getFullYear()}`;
+}
+
+// Count what the recipients would actually see, so a plan with no images or
+// no meals is obvious before the link goes out rather than after.
+function shareRangeStats(from, to) {
+  let meals = 0, withImg = 0, days = 0;
+  for (let ts = new Date(from).setHours(0,0,0,0);
+       ts <= new Date(to).setHours(0,0,0,0); ts += 86400000) {
+    const d  = new Date(ts);
+    const wk = getISOWeekKey(d);
+    const dayPlan = App.data.mealplan?.[wk]?.[(d.getDay() + 6) % 7] || {};
+    let any = false;
+    for (const slot of MEAL_SLOTS) {
+      for (const entry of slotEntries(dayPlan[slot])) {
+        if (isFendEntry(entry)) { meals++; any = true; continue; }
+        const r = getRecipe(slotRecipeId(entry));
+        if (!r) continue;
+        meals++; any = true;
+        if (/^https?:\/\//i.test(r.imageUrl || '')) withImg++;
+      }
+    }
+    if (any) days++;
+  }
+  return { meals, withImg, days };
+}
+
+function updateShareHint() {
+  const hint   = document.getElementById('share-hint');
+  const custom = document.getElementById('share-custom');
+  const isCustom = document.getElementById('share-range')?.value === 'custom';
+  if (custom) custom.style.display = isCustom ? '' : 'none';
+  if (!hint) return;
+
+  const r = shareDateInputs();
+  if (r.error) { hint.textContent = r.error; hint.style.color = 'var(--saffron)'; return; }
+
+  const st = shareRangeStats(r.from, r.to);
+  if (!st.meals) {
+    hint.textContent = `Nothing planned for ${shareRangeLabel(r.from, r.to)}.`;
+    hint.style.color = 'var(--saffron)';
+    return;
+  }
+  const noImg = st.meals - st.withImg;
+  hint.textContent =
+    `${shareRangeLabel(r.from, r.to)} · ${st.meals} meal${st.meals === 1 ? '' : 's'} across ` +
+    `${st.days} day${st.days === 1 ? '' : 's'}` +
+    (noImg ? ` · ${noImg} without a photo` : '');
+  hint.style.color = 'var(--muted)';
+}
+
+function openSharePlanModal() {
+  const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const mon = weekStartDate(View.currentWeek);
+  const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+  const f = document.getElementById('share-from'), t = document.getElementById('share-to');
+  if (f && !f.value) f.value = iso(mon);
+  if (t && !t.value) t.value = iso(sun);
+
+  document.getElementById('share-result').style.display = 'none';
+  document.getElementById('share-title').value = '';
+  updateShareHint();
+  openModal('modal-share-plan');
+}
+
+async function createSharePlanLink() {
+  const btn = document.getElementById('share-create');
+  const r   = shareDateInputs();
+  if (r.error) { showToast(r.error); return; }
+
+  const base = getWorkerUrl().replace(/\/+$/, '');
+  if (!base)  { showToast('No worker URL configured — go to Settings first.'); return; }
+  if (Auth.isGuest()) { showToast('Sign in to share a meal plan.'); return; }
+
+  const token = App.data?.userToken;
+  if (!token) { showToast('No account token — try signing in again.'); return; }
+
+  const label = shareRangeLabel(r.from, r.to);
+  const body  = JSON.stringify({
+    token,
+    from: r.fromStr,
+    to:   r.toStr,
+    title:    (document.getElementById('share-title')?.value || '').trim() || 'Meal Plan',
+    subtitle: label,
+    expiresAt: shareExpiryFor(r.to),
+  });
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
+  try {
+    const headers = await Auth._authHeaders('POST', token, body);
+    const res  = await fetch(`${base}/share`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.id) throw new Error(data.error || `HTTP ${res.status}`);
+
+    const url = `${base}/share/${data.id}`;
+    document.getElementById('share-url').value = url;
+    document.getElementById('share-expiry').textContent =
+      `Stops working ${new Date(data.expiresAt).toLocaleString('en-US',
+        { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}.`;
+    document.getElementById('share-result').style.display = '';
+    showToast('Link created ✓');
+  } catch (e) {
+    showToast(`Could not create link: ${e.message}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Create Link'; }
+  }
+}
+
 // ─── Meal plan templates ─────────────────────────────────────────
 // Capture a stretch of the planner under a name and drop it onto any other
 // week later. Templates store week index + day of week, never dates, so
@@ -5229,6 +5379,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Recipe search
   document.getElementById('planner-templates')?.addEventListener('click', openTemplatesModal);
+  document.getElementById('planner-share')?.addEventListener('click', openSharePlanModal);
+  document.getElementById('share-range')?.addEventListener('change', updateShareHint);
+  document.getElementById('share-from')?.addEventListener('change', updateShareHint);
+  document.getElementById('share-to')?.addEventListener('change', updateShareHint);
+  document.getElementById('share-create')?.addEventListener('click', createSharePlanLink);
+  document.getElementById('share-cancel')?.addEventListener('click', () => closeModal('modal-share-plan'));
+  document.getElementById('share-copy')?.addEventListener('click', async () => {
+    const el = document.getElementById('share-url');
+    if (!el?.value) return;
+    try { await navigator.clipboard.writeText(el.value); showToast('Link copied ✓'); }
+    catch { el.select(); document.execCommand('copy'); showToast('Link copied ✓'); }
+  });
   document.getElementById('tpl-weeks')?.addEventListener('change', updateTemplateSaveHint);
   document.getElementById('tpl-from')?.addEventListener('change', updateTemplateSaveHint);
   document.getElementById('tpl-to')?.addEventListener('change', updateTemplateSaveHint);
