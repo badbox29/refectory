@@ -126,6 +126,7 @@
         <span id="planner-week-label"></span>
         <button class="btn btn-ghost btn-sm" id="planner-next">Next →</button>
         <button class="btn btn-outline btn-sm" id="planner-today">This Week</button>
+        <button class="btn btn-outline btn-sm" id="planner-templates">🗓 Templates</button>
       </div>
       <!-- Mobile day tabs — shown only on narrow screens -->
       <div class="planner-day-tabs" id="planner-day-tabs"></div>
@@ -834,6 +835,41 @@
       <p class="f13 lh muted" style="margin-bottom:.75rem;" id="variant-hint"></p>
       <div id="variant-list"></div>
       <button class="btn btn-outline w100" id="variant-import-all" style="margin-top:.25rem;"></button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Meal plan templates ─────────────────────────────────────── -->
+<div class="modal-overlay" id="modal-templates" role="dialog" aria-modal="true">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <h2 class="modal-title">Meal Plan Templates</h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="tpl-save-box">
+        <div class="form-label" style="margin-bottom:.4rem;">Save from <strong id="tpl-save-from"></strong></div>
+        <div style="display:flex;gap:.5rem;flex-wrap:wrap;">
+          <input class="input" id="tpl-name" placeholder="Template name — e.g. Busy Week" style="flex:1;min-width:11rem;"/>
+          <select class="input" id="tpl-weeks" style="width:auto;padding-right:1.5rem;">
+            <option value="1">1 week</option>
+            <option value="2">2 weeks</option>
+            <option value="4">4 weeks (a month)</option>
+            <option value="5">5 weeks</option>
+          </select>
+          <button class="btn btn-primary" id="tpl-save-btn">Save</button>
+        </div>
+        <div class="f13 muted" style="margin-top:.4rem;" id="tpl-save-hint"></div>
+      </div>
+
+      <div class="tpl-list-header">
+        <span class="form-label">Saved templates</span>
+        <label class="tpl-mode">
+          <input type="checkbox" id="tpl-fill-only"/>
+          Only fill empty slots
+        </label>
+      </div>
+      <div id="tpl-list"></div>
     </div>
   </div>
 </div>
