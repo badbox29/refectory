@@ -114,14 +114,64 @@ const ls = {
   remove: k => { try { localStorage.removeItem(k); } catch {} },
 };
 
+// Persist to localStorage, and be loud when it doesn't work.
+//
+// This used to swallow a QuotaExceededError into a three-second toast. On a
+// shared origin — several apps under one github.io account, say — the quota is
+// per origin, not per app, so a neighbour can fill it. When that happens every
+// write silently lands in memory only and disappears on the next reload, which
+// is indistinguishable from the app working until you notice hours of edits
+// are gone. A banner that stays put is the whole point: silent data loss is
+// far worse than a loud failure.
 function saveLocal() {
   try {
     const json = JSON.stringify(App.data);
     localStorage.setItem(STORAGE_KEY, json);
-  } catch(e) {
+    // Verify the write actually landed. Some browsers accept setItem and
+    // discard the value under storage pressure rather than throwing.
+    const back = localStorage.getItem(STORAGE_KEY);
+    if (!back || back.length !== json.length) throw new Error('write did not persist');
+    if (App.storageBlocked) { App.storageBlocked = false; renderStorageBanner(); }
+    return true;
+  } catch (e) {
     console.error('[Refectory] saveLocal failed — data NOT persisted:', e);
-    showToast('⚠️ Could not save — storage may be full or unavailable', 'error');
+    App.storageBlocked = true;
+    App.storageError    = e?.name === 'QuotaExceededError' ? 'quota' : (e?.message || 'unknown');
+    renderStorageBanner();
+    return false;
   }
+}
+
+// Persistent, dismissible-only-by-fixing banner. Also reports how much of the
+// origin's storage other keys are using, since on a shared origin the cause is
+// usually not this app.
+function renderStorageBanner() {
+  const el = document.getElementById('storage-banner');
+  if (!el) return;
+  if (!App.storageBlocked) { el.style.display = 'none'; el.innerHTML = ''; return; }
+
+  let mine = 0, total = 0;
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      const bytes = (k.length + (localStorage.getItem(k) || '').length) * 2;
+      total += bytes;
+      if (k.startsWith('ref_')) mine += bytes;
+    }
+  } catch {}
+  const mb = b => (b / 1048576).toFixed(2);
+
+  el.style.display = '';
+  el.innerHTML = `
+    <strong>⚠️ Changes are not being saved.</strong>
+    ${App.storageError === 'quota'
+      ? `This browser's storage for this site is full, so edits only last until you reload.
+         Refectory is using ${mb(mine)} MB of ${mb(total)} MB in use here — the rest belongs
+         to other pages on the same address, and storage is shared between them.`
+      : `Storage is unavailable (${esc(App.storageError || 'unknown')}), so edits only last
+         until you reload.`}
+    <button class="btn btn-sm btn-outline" id="storage-banner-export">Export a backup now</button>`;
+  el.querySelector('#storage-banner-export')?.addEventListener('click', () => openExportModal());
 }
 
 // ─── Worker sync ──────────────────────────────────────────────────
@@ -2951,6 +3001,135 @@ async function fetchAndScrapeUrl() {
   }
 }
 
+function openPasteRecipeModal() {
+  const ta = document.getElementById('paste-recipe-text');
+  if (ta) ta.value = '';
+  updatePasteHint();
+  openModal('modal-paste-recipe');
+  setTimeout(() => ta?.focus(), 50);
+}
+
+// Live read-out of what the parser found, so a paste that didn't split
+// properly is obvious before it reaches the editor.
+function updatePasteHint() {
+  const hint = document.getElementById('paste-recipe-hint');
+  const text = document.getElementById('paste-recipe-text')?.value || '';
+  if (!hint) return;
+  if (!text.trim()) { hint.textContent = ''; return; }
+
+  const r = parseRecipeText(text);
+  const bits = [];
+  if (r.title) bits.push(`“${r.title}”`);
+  bits.push(`${r.ingredients.length} ingredient${r.ingredients.length === 1 ? '' : 's'}`);
+  bits.push(`${r.steps.length} step${r.steps.length === 1 ? '' : 's'}`);
+
+  const bad = !r.ingredients.length || !r.steps.length;
+  hint.textContent = bad
+    ? `Found ${bits.join(' · ')} — check there are “Ingredients” and “Directions” headings.`
+    : `Found ${bits.join(' · ')}.`;
+  hint.style.color = bad ? 'var(--saffron)' : 'var(--muted)';
+}
+
+function submitPastedRecipe() {
+  const text = document.getElementById('paste-recipe-text')?.value || '';
+  if (!text.trim()) { showToast('Paste some recipe text first.'); return; }
+  const r = parseRecipeText(text);
+  if (!r.title && !r.ingredients.length) {
+    showToast('Couldn’t find a recipe in that text.');
+    return;
+  }
+  closeModal('modal-paste-recipe');
+  openScrapedRecipe(r);
+}
+
+// ── Plain-text recipe parser ─────────────────────────────────────
+// For recipes that arrive as text — a screenshot transcription, a message
+// from a friend, something copied out of a PDF. Looks for section headings
+// and splits on them; everything else is a best guess, so results always land
+// in the editor for review rather than being saved directly.
+
+const TXT_ING_RE  = /^\s*ingredients?\s*:?\s*$/i;
+const TXT_STEP_RE = /^\s*(directions?|instructions?|method|steps?|preparation)\s*:?\s*$/i;
+const TXT_NOTE_RE = /^\s*(notes?|tips?)\s*:?\s*$/i;
+
+// Strip list decoration: bullets, dashes, checkboxes, "1." / "1)" numbering.
+function stripListMarker(line) {
+  return line
+    .replace(/^\s*[-–—•*·▢□☐]\s+/, '')
+    .replace(/^\s*\d{1,3}\s*[.)]\s+/, '')
+    .replace(/^\s*\[[ x]\]\s*/i, '')
+    .trim();
+}
+
+function parseRecipeText(text) {
+  const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+  const title = [];
+  const ing = [], steps = [], notes = [];
+  let section = 'head';
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+
+    if (TXT_ING_RE.test(line))  { section = 'ing';  continue; }
+    if (TXT_STEP_RE.test(line)) { section = 'step'; continue; }
+    if (TXT_NOTE_RE.test(line)) { section = 'note'; continue; }
+
+    const clean = stripListMarker(line);
+    if (!clean) continue;
+
+    if (section === 'head')      title.push(clean);
+    else if (section === 'ing')  ing.push(clean);
+    else if (section === 'step') steps.push(clean);
+    else                         notes.push(clean);
+  }
+
+  // Trailing lines after the steps that read like metadata rather than an
+  // instruction — "Total cook time: 5–6 hours" — belong in the time fields,
+  // not as a final step nobody performs.
+  const meta = {};
+  const metaFrom = arr => {
+    while (arr.length) {
+      const last = arr[arr.length - 1];
+      const t = last.match(/^total\s*(cook|prep)?\s*time\s*:?\s*(.+)$/i);
+      const c = last.match(/^cook(ing)?\s*time\s*:?\s*(.+)$/i);
+      const pp = last.match(/^prep(aration)?\s*time\s*:?\s*(.+)$/i);
+      const sv = last.match(/^(?:serv(?:es|ings?)|yield|makes)\s*:?\s*(\d+)/i);
+      if (t)       { meta.totalTime = t[2].trim(); arr.pop(); continue; }
+      if (c)       { meta.cookTime  = c[2].trim(); arr.pop(); continue; }
+      if (pp)      { meta.prepTime  = pp[2].trim(); arr.pop(); continue; }
+      if (sv)      { meta.servings  = parseInt(sv[1]); arr.pop(); continue; }
+      break;
+    }
+  };
+  metaFrom(steps);
+  metaFrom(ing);
+
+  // Same scan over the header block, where "Serves 6" often sits under the title
+  for (let i = title.length - 1; i >= 1; i--) {
+    const sv = title[i].match(/^(?:serv(?:es|ings?)|yield|makes)\s*:?\s*(\d+)/i);
+    const tt = title[i].match(/^total\s*(cook)?\s*time\s*:?\s*(.+)$/i);
+    if (sv) { meta.servings = meta.servings || parseInt(sv[1]); title.splice(i, 1); }
+    else if (tt) { meta.totalTime = meta.totalTime || tt[2].trim(); title.splice(i, 1); }
+  }
+
+  return {
+    title: title.shift() || '',
+    // Anything else above the ingredients is prose about the dish
+    description: [...title, ...notes].join('\n\n'),
+    servings:  meta.servings || '',
+    prepTime:  meta.prepTime || '',
+    cookTime:  meta.cookTime || '',
+    totalTime: meta.totalTime || '',
+    ingredients: ing,
+    steps,
+    tags: [],
+    source: '', sourceUrl: '', image: '',
+    importedFrom: 'text',
+    heuristic: true,
+  };
+}
+
 // ── HTML parser — JSON-LD first, Open Graph fallback ─────────────
 
 // Hand a scraped recipe to the editor. A heuristic parse is a guess, so the
@@ -4460,6 +4639,10 @@ async function runImageRepull() {
           const img = extractImageFromHtml(data.html, data.finalUrl || r.sourceUrl);
           if (img) {
             r.imageUrl = img;
+            // Without this the recovered link is invisible to the sync merge,
+            // which compares updatedAt — so any other device's later edit
+            // would silently win and drop it.
+            r.updatedAt = Date.now();
             ok++;
             repullLog(`✓ ${label}`, 'var(--green-mid)');
           } else {
@@ -5271,6 +5454,7 @@ async function migrateImageUrls() {
 }
 
 function renderAll() {
+  renderStorageBanner();
   renderRecipes();
   if (View.activeSection === 'planner')   renderPlanner();
   if (View.activeSection === 'shopping')  renderShoppingList();
@@ -5351,6 +5535,14 @@ async function boot() {
         merged[id] = (!localR.imageUrl && remoteR?.imageUrl)
           ? { ...localR, imageUrl: remoteR.imageUrl }
           : localR;
+      } else {
+        // Remote wins on recency — but taking it wholesale threw away image
+        // links recovered locally. An imageUrl the remote lacks is strictly
+        // new information, never a stale value worth discarding, so graft it
+        // on rather than losing a re-pull's results to any later edit.
+        merged[id] = (localR.imageUrl && !remoteR.imageUrl)
+          ? { ...remoteR, imageUrl: localR.imageUrl }
+          : remoteR;
       }
     }
     App.data = mergeData({ ...remote, recipes: merged });
@@ -5380,6 +5572,13 @@ document.addEventListener('DOMContentLoaded', () => {
   // Recipe search
   document.getElementById('planner-templates')?.addEventListener('click', openTemplatesModal);
   document.getElementById('planner-share')?.addEventListener('click', openSharePlanModal);
+  document.getElementById('choice-paste-text')?.addEventListener('click', () => {
+    closeModal('modal-new-recipe-choice');
+    openPasteRecipeModal();
+  });
+  document.getElementById('paste-recipe-text')?.addEventListener('input', updatePasteHint);
+  document.getElementById('paste-recipe-go')?.addEventListener('click', submitPastedRecipe);
+  document.getElementById('paste-recipe-cancel')?.addEventListener('click', () => closeModal('modal-paste-recipe'));
   document.getElementById('share-range')?.addEventListener('change', updateShareHint);
   document.getElementById('share-from')?.addEventListener('change', updateShareHint);
   document.getElementById('share-to')?.addEventListener('change', updateShareHint);
