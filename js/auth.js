@@ -254,7 +254,7 @@ const Auth = (() => {
     const base = workerBase();
     if(!base) {
       C.toast('Set your Worker URL first.');
-      return null;
+      return { ok: false, error: 'No Worker URL configured.' };
     }
 
     // Step 1: verify token server-side
@@ -265,11 +265,29 @@ const Auth = (() => {
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ idToken }),
       });
-      workerRes = await res.json();
-      if(!res.ok || !workerRes.ok) throw new Error(workerRes.error || 'Worker auth failed');
+      let body = {};
+      try { body = await res.json(); } catch { /* non-JSON error page */ }
+
+      if(!res.ok || !body.ok) {
+        let msg;
+        if(res.status === 429) {
+          const secs = parseInt(res.headers.get('Retry-After') || '', 10);
+          const mins = Number.isFinite(secs) ? Math.ceil(secs / 60) : 0;
+          msg = mins > 0
+            ? `Too many sign-in attempts — try again in about ${mins} minute${mins === 1 ? '' : 's'}.`
+            : 'Too many sign-in attempts — try again later.';
+        } else if(res.status === 401) {
+          msg = 'The sync server rejected that sign-in. If this keeps happening, check the Worker’s Google client ID.';
+        } else {
+          msg = body.error || `Sign-in failed (HTTP ${res.status}).`;
+        }
+        console.error('[Auth] handleGoogleCredential worker error:', res.status, msg);
+        return { ok: false, error: msg, status: res.status };
+      }
+      workerRes = body;
     } catch(err) {
-      console.error('[Auth] handleGoogleCredential worker error:', err);
-      return null;
+      console.error('[Auth] handleGoogleCredential network error:', err);
+      return { ok: false, error: 'Could not reach the sync server — check your connection.' };
     }
 
     const { kvKey, profile } = workerRes;
@@ -311,6 +329,14 @@ const Auth = (() => {
     return { ok: true, isNewAccount, profile };
   }
 
+  // ── _signInMsg() ─────────────────────────────────────────────────
+  // signInWithGoogle resolves null for a genuine cancellation, or
+  // { ok:false, error } when a credential did arrive but verification
+  // failed. Never report a server failure as a user cancellation.
+  function _signInMsg(result, cancelMsg) {
+    return result?.error || cancelMsg;
+  }
+
   // ── signInWithGoogle() ───────────────────────────────────────────
   // Renders a GIS button into buttonEl and resolves when sign-in completes.
   // ux_mode: 'popup' gives the familiar account-picker experience and will
@@ -319,7 +345,9 @@ const Auth = (() => {
   // buttonEl: DOM element to render the Google button into (required).
   //           If null, falls back to One Tap prompt (often suppressed).
   //
-  // Returns { ok, isNewAccount, profile } on success, null on cancel/fail.
+  // Returns { ok:true, isNewAccount, profile } on success,
+  //         { ok:false, error } when verification failed,
+  //         null only on a genuine cancellation / unavailable GIS.
   async function signInWithGoogle(buttonEl) {
     if(!isGoogleAuthAvailable()) {
       console.warn('[Auth] Google sign-in not available — googleClientId not set.');
@@ -525,7 +553,8 @@ const Auth = (() => {
         C.closeModal('modal-account-setup');
         C.startSyncPing();
       } else {
-        statusEl.textContent = 'Sign-in cancelled — try again or use a different account.';
+        statusEl.textContent = _signInMsg(result,
+          'Sign-in cancelled — try again or use a different account.');
       }
     });
   }
@@ -831,9 +860,9 @@ const Auth = (() => {
             ? `Welcome to ${appName()} ${appEmoji()}`
             : 'Account loaded ✓');
           C.startSyncPing();
-        } else if(result === null) {
+        } else {
           statusEl.style.color = 'var(--red, #c07070)';
-          statusEl.textContent = 'Sign-in cancelled — try again.';
+          statusEl.textContent = _signInMsg(result, 'Sign-in cancelled — try again.');
         }
       });
     }
@@ -1110,7 +1139,7 @@ const Auth = (() => {
         C.startSyncPing();
       } else {
         statusEl.style.color = 'var(--red, #c07070)';
-        statusEl.textContent = 'Sign-in cancelled — try again or go back.';
+        statusEl.textContent = _signInMsg(result, 'Sign-in cancelled — try again or go back.');
       }
     });
   }
