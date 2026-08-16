@@ -333,6 +333,9 @@ function addWeeks(weekKey, n) {
 const DAY_NAMES  = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const FULL_DAYS  = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 const MEAL_SLOTS = ['breakfast', 'lunch', 'dinner', 'snack'];
+// Slots with no real position in the day — available as a same-day leftovers
+// source regardless of where they sit in MEAL_SLOTS.
+const ANYTIME_SLOTS = ['snack'];
 
 // ─── Leftovers ────────────────────────────────────────────────────
 // A meal slot holds a recipe id string. A leftovers entry is that same
@@ -1783,13 +1786,15 @@ function renderPlannerMobile() {
   const di    = View.plannerDay;
 
   // Day tabs
+  const todayIdx = todayIndexIn(wk);
   const tabsEl = document.getElementById('planner-day-tabs');
   if (tabsEl) {
     tabsEl.innerHTML = DAY_NAMES.map((name, i) => {
       const date = new Date(start);
       date.setDate(start.getDate() + i);
       const hasRecipe = MEAL_SLOTS.some(slot => plan[i]?.[slot]);
-      return `<button class="planner-day-tab${i === di ? ' active' : ''}" data-di="${i}">
+      const isToday   = i === todayIdx;
+      return `<button class="planner-day-tab${i === di ? ' active' : ''}${isToday ? ' is-today' : ''}" data-di="${i}"${isToday ? ' title="Today"' : ''}>
         <span class="planner-day-tab-name">${name.slice(0,1)}</span>
         <span class="planner-day-tab-date">${date.getDate()}</span>
         ${hasRecipe ? '<span class="planner-day-tab-dot"></span>' : ''}
@@ -1812,7 +1817,7 @@ function renderPlannerMobile() {
   const dateLabel = date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
 
   dayEl.innerHTML = `
-    <div class="planner-mobile-date-label">${dateLabel}</div>
+    <div class="planner-mobile-date-label">${dateLabel}${di === todayIdx ? ' <span class="today-pill">Today</span>' : ''}</div>
     ${MEAL_SLOTS.map(slot => `
         <div class="planner-mobile-slot">
           <div class="planner-mobile-slot-label">${capitalise(slot)}</div>
@@ -1885,6 +1890,8 @@ function renderPlanner() {
   if (dayTabs)    dayTabs.style.display    = isMobile ? '' : 'none';
   if (isMobile) { renderPlannerMobile(); return; }
 
+  const todayIdx = todayIndexIn(wk);
+
   const table = document.getElementById('planner-table');
   table.innerHTML = `
     <thead>
@@ -1893,7 +1900,7 @@ function renderPlanner() {
         ${DAY_NAMES.map((d, i) => {
           const date = new Date(start);
           date.setDate(start.getDate() + i);
-          return `<th class="day-col">
+          return `<th class="day-col${i === todayIdx ? ' is-today' : ''}">
             <div class="day-name">${d}</div>
             <div class="day-date">${date.getMonth() + 1}/${date.getDate()}</div>
           </th>`;
@@ -1905,7 +1912,7 @@ function renderPlanner() {
         <tr>
           <td class="slot-label">${capitalise(slot)}</td>
           ${[0,1,2,3,4,5,6].map(di => `
-              <td class="plan-cell" data-day="${di}" data-slot="${slot}">
+              <td class="plan-cell${di === todayIdx ? ' is-today' : ''}" data-day="${di}" data-slot="${slot}">
                 ${renderPlanSlot(slotEntries(plan[di]?.[slot]), di, slot, false)}
               </td>`).join('')}
         </tr>
@@ -1990,17 +1997,49 @@ let _pickTarget = null;
 // Recipes planned in the last `days` days, most recent first. Used to fill
 // the leftovers picker — what you actually cooked recently is almost always
 // what's in the fridge.
-function getRecentlyPlanned(days = 7) {
+// What could plausibly be in the fridge when a given slot comes around.
+//
+// The anchor is the slot being filled, not today. Planning a month ahead and
+// marking a Thursday-in-September dinner as leftovers should offer what was
+// cooked the week before *that* Thursday — anchoring on the current date made
+// the list useless for anything but this week.
+//
+// `beforeSlot` handles the same-day case: a turkey cooked for Monday lunch is
+// fair game for Monday dinner, but not the other way round. MEAL_SLOTS is in
+// chronological order, so position in that array is the ordering.
+//
+// Snacks are the exception. They sort last in MEAL_SLOTS but aren't actually
+// an end-of-day meal — a batch of something made as a snack can be eaten at
+// any point that day, so it stays available for every other slot on the same
+// date. Only the slot being filled is ever excluded from itself.
+function getRecentlyPlanned(days = 7, anchor = null) {
   const seen = new Map();
-  const now  = new Date();
+  const from = anchor?.date instanceof Date ? new Date(anchor.date) : new Date();
+  const beforeSlot = anchor?.slot ? MEAL_SLOTS.indexOf(anchor.slot) : -1;
+
   for (let i = 0; i < days; i++) {
-    const d = new Date(now);
-    d.setDate(now.getDate() - i);
+    const d = new Date(from);
+    d.setDate(from.getDate() - i);
     const dayPlan = getWeekPlan(getISOWeekKey(d))[(d.getDay() + 6) % 7] || {};
-    for (const slot of MEAL_SLOTS) {
-      for (const id of slotRecipeIds(dayPlan[slot])) {
-        if (!getRecipe(id)) continue;
-        const ts = d.getTime();
+
+    for (let si = 0; si < MEAL_SLOTS.length; si++) {
+      const slot = MEAL_SLOTS[si];
+      if (i === 0 && beforeSlot >= 0) {
+        // Never offer the slot being filled as a source for itself.
+        if (si === beforeSlot) continue;
+        // Otherwise on the anchor day only earlier slots count — except the
+        // anytime ones, which are available whenever they were planned.
+        if (si > beforeSlot && !ANYTIME_SLOTS.includes(slot)) continue;
+      }
+      for (const entry of slotEntries(dayPlan[slot])) {
+        // A leftovers entry is food already being re-eaten, not a fresh cook,
+        // so it isn't itself a source of further leftovers.
+        if (isLeftoverEntry(entry) || isFendEntry(entry)) continue;
+        const id = slotRecipeId(entry);
+        if (!id || !getRecipe(id)) continue;
+        // Rank by day, then by slot within the day, so the most recent cook
+        // sorts first even when several land on the same date.
+        const ts = d.getTime() + si;
         if (!seen.has(id) || seen.get(id) < ts) seen.set(id, ts);
       }
     }
@@ -2008,6 +2047,22 @@ function getRecentlyPlanned(days = 7) {
   return [...seen.entries()]
     .sort((a, b) => b[1] - a[1])
     .map(([id]) => getRecipe(id));
+}
+
+// Index of today's column within a week, or -1 when the week isn't this one.
+// Compared on local calendar date rather than timestamps so a meal planned at
+// 11pm and one at 1am don't land on different days.
+function todayIndexIn(weekKey) {
+  const now = new Date();
+  if (getISOWeekKey(now) !== weekKey) return -1;
+  return (now.getDay() + 6) % 7;
+}
+
+// The calendar date a planner slot refers to.
+function slotDate(weekKey, dayIdx) {
+  const d = weekStartDate(weekKey);
+  d.setDate(d.getDate() + Number(dayIdx));
+  return d;
 }
 
 function openPickRecipeModal(weekKey, dayIdx, slot, mode) {
@@ -2042,9 +2097,11 @@ function openPickRecipeModal(weekKey, dayIdx, slot, mode) {
   };
 
   if (isLeftovers) {
-    const recent = getRecentlyPlanned(7);
+    const target = slotDate(weekKey, dayIdx);
+    const recent = getRecentlyPlanned(7, { date: target, slot });
+    const dayLabel = target.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
     if (recent.length) {
-      hint.textContent = 'Planned in the last 7 days:';
+      hint.textContent = `Cooked in the week before ${dayLabel}:`;
       renderPickGrid(recent);
       showAll.style.display = '';
       showAll.textContent = 'Other — show all recipes';
@@ -2055,7 +2112,7 @@ function openPickRecipeModal(weekKey, dayIdx, slot, mode) {
         filterPickRecipes(document.getElementById('pick-recipe-search').value);
       };
     } else {
-      hint.textContent = 'Nothing planned in the last 7 days — pick any recipe:';
+      hint.textContent = `Nothing cooked in the week before ${dayLabel} — pick any recipe:`;
       renderPickGrid(getRecipes());
     }
     document.getElementById('pick-recipe-search').value = '';
