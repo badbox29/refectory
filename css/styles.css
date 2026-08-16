@@ -2950,3 +2950,19 @@ body.modal-open { overflow: hidden; }
   letter-spacing: .03em;
   vertical-align: middle;
 }
+
+/* ── Storage failure banner ──────────────────────────────────────
+   Deliberately persistent. A toast that vanishes in three seconds is how
+   an unnoticed quota failure discards hours of edits. */
+.storage-banner {
+  background: rgba(180, 60, 50, .12);
+  border: 1px solid rgba(180, 60, 50, .55);
+  border-radius: var(--r-sm);
+  padding: .7rem .85rem;
+  margin-bottom: 1rem;
+  font-size: .86rem;
+  line-height: 1.45;
+  color: var(--ink);
+}
+.storage-banner strong { display: block; margin-bottom: .2rem; }
+.storage-banner .btn { margin-top: .5rem; }
