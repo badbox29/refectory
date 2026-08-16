@@ -400,7 +400,7 @@ const View = {
   recipeTags:    [],          // selected tag filters
   editingId:     null,        // recipe id being edited
   checkedItems:  new Set(),   // shopping list checked item keys (session only)
-  recipeSort:    'updated',   // 'updated' | 'alpha' | 'rating'
+  recipeSort:    'updated',   // 'updated' | 'created' | 'alpha' | 'rating' | 'favorite' | 'lastCooked'
   manualItems:   [],          // [{id, name, checked}] — manually added shopping items
   selectMode:        false,         // recipe bulk-select mode
   selectedRecipeIds: new Set(),     // recipe ids selected in bulk-select mode
@@ -428,6 +428,13 @@ function getRecipes() {
   // Favorites first, then most recently updated within each group
   if (View.recipeSort === 'favorite')   return recipes.sort((a, b) =>
     (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0) || (b.updatedAt || 0) - (a.updatedAt || 0));
+  // Newest first by creation, not modification. Distinct from 'updated'
+  // because planning meals rewrites lastCooked on existing recipes, which
+  // bumps their updatedAt and buries anything genuinely new.
+  // Bulk imports share a createdAt to the millisecond, so ties fall back to
+  // title rather than shuffling on every render.
+  if (View.recipeSort === 'created')    return recipes.sort((a, b) =>
+    (b.createdAt || 0) - (a.createdAt || 0) || (a.title || '').localeCompare(b.title || ''));
   if (View.recipeSort === 'lastCooked') return recipes.filter(r => r.lastCooked).sort((a, b) => (b.lastCooked || 0) - (a.lastCooked || 0));
   return recipes.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 }
@@ -2036,7 +2043,8 @@ function getRecentlyPlanned(days = 7, anchor = null) {
         // so it isn't itself a source of further leftovers.
         if (isLeftoverEntry(entry) || isFendEntry(entry)) continue;
         const id = slotRecipeId(entry);
-        if (!id || !getRecipe(id)) continue;
+        const rec = id ? getRecipe(id) : null;
+        if (!rec || isLeftoversPlaceholder(rec)) continue;
         // Rank by day, then by slot within the day, so the most recent cook
         // sorts first even when several land on the same date.
         const ts = d.getTime() + si;
@@ -2058,11 +2066,28 @@ function todayIndexIn(weekKey) {
   return (now.getDay() + 6) % 7;
 }
 
+// A placeholder recipe standing in for "we ate leftovers" rather than a dish
+// in its own right — Mealie users often create one because Mealie has no
+// first-class leftovers concept. Refectory does, via leftovers: entries, so
+// offering this record in the leftovers picker would mark leftovers as
+// leftovers of leftovers. Matched on title alone, deliberately narrowly: a
+// real recipe called "Leftover Turkey Soup" must not be caught by this.
+function isLeftoversPlaceholder(recipe) {
+  return /^\s*left\s?-?overs?\s*$/i.test(recipe?.title || '');
+}
+
 // The calendar date a planner slot refers to.
 function slotDate(weekKey, dayIdx) {
   const d = weekStartDate(weekKey);
   d.setDate(d.getDate() + Number(dayIdx));
   return d;
+}
+
+// Every recipe that could sensibly be marked as leftovers. Only the picker in
+// leftovers mode uses this — the placeholder is still a valid ordinary meal,
+// so it stays selectable everywhere else.
+function leftoverCandidates() {
+  return getRecipes().filter(r => !isLeftoversPlaceholder(r));
 }
 
 function openPickRecipeModal(weekKey, dayIdx, slot, mode) {
@@ -2108,12 +2133,12 @@ function openPickRecipeModal(weekKey, dayIdx, slot, mode) {
       showAll.onclick = () => {
         hint.textContent = 'All recipes:';
         showAll.style.display = 'none';
-        renderPickGrid(getRecipes());
+        renderPickGrid(leftoverCandidates());
         filterPickRecipes(document.getElementById('pick-recipe-search').value);
       };
     } else {
       hint.textContent = `Nothing cooked in the week before ${dayLabel} — pick any recipe:`;
-      renderPickGrid(getRecipes());
+      renderPickGrid(leftoverCandidates());
     }
     document.getElementById('pick-recipe-search').value = '';
     filterPickRecipes('');
@@ -4467,6 +4492,14 @@ function parseLocalDate(s) {
   return new Date(y, m - 1, d);
 }
 
+// Mealie timestamps are ISO strings ("2023-07-10T19:35:12.592956") or bare
+// dates. Returns null rather than NaN so callers can fall through cleanly.
+function mealieDate(v) {
+  if (!v) return null;
+  const ms = Date.parse(v);
+  return Number.isFinite(ms) ? ms : null;
+}
+
 function importMealieMealPlans(data, idMap) {
   const rows = (data.group_meal_plans || []).filter(r => r.recipe_id && r.date);
   if (!rows.length) return { placed: 0, skipped: 0, slots: 0, unmatched: 0 };
@@ -4752,7 +4785,10 @@ ${t}`;
         sourceUrl:   r.org_url      || '',
         tags, ingredients, steps, mealType,
         importedFrom: 'mealie-backup',
-        createdAt:   Date.now(),
+        // Mealie's own creation date, so "Recently added" reflects when the
+        // recipe actually entered the collection rather than when it was
+        // migrated — otherwise every imported recipe shares one timestamp.
+        createdAt:   mealieDate(r.created_at) || mealieDate(r.date_added) || Date.now(),
         updatedAt:   Date.now(),
         ...(importExtras && rating    ? { rating }           : {}),
         ...(importExtras && favorite  ? { favorite: true }   : {}),
