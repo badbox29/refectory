@@ -857,8 +857,17 @@
             <option value="2">2 weeks</option>
             <option value="4">4 weeks (a month)</option>
             <option value="5">5 weeks</option>
+            <option value="custom">Custom range…</option>
           </select>
           <button class="btn btn-primary" id="tpl-save-btn">Save</button>
+        </div>
+        <div id="tpl-custom-range" style="display:none;margin-top:.5rem;">
+          <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">
+            <label class="f13 muted" for="tpl-from">From</label>
+            <input class="input" type="date" id="tpl-from" style="width:auto;"/>
+            <label class="f13 muted" for="tpl-to">to</label>
+            <input class="input" type="date" id="tpl-to" style="width:auto;"/>
+          </div>
         </div>
         <div class="f13 muted" style="margin-top:.4rem;" id="tpl-save-hint"></div>
       </div>
