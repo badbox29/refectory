@@ -3495,6 +3495,212 @@ function extractFromMeta(doc, sourceUrl) {
   };
 }
 
+// Refuse to import while the store may still be loading. Signed in, an
+// existing session, and no completed pull means the recipes this import would
+// match against might simply not be here yet — and importing anyway produces a
+// second full copy of the library that only surfaces later as duplicates.
+function importGuardBlocked() {
+  if (App.bootPullDone) return null;
+  if (Auth.isGuest())   return null;
+  return 'Still loading your recipes from sync — wait a moment and try again, ' +
+         'or the import may create a second copy of everything.';
+}
+
+// ─── Duplicate recipe cleanup ────────────────────────────────────
+// Importing the same source library twice creates two records per recipe:
+// identity is a random genId(), so nothing links a Mealie recipe imported on
+// one device to the same recipe imported on another. Matching on title is the
+// only signal available after the fact.
+//
+// Merging is not just deletion — meal plans, cookbooks and templates all hold
+// recipe ids, so every reference to a dropped copy has to be repointed at the
+// survivor first or the planner fills with blanks.
+
+// Score a record by how much would be lost if it were the one discarded.
+function recipeCompleteness(r) {
+  return (r.imageUrl ? 8 : 0)
+       + (r.lastCooked ? 4 : 0)
+       + (r.favorite ? 2 : 0)
+       + (r.rating ? 2 : 0)
+       + (r.nutrition ? 1 : 0)
+       + Math.min(4, (r.ingredients || []).length ? 2 : 0)
+       + Math.min(4, (r.steps || []).length ? 2 : 0)
+       + ((r.description || '').length ? 1 : 0);
+}
+
+// Group by normalised title and pick a survivor per group.
+function findDuplicateRecipes() {
+  const groups = {};
+  for (const r of Object.values(App.data.recipes || {})) {
+    const key = (r.title || '').trim().toLowerCase();
+    if (!key) continue;
+    (groups[key] = groups[key] || []).push(r);
+  }
+
+  const dupes = [];
+  for (const [key, list] of Object.entries(groups)) {
+    if (list.length < 2) continue;
+    const ranked = [...list].sort((a, b) =>
+      recipeCompleteness(b) - recipeCompleteness(a) ||
+      // Tie-break on the older creation date: after the importer began using
+      // Mealie's own created_at, the older record is the one carrying the real
+      // history rather than the timestamp of a re-import.
+      (a.createdAt || 0) - (b.createdAt || 0));
+    dupes.push({ key, keep: ranked[0], drop: ranked.slice(1) });
+  }
+  return dupes;
+}
+
+// Repoint every reference from `fromId` to `toId` across the whole store.
+function remapRecipeReferences(map) {
+  let planRefs = 0, bookRefs = 0, tplRefs = 0;
+  const swap = entry => {
+    if (typeof entry !== 'string') return entry;
+    if (entry === FEND_ENTRY) return entry;
+    const leftover = entry.startsWith(LEFTOVERS_PREFIX);
+    const id  = leftover ? entry.slice(LEFTOVERS_PREFIX.length) : entry;
+    const to  = map[id];
+    if (!to) return entry;
+    planRefs++;
+    return leftover ? LEFTOVERS_PREFIX + to : to;
+  };
+
+  for (const wk of Object.keys(App.data.mealplan || {})) {
+    for (const d of Object.keys(App.data.mealplan[wk] || {})) {
+      const day = App.data.mealplan[wk][d];
+      for (const slot of Object.keys(day)) {
+        // De-duplicate after remapping: a day that held both copies of the
+        // same recipe would otherwise end up listing one dish twice.
+        const mapped = slotEntries(day[slot]).map(swap);
+        const seen = new Set();
+        const next = packSlot(mapped.filter(e => {
+          if (e === FEND_ENTRY) return true;
+          if (seen.has(e)) return false;
+          seen.add(e);
+          return true;
+        }));
+        if (next === null) delete day[slot]; else day[slot] = next;
+      }
+    }
+  }
+
+  for (const cb of Object.values(App.data.cookbooks || {})) {
+    if (!Array.isArray(cb.recipeIds)) continue;
+    const before = cb.recipeIds.length;
+    cb.recipeIds = [...new Set(cb.recipeIds.map(id => map[id] || id))];
+    bookRefs += before - cb.recipeIds.length + cb.recipeIds.filter(id => Object.values(map).includes(id)).length;
+  }
+
+  for (const tpl of Object.values(App.data.templates || {})) {
+    for (const s of (tpl.slots || [])) {
+      const seen = new Set();
+      const next = packSlot(slotEntries(s.v).map(e => {
+        const after = swap(e);
+        if (after !== e) tplRefs++;
+        return after;
+      }).filter(e => {
+        if (e === FEND_ENTRY) return true;
+        if (seen.has(e)) return false;
+        seen.add(e);
+        return true;
+      }));
+      if (next !== null) s.v = next;
+    }
+  }
+  return { planRefs, bookRefs, tplRefs };
+}
+
+function mergeDuplicateRecipes(dupes) {
+  const map = {};
+  for (const g of dupes) for (const d of g.drop) map[d.id] = g.keep.id;
+
+  // References first — deleting a recipe that a plan still points at would
+  // leave the planner rendering blanks.
+  const refs = remapRecipeReferences(map);
+
+  let removed = 0;
+  for (const g of dupes) {
+    for (const d of g.drop) {
+      // Don't discard anything the survivor is missing
+      const keep = App.data.recipes[g.keep.id];
+      if (keep) {
+        if (!keep.imageUrl && d.imageUrl)     keep.imageUrl = d.imageUrl;
+        if (!keep.nutrition && d.nutrition)   keep.nutrition = d.nutrition;
+        if (!keep.rating && d.rating)         keep.rating = d.rating;
+        if (!keep.favorite && d.favorite)     keep.favorite = true;
+        if (d.lastCooked && (!keep.lastCooked || d.lastCooked > keep.lastCooked))
+          keep.lastCooked = d.lastCooked;
+        if (!(keep.tags || []).length && (d.tags || []).length) keep.tags = d.tags;
+        keep.updatedAt = Date.now();
+      }
+      delete App.data.recipes[d.id];
+      ImageStore.delete(d.id);
+      removed++;
+    }
+  }
+  scheduleSave();
+  return { removed, ...refs };
+}
+
+let _dupes = null;
+
+function openDedupeModal() {
+  _dupes = findDuplicateRecipes();
+  const sum  = document.getElementById('dedupe-summary');
+  const prev = document.getElementById('dedupe-preview');
+  const go   = document.getElementById('dedupe-go');
+
+  const extra = _dupes.reduce((n, g) => n + g.drop.length, 0);
+  if (!_dupes.length) {
+    sum.textContent = 'No duplicate recipe names found.';
+    sum.style.color = 'var(--green-mid)';
+    prev.innerHTML = '';
+    if (go) go.disabled = true;
+    openModal('modal-dedupe');
+    return;
+  }
+
+  sum.innerHTML = `<strong>${_dupes.length}</strong> name${_dupes.length === 1 ? '' : 's'} ` +
+    `appear${_dupes.length === 1 ? 's' : ''} more than once — <strong>${extra}</strong> ` +
+    `record${extra === 1 ? '' : 's'} would be removed, leaving ` +
+    `<strong>${Object.keys(App.data.recipes).length - extra}</strong> recipes.`;
+  sum.style.color = '';
+
+  prev.innerHTML = _dupes.slice(0, 40).map(g => `
+    <div class="dupe-row">
+      <div class="dupe-title">${esc(g.keep.title)}</div>
+      <div class="dupe-meta">
+        keeping the copy with ${dupeDescribe(g.keep)} ·
+        removing ${g.drop.length} other${g.drop.length === 1 ? '' : 's'}
+      </div>
+    </div>`).join('') +
+    (_dupes.length > 40 ? `<div class="f13 muted" style="padding:.5rem 0;">…and ${_dupes.length - 40} more.</div>` : '');
+
+  if (go) go.disabled = false;
+  openModal('modal-dedupe');
+}
+
+function dupeDescribe(r) {
+  const bits = [];
+  if (r.imageUrl)   bits.push('an image');
+  if (r.lastCooked) bits.push('cook history');
+  if (r.rating)     bits.push('a rating');
+  if (r.nutrition)  bits.push('nutrition');
+  return bits.length ? bits.join(', ') : 'the earliest date';
+}
+
+function runDedupe() {
+  if (!_dupes?.length) return;
+  const extra = _dupes.reduce((n, g) => n + g.drop.length, 0);
+  if (!confirm(`Remove ${extra} duplicate recipe records?\n\nMeal plans, cookbooks and templates will be repointed at the copy that's kept. This can't be undone — export a backup first if you haven't.`)) return;
+
+  const res = mergeDuplicateRecipes(_dupes);
+  _dupes = null;
+  closeModal('modal-dedupe');
+  renderAll();
+  showToast(`Merged ${res.removed} duplicates · ${res.planRefs} meal plan entries repointed`);
+}
+
 // ─── Share meal plan ─────────────────────────────────────────────
 // Publishes a read-only window onto a date range. The worker renders the page
 // and reads live data, so the link stays current; it expires on its own at
@@ -4289,6 +4495,9 @@ async function runExport(idsOverride = null) {
 // ─── Refectory backup import ──────────────────────────────────────
 
 async function importFromRefectoryBackup(file) {
+  const blocked = importGuardBlocked();
+  if (blocked) return { ok: false, error: blocked };
+
   const statusEl = document.getElementById('mealie-import-status');
   const status   = (msg, err) => {
     if (statusEl) { statusEl.textContent = msg; statusEl.style.color = err ? 'var(--red)' : ''; }
@@ -4840,6 +5049,9 @@ async function handleMealieZipFile(file) {
 }
 
 async function triggerMealieZipImport(file) {
+  const blocked = importGuardBlocked();
+  if (blocked) { showToast(blocked); return; }
+
   const btn          = document.getElementById('mealie-import-zip-btn');
   const embedImages  = document.getElementById('mealie-import-images')?.checked ?? true;
   const importExtras = document.getElementById('mealie-import-plans')?.checked ?? true;
@@ -5119,8 +5331,16 @@ ${t}`;
     });
 
     // Determine the Refectory ID for this recipe before touching images
-    const existing = Object.values(App.data.recipes)
-      .find(ex => ex.importedFrom === 'mealie-backup' && ex.title === r.name);
+    // Match on Mealie's own id first. Title matching was the only signal
+    // available before sourceId was stored, and it fails the moment an import
+    // runs against a store that hasn't loaded yet — which produces a second
+    // full copy of the library under fresh random ids. Storing the source id
+    // costs ~20 bytes per recipe and makes re-imports idempotent by identity
+    // rather than by name.
+    const all = Object.values(App.data.recipes);
+    const existing =
+      all.find(ex => ex.sourceId === rid && ex.importedFrom === 'mealie-backup') ||
+      all.find(ex => ex.importedFrom === 'mealie-backup' && !ex.sourceId && ex.title === r.name);
     const newId    = existing ? existing.id : genId();
     idMap[rid]     = newId;
 
@@ -5166,6 +5386,9 @@ ${t}`;
         importedFrom: 'mealie-backup',
         updatedAt:   Date.now(),
       });
+      // Backfill identity onto records imported before sourceId existed, so
+      // the next import matches by id and can't duplicate them again.
+      existing.sourceId = rid;
       if (importExtras) {
         // Only overwrite a local rating when Mealie actually has one, so a
         // rating added in Refectory isn't wiped by a re-import.
@@ -5187,6 +5410,7 @@ ${t}`;
         sourceUrl:   r.org_url      || '',
         tags, ingredients, steps, mealType,
         importedFrom: 'mealie-backup',
+        sourceId:    rid,
         // Mealie's own creation date, so "Recently added" reflects when the
         // recipe actually entered the collection rather than when it was
         // migrated — otherwise every imported recipe shares one timestamp.
@@ -5512,6 +5736,8 @@ async function boot() {
 
   // New user — show account setup wizard
   if (!stored) {
+    App.bootPullDone   = true;   // nothing to load — an empty store is correct here
+    App.bootPullLoaded = true;
     renderAll();
     Auth.showAccountSetup();
     return;
@@ -5553,6 +5779,13 @@ async function boot() {
     }
   }
 
+  // The boot pull has settled — either remote data merged in, or we know it
+  // didn't arrive. Imports are gated on this: running one against a store that
+  // hasn't loaded yet is how an entire library gets imported a second time
+  // under fresh ids, because there's nothing in memory to match against.
+  App.bootPullDone   = true;
+  App.bootPullLoaded = !!remote;
+
   const ok = await Auth.bootCheck(tokenBeforePull);
   if (!ok) return;
 
@@ -5572,6 +5805,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // Recipe search
   document.getElementById('planner-templates')?.addEventListener('click', openTemplatesModal);
   document.getElementById('planner-share')?.addEventListener('click', openSharePlanModal);
+  document.getElementById('btn-find-dupes')?.addEventListener('click', () => {
+    closeModal('modal-mealie-import');
+    openDedupeModal();
+  });
+  document.getElementById('dedupe-go')?.addEventListener('click', runDedupe);
+  document.getElementById('dedupe-cancel')?.addEventListener('click', () => closeModal('modal-dedupe'));
   document.getElementById('choice-paste-text')?.addEventListener('click', () => {
     closeModal('modal-new-recipe-choice');
     openPasteRecipeModal();
