@@ -128,6 +128,7 @@
         <button class="btn btn-ghost btn-sm" id="planner-next">Next →</button>
         <button class="btn btn-outline btn-sm" id="planner-today">This Week</button>
         <button class="btn btn-outline btn-sm" id="planner-templates">🗓 Templates</button>
+        <button class="btn btn-outline btn-sm" id="planner-share">🔗 Share</button>
       </div>
       <!-- Mobile day tabs — shown only on narrow screens -->
       <div class="planner-day-tabs" id="planner-day-tabs"></div>
@@ -836,6 +837,62 @@
       <p class="f13 lh muted" style="margin-bottom:.75rem;" id="variant-hint"></p>
       <div id="variant-list"></div>
       <button class="btn btn-outline w100" id="variant-import-all" style="margin-top:.25rem;"></button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Share meal plan ─────────────────────────────────────────── -->
+<div class="modal-overlay" id="modal-share-plan" role="dialog" aria-modal="true">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <h2 class="modal-title">Share Meal Plan</h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="f13 lh muted" style="margin-bottom:.75rem;">
+        Creates a link anyone can open — no account needed. It shows each meal's
+        photo, name and description, but not ingredients. The link updates if you
+        change the plan, and stops working at the end of the range.
+      </p>
+
+      <div class="form-group">
+        <label class="form-label">Range</label>
+        <select class="input" id="share-range">
+          <option value="week">This week</option>
+          <option value="2">Next 2 weeks</option>
+          <option value="4">Next 4 weeks</option>
+          <option value="custom">Custom range…</option>
+        </select>
+      </div>
+
+      <div id="share-custom" style="display:none;margin-bottom:.75rem;">
+        <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">
+          <label class="f13 muted" for="share-from">From</label>
+          <input class="input" type="date" id="share-from" style="width:auto;"/>
+          <label class="f13 muted" for="share-to">to</label>
+          <input class="input" type="date" id="share-to" style="width:auto;"/>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Title <span class="muted">(optional)</span></label>
+        <input class="input" id="share-title" placeholder="e.g. What's for dinner this week"/>
+      </div>
+
+      <div class="f13" id="share-hint" style="min-height:1.3rem;"></div>
+
+      <div id="share-result" style="display:none;margin-top:.75rem;">
+        <label class="form-label">Link</label>
+        <div style="display:flex;gap:.5rem;">
+          <input class="input" id="share-url" readonly style="flex:1;"/>
+          <button class="btn btn-outline" id="share-copy">Copy</button>
+        </div>
+        <div class="f13 muted" style="margin-top:.35rem;" id="share-expiry"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="share-cancel">Close</button>
+      <button class="btn btn-primary" id="share-create">Create Link</button>
     </div>
   </div>
 </div>
