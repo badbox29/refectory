@@ -3329,8 +3329,16 @@ function getTemplates() {
 function getTemplate(id) { return App.data.templates?.[id] || null; }
 
 // Read `weeks` consecutive weeks out of the planner starting at startWeek.
-function captureTemplateSlots(startWeek, weeks) {
+// `range` optionally clips to exact dates, for a custom span that begins or
+// ends mid-week. Partial weeks need no special handling: every slot already
+// records its own weekday, so a range starting on a Wednesday simply leaves
+// Mon and Tue of week 0 empty, and loading puts each day back on the same
+// weekday of the target week.
+function captureTemplateSlots(startWeek, weeks, range = null) {
   const slots = [];
+  const from  = range?.from ? new Date(range.from).setHours(0, 0, 0, 0) : null;
+  const to    = range?.to   ? new Date(range.to).setHours(23, 59, 59, 999) : null;
+
   for (let w = 0; w < weeks; w++) {
     const wk   = addWeeks(startWeek, w);
     const plan = App.data.mealplan?.[wk];
@@ -3338,6 +3346,11 @@ function captureTemplateSlots(startWeek, weeks) {
     for (let d = 0; d < 7; d++) {
       const day = plan[d];
       if (!day) continue;
+      if (from !== null || to !== null) {
+        const ts = slotDate(wk, d).getTime();
+        if (from !== null && ts < from) continue;
+        if (to   !== null && ts > to)   continue;
+      }
       for (const slot of MEAL_SLOTS) {
         const entries = slotEntries(day[slot]);
         if (!entries.length) continue;
@@ -3348,8 +3361,18 @@ function captureTemplateSlots(startWeek, weeks) {
   return slots;
 }
 
-function saveTemplate(name, startWeek, weeks) {
-  const slots = captureTemplateSlots(startWeek, weeks);
+// Turn a pair of dates into the week-anchored span the template model wants:
+// the ISO week the range starts in, and how many weeks it touches.
+function rangeToWeekSpan(fromDate, toDate) {
+  const startWeek = getISOWeekKey(fromDate);
+  const endWeek   = getISOWeekKey(toDate);
+  let weeks = 1;
+  while (weeks < 60 && addWeeks(startWeek, weeks - 1) !== endWeek) weeks++;
+  return { startWeek, weeks };
+}
+
+function saveTemplate(name, startWeek, weeks, range = null) {
+  const slots = captureTemplateSlots(startWeek, weeks, range);
   if (!slots.length) return { ok: false, error: 'Nothing planned in that range to save.' };
   if (!App.data.templates) App.data.templates = {};
   const id  = genId();
@@ -3435,6 +3458,17 @@ function applyTemplate(id, startWeek, mode = 'replace') {
 
 function openTemplatesModal() {
   document.getElementById('tpl-name').value = '';
+
+  // Seed the custom inputs with the week on screen, so switching to Custom
+  // starts somewhere sensible rather than blank.
+  const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const mon = weekStartDate(View.currentWeek);
+  const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+  const fromEl = document.getElementById('tpl-from');
+  const toEl   = document.getElementById('tpl-to');
+  if (fromEl && !fromEl.value) fromEl.value = iso(mon);
+  if (toEl   && !toEl.value)   toEl.value   = iso(sun);
+
   updateTemplateSaveHint();   // sets the range label to match the current span
   renderTemplateList();
   openModal('modal-templates');
@@ -3442,21 +3476,56 @@ function openTemplatesModal() {
 
 // Tell the user what a save would actually capture before they commit — a
 // range with nothing planned in it is the most likely mistake here.
+// Resolve the save controls into the span to capture. Returns null when a
+// custom range is selected but not yet valid, so callers can report why
+// rather than silently saving the wrong thing.
+function currentTemplateSpan() {
+  const sel = document.getElementById('tpl-weeks')?.value || '1';
+
+  if (sel !== 'custom') {
+    const weeks = parseInt(sel) || 1;
+    return { startWeek: View.currentWeek, weeks, range: null,
+             label: formatWeekRangeLabel(View.currentWeek, weeks) };
+  }
+
+  const from = parseLocalDate(document.getElementById('tpl-from')?.value || '');
+  const to   = parseLocalDate(document.getElementById('tpl-to')?.value || '');
+  if (!from || !to) return { error: 'Pick a start and end date.' };
+  if (to < from)    return { error: 'The end date is before the start date.' };
+
+  const span = rangeToWeekSpan(from, to);
+  if (span.weeks > 26) return { error: 'That range is longer than 6 months — try a shorter one.' };
+
+  const fmt = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const label = from.getFullYear() === to.getFullYear()
+    ? `${fmt(from)} – ${fmt(to)}, ${from.getFullYear()}`
+    : `${fmt(from)}, ${from.getFullYear()} – ${fmt(to)}, ${to.getFullYear()}`;
+  return { startWeek: span.startWeek, weeks: span.weeks, range: { from, to }, label };
+}
+
 function updateTemplateSaveHint() {
-  const hint = document.getElementById('tpl-save-hint');
+  const hint   = document.getElementById('tpl-save-hint');
+  const label  = document.getElementById('tpl-save-from');
+  const custom = document.getElementById('tpl-custom-range');
+  const isCustom = document.getElementById('tpl-weeks')?.value === 'custom';
+  if (custom) custom.style.display = isCustom ? '' : 'none';
   if (!hint) return;
-  const weeks = parseInt(document.getElementById('tpl-weeks')?.value) || 1;
 
-  // Keep the range in the header honest about what the current span covers
-  const label = document.getElementById('tpl-save-from');
-  if (label) label.textContent = formatWeekRangeLabel(View.currentWeek, weeks);
+  const span = currentTemplateSpan();
+  if (span.error) {
+    if (label) label.textContent = 'a custom range';
+    hint.textContent = span.error;
+    hint.style.color = 'var(--saffron)';
+    return;
+  }
 
-  const slots = captureTemplateSlots(View.currentWeek, weeks);
+  if (label) label.textContent = span.label;
+  const slots = captureTemplateSlots(span.startWeek, span.weeks, span.range);
   const meals = slots.reduce((n, s) => n + slotEntries(s.v).length, 0);
   const days  = new Set(slots.map(s => `${s.w}:${s.d}`)).size;
   hint.textContent = meals
     ? `Captures ${meals} meal${meals === 1 ? '' : 's'} across ${days} day${days === 1 ? '' : 's'}.`
-    : `Nothing planned in ${weeks === 1 ? 'this week' : `these ${weeks} weeks`} yet.`;
+    : 'Nothing planned in that range yet.';
   hint.style.color = meals ? 'var(--muted)' : 'var(--saffron)';
 }
 
@@ -5161,10 +5230,13 @@ document.addEventListener('DOMContentLoaded', () => {
   // Recipe search
   document.getElementById('planner-templates')?.addEventListener('click', openTemplatesModal);
   document.getElementById('tpl-weeks')?.addEventListener('change', updateTemplateSaveHint);
+  document.getElementById('tpl-from')?.addEventListener('change', updateTemplateSaveHint);
+  document.getElementById('tpl-to')?.addEventListener('change', updateTemplateSaveHint);
   document.getElementById('tpl-save-btn')?.addEventListener('click', () => {
-    const name  = document.getElementById('tpl-name')?.value || '';
-    const weeks = parseInt(document.getElementById('tpl-weeks')?.value) || 1;
-    const res   = saveTemplate(name, View.currentWeek, weeks);
+    const name = document.getElementById('tpl-name')?.value || '';
+    const span = currentTemplateSpan();
+    if (span.error) { showToast(span.error); return; }
+    const res  = saveTemplate(name, span.startWeek, span.weeks, span.range);
     if (!res.ok) { showToast(res.error); return; }
     document.getElementById('tpl-name').value = '';
     renderTemplateList();
