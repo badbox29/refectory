@@ -409,10 +409,6 @@
           <input type="checkbox" id="mealie-import-images" checked/>
           Embed recipe images (base64) — skippable if you want faster import
         </label>
-        <label class="form-label" style="margin-bottom:.3rem;display:flex;align-items:center;gap:.5rem;">
-          <input type="checkbox" id="mealie-import-plans" checked/>
-          Import meal plan history, ratings and favorites
-        </label>
       </div>
 
       <!-- JSON paste panel -->
@@ -814,6 +810,20 @@
         <button class="btn btn-primary" id="url-import-fetch-btn">Fetch</button>
       </div>
       <div id="url-import-status" style="min-height:1.4rem;font-size:.85rem;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Multiple recipes found on one page ──────────────────────── -->
+<div class="modal-overlay" id="modal-recipe-variant" role="dialog" aria-modal="true">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <h2 class="modal-title">Choose a recipe</h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="f13 lh muted" style="margin-bottom:.75rem;" id="variant-hint"></p>
+      <div id="variant-list"></div>
     </div>
   </div>
 </div>
