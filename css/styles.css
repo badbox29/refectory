@@ -2596,3 +2596,75 @@ body.modal-open { overflow: hidden; }
 
 .shopping-item { display: flex; align-items: center; gap: .6rem; }
 .shopping-item .shopping-check { flex: 1; }
+
+/* ── Multi-entry meal slots ──────────────────────────────────────
+   A slot can hold more than one meal — cooking two dinners so one can be
+   frozen or eaten later is a plan, not a mistake. Chips stack vertically;
+   the compact add strip sits underneath so another can always be added. */
+.plan-stack {
+  display: flex;
+  flex-direction: column;
+  gap: .2rem;
+}
+.plan-stack-multi .plan-recipe {
+  /* Shorter chips when several share a cell, so a stacked day still fits */
+  min-height: 0;
+}
+.plan-stack-multi .plan-recipe-img,
+.plan-stack-multi .plan-recipe-img-placeholder {
+  height: 2.2rem;
+}
+.plan-add-wrap-compact {
+  flex-direction: row;
+  height: auto;
+  gap: .15rem;
+  padding: .15rem 0 0;
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+.plan-cell:hover .plan-add-wrap-compact,
+.planner-mobile-slot-content .plan-add-wrap-compact {
+  /* Always visible on mobile — there's no hover to reveal it */
+  opacity: 1;
+}
+.plan-add-wrap-compact .plan-add,
+.plan-add-wrap-compact .plan-dice,
+.plan-add-wrap-compact .plan-leftover {
+  flex: 1;
+  font-size: .7rem;
+  padding: .1rem;
+  width: auto;
+}
+.plan-stack-multi .plan-recipe + .plan-recipe {
+  border-top: 2px solid var(--green-soft);
+}
+
+/* ── Family Favorites ────────────────────────────────────────── */
+.card-fav {
+  color: #c2453f;
+  font-size: .85rem;
+  line-height: 1;
+}
+.detail-fav {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #c2453f;
+  font-size: 1.25rem;
+  line-height: 1;
+  padding: 0 .35rem 0 0;
+  opacity: .55;
+  transition: opacity .12s ease, transform .12s ease;
+}
+.detail-fav:hover { opacity: 1; transform: scale(1.12); }
+.detail-fav.is-fav { opacity: 1; }
+.fav-toggle {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  cursor: pointer;
+  user-select: none;
+}
+.fav-toggle input { cursor: pointer; }
+.fav-toggle-mark { color: #c2453f; font-size: 1.05rem; line-height: 1; }
+.fav-toggle-text { color: var(--muted); font-size: .85rem; }
