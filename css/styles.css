@@ -618,6 +618,12 @@ textarea.input { resize: vertical; min-height: 80px; }
   border-collapse: collapse;
   background: var(--white);
   min-width: 680px;
+  /* Fixed layout so the seven day columns stay equal. Under auto layout a
+     column grows to its widest content, and a multi-entry chip's title is in
+     normal flow (unlike the single-entry title, which is absolutely
+     positioned over the image and so contributes no intrinsic width) — one
+     long recipe name would stretch that day wider than the rest. */
+  table-layout: fixed;
 }
 
 #planner-table th, #planner-table td {
@@ -2635,6 +2641,9 @@ body.modal-open { overflow: hidden; }
   align-self: center;
   flex: 1;
   min-width: 0;
+  /* Break inside a word rather than overflow — some recipe titles are one
+     very long word, and the columns are narrow. */
+  overflow-wrap: anywhere;
 }
 /* No room for the word "Leftovers" beside a title at this size — collapse it
    to the same ♻ glyph the add strip already uses, pinned over the thumbnail. */
