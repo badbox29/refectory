@@ -854,6 +854,26 @@
   </div>
 </div>
 
+<!-- ── Confirmation dialog ─────────────────────────────────────── -->
+<div class="modal-overlay" id="modal-confirm" role="dialog" aria-modal="true">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <h2 class="modal-title" id="confirm-title">Are you sure?</h2>
+    </div>
+    <div class="modal-body">
+      <div id="confirm-message" class="confirm-message"></div>
+      <div id="confirm-copy-wrap" class="confirm-copy" style="display:none;">
+        <input class="input" id="confirm-copy-value" readonly/>
+        <button class="btn btn-outline btn-sm" id="confirm-copy-btn">Copy</button>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="confirm-cancel">Cancel</button>
+      <button class="btn btn-primary" id="confirm-ok">Continue</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Duplicate cleanup ───────────────────────────────────────── -->
 <div class="modal-overlay" id="modal-dedupe" role="dialog" aria-modal="true">
   <div class="modal modal-md">
