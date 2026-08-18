@@ -6031,9 +6031,27 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('settings-save-btn')?.addEventListener('click', saveSettings);
   document.getElementById('settings-account-btn')?.addEventListener('click', () => {
     closeModal('modal-settings');
-    if (Auth.isGuest()) Auth.showSetupFresh();
-    else if (Auth.isTokenAccount()) Auth.showGoogleUpgradeFlow();
-    else Auth.showGuestSwitchConfirm();
+
+    // Guests have no account yet, so "switch" means "create one".
+    if (Auth.isGuest()) { Auth.showSetupFresh(); return; }
+
+    // Everyone else goes to the account setup screen, which is the only place
+    // offering "load my existing account" — sign in with Google, or join with
+    // a token. Token accounts used to be sent to the Google *upgrade* flow
+    // instead, which is what the separate "Upgrade to Google sign-in" button
+    // already does, and which refuses outright when a Google account for that
+    // address already exists. That left a device with a token account no route
+    // to any other account at all.
+    const token = App.data?.userToken;
+    const warn  = Auth.isTokenAccount() && token
+      ? `Switching accounts replaces the recipes on this device.\n\n` +
+        `This account's token is:\n\n${token}\n\n` +
+        `Write it down first — it is the only way back to this account's data. Continue?`
+      : `Switching accounts replaces the recipes on this device.\n\n` +
+        `They stay safe in sync and come back when you sign in again. Continue?`;
+    if (!confirm(warn)) { openModal('modal-settings'); return; }
+
+    Auth.showAccountSetup();
   });
 
   // Mealie import tabs
