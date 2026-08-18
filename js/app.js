@@ -73,6 +73,13 @@ function defaultData() {
     mealplan:    {},
     // Cookbooks: { [id]: { id, name, description, recipeIds: [] } }
     cookbooks:   {},
+    // Recipe groups: { [id]: { id, name, members: [{ id, label }], createdAt, updatedAt } }
+    // A group is a set of variants of the same dish — three takes on Swedish
+    // egg coffee, say — that collapse to a single tabbed card in the grid.
+    // Distinct from a cookbook, which is a collection that leaves its members
+    // visible. Membership is exclusive: a recipe in two groups would render
+    // twice and undo the collapsing the feature exists for.
+    groups:      {},
     // Meal plan templates: { [id]: { id, name, weeks, slots: [], createdAt, updatedAt } }
     // A slot is { w, d, slot, v } — week index within the template (0-based),
     // day of week (0=Mon), meal slot name, and the packed slot value.
@@ -101,6 +108,7 @@ function mergeData(raw) {
     mealplan:  (raw.mealplan  && typeof raw.mealplan  === 'object') ? raw.mealplan  : d.mealplan,
     cookbooks: (raw.cookbooks && typeof raw.cookbooks === 'object') ? raw.cookbooks : d.cookbooks,
     templates: (raw.templates && typeof raw.templates === 'object') ? raw.templates : d.templates,
+    groups:    (raw.groups && typeof raw.groups === 'object') ? raw.groups : d.groups,
     shoppingStores: (raw.shoppingStores && typeof raw.shoppingStores === 'object') ? raw.shoppingStores : d.shoppingStores,
     itemStoreAssignments: (raw.itemStoreAssignments && typeof raw.itemStoreAssignments === 'object') ? raw.itemStoreAssignments : d.itemStoreAssignments,
   };
@@ -520,6 +528,8 @@ function saveRecipe(recipe) {
 }
 
 function deleteRecipe(id) {
+  // A deleted recipe must not linger as a group tab pointing at nothing.
+  removeFromGroup(id);
   delete App.data.recipes[id];
   ImageStore.delete(id);
   // Remove from meal plan too
@@ -797,7 +807,41 @@ function renderRecipes() {
   }
   noRes.style.display = 'none';
 
-  grid.innerHTML = recipes.map(r => `
+  // Collapse groups: every matching member folds into one tabbed card. In
+  // select mode groups stay expanded, since selection operates on individual
+  // recipes and you can't tick a tab.
+  const gIdx  = View.selectMode ? {} : groupIndex();
+  const cards = [];
+  const seenGroups = new Set();
+  for (const r of recipes) {
+    const g = gIdx[r.id];
+    if (!g) { cards.push({ type: 'recipe', r, sortKey: r.title || '' }); continue; }
+    if (seenGroups.has(g.id)) continue;
+    seenGroups.add(g.id);
+    // Only members that survived the filter are shown, so a search inside a
+    // group narrows its tabs rather than resurrecting the whole set.
+    const members = g.members
+      .map(m => ({ ...m, recipe: recipes.find(x => x.id === m.id) }))
+      .filter(m => m.recipe);
+    if (!members.length) continue;
+    cards.push({ type: 'group', g, members, sortKey: g.name || '' });
+  }
+
+  // Groups sort on their own name, so their position never depends on which
+  // member happens to be active.
+  if (View.recipeSort === 'alpha') cards.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+
+  grid.innerHTML = cards.map(c => c.type === 'group'
+    ? renderGroupCard(c.g, c.members, q, matchSources)
+    : renderRecipeCard(c.r, q, matchSources)).join('');
+
+  wireRecipeGrid(grid);
+  renderBulkActionBar(recipes);
+  hydrateGridImages(grid);
+}
+
+function renderRecipeCard(r, q, matchSources) {
+  return `
     <div class="recipe-card${View.selectMode ? ' select-mode' : ''}${View.selectedRecipeIds.has(r.id) ? ' is-selected' : ''}" data-id="${esc(r.id)}">
       ${View.selectMode ? `<div class="recipe-card-select-overlay"><input type="checkbox" class="recipe-select-cb" data-id="${esc(r.id)}" ${View.selectedRecipeIds.has(r.id) ? 'checked' : ''}/></div>` : ''}
       <div class="recipe-card-img" data-img-id="${esc(r.id)}">
@@ -815,11 +859,47 @@ function renderRecipes() {
           ${r.tags?.length ? `<span>${r.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</span>` : ''}
         </div>
       </div>
-    </div>
-  `).join('');
+    </div>`;
+}
 
+// One card, tabs along the top edge. The active tab is whichever member the
+// search matched, so a hit inside a group surfaces the right variant rather
+// than whatever happens to be first.
+function renderGroupCard(g, members, q, matchSources) {
+  const activeIdx = Math.max(0, members.findIndex(m => matchSources[m.id]));
+  const active    = members[activeIdx] || members[0];
+  const r         = active.recipe;
+  return `
+    <div class="recipe-card recipe-card-group" data-group-id="${esc(g.id)}" data-id="${esc(r.id)}">
+      <div class="group-tabs" role="tablist" title="${esc(g.name)}">
+        ${members.map((m, i) => `
+          <button class="group-tab${i === activeIdx ? ' is-active' : ''}"
+                  data-group-id="${esc(g.id)}" data-member="${esc(m.id)}"
+                  title="${esc(m.recipe.title)}">${esc(m.label || m.recipe.title)}</button>`).join('')}
+        <button class="group-edit" data-group-id="${esc(g.id)}" title="Edit group">⚙</button>
+      </div>
+      <div class="recipe-card-img" data-img-id="${esc(r.id)}">
+        <div class="recipe-card-placeholder">${PLACEHOLDER_ART}</div>
+        ${q && matchSources[r.id] ? renderMatchPill(matchSources[r.id]) : ''}
+      </div>
+      <div class="recipe-card-body">
+        <div class="group-name">${esc(g.name)}</div>
+        <div class="recipe-card-title">${esc(r.title)}</div>
+        ${r.description ? `<div class="recipe-card-desc">${esc(plainText(r.description))}</div>` : ''}
+        <div class="recipe-card-meta">
+          ${r.favorite ? `<span class="card-fav" title="Family Favorite">♥</span>` : ''}
+          ${r.rating ? `<span class="card-stars" title="${r.rating} out of 5">${starsDisplay(r.rating)}</span>` : ''}
+          ${r.servings ? `<span>Serves ${esc(String(r.servings))}</span>` : ''}
+          ${r.totalTime ? `<span class="card-time">⏱ ${esc(r.totalTime)}</span>` : ''}
+        </div>
+      </div>
+    </div>`;
+}
+
+function wireRecipeGrid(grid) {
   grid.querySelectorAll('.recipe-card').forEach(card => {
     card.addEventListener('click', e => {
+      if (e.target.closest('.group-tab') || e.target.closest('.group-edit')) return;
       if (View.selectMode) {
         e.preventDefault();
         toggleRecipeSelection(card.dataset.id);
@@ -829,15 +909,39 @@ function renderRecipes() {
     });
   });
 
-  grid.querySelectorAll('.recipe-select-cb').forEach(cb => {
-    cb.addEventListener('click', e => e.stopPropagation()); // prevent double toggle from card click
-    cb.addEventListener('change', () => toggleRecipeSelection(cb.dataset.id));
+  // Switching a tab swaps the card in place rather than re-rendering the grid,
+  // so the rest of the page doesn't jump and images aren't re-fetched.
+  grid.querySelectorAll('.group-tab').forEach(tab => {
+    tab.addEventListener('click', e => {
+      e.stopPropagation();
+      const card = tab.closest('.recipe-card-group');
+      const g    = getGroup(tab.dataset.groupId);
+      const r    = getRecipe(tab.dataset.member);
+      if (!card || !g || !r) return;
+      card.dataset.id = r.id;
+      card.querySelectorAll('.group-tab').forEach(x => x.classList.toggle('is-active', x === tab));
+      card.querySelector('.recipe-card-title').textContent = r.title;
+      const desc = card.querySelector('.recipe-card-desc');
+      if (desc) desc.textContent = r.description ? plainText(r.description) : '';
+      const img = card.querySelector('.recipe-card-img');
+      img.dataset.imgId = r.id;
+      img.style.backgroundImage = '';
+      hydrateGridImages(card);
+    });
   });
 
-  renderBulkActionBar(recipes);
+  grid.querySelectorAll('.group-edit').forEach(btn => {
+    btn.addEventListener('click', e => { e.stopPropagation(); openGroupEditor(btn.dataset.groupId); });
+  });
 
-  // Async-load card images from IndexedDB (non-blocking)
-  grid.querySelectorAll('[data-img-id]').forEach(async imgEl => {
+  grid.querySelectorAll('.recipe-select-cb').forEach(cb => {
+    cb.addEventListener('click', e => e.stopPropagation());
+    cb.addEventListener('change', () => toggleRecipeSelection(cb.dataset.id));
+  });
+}
+
+function hydrateGridImages(root) {
+  root.querySelectorAll('[data-img-id]').forEach(async imgEl => {
     const dataUrl = await resolveImage(imgEl.dataset.imgId);
     if (dataUrl) {
       imgEl.style.backgroundImage = `url('${dataUrl}')`;
@@ -1092,6 +1196,23 @@ function renderTagFilter() {
 function openRecipeDetail(id) {
   const r = getRecipe(id);
   if (!r) return;
+
+  // If this recipe belongs to a group, put its siblings across the top so you
+  // can compare variants without closing and reopening.
+  const gTabs = document.getElementById('detail-group-tabs');
+  const g     = groupForRecipe(id);
+  if (gTabs) {
+    if (!g) { gTabs.style.display = 'none'; gTabs.innerHTML = ''; }
+    else {
+      gTabs.style.display = '';
+      gTabs.innerHTML = g.members.filter(m => getRecipe(m.id)).map(m => `
+        <button class="detail-group-tab${m.id === id ? ' is-active' : ''}"
+                data-member="${esc(m.id)}"
+                title="${esc(getRecipe(m.id).title)}">${esc(m.label || getRecipe(m.id).title)}</button>`).join('');
+      gTabs.querySelectorAll('.detail-group-tab').forEach(b =>
+        b.addEventListener('click', () => openRecipeDetail(b.dataset.member)));
+    }
+  }
 
   document.getElementById('detail-title').textContent       = r.title || '';
   document.getElementById('detail-description').textContent = r.description || '';
@@ -3531,6 +3652,174 @@ function importGuardBlocked() {
          'or the import may create a second copy of everything.';
 }
 
+// ─── Recipe groups ───────────────────────────────────────────────
+
+function getGroups() {
+  return Object.values(App.data.groups || {})
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+}
+function getGroup(id) { return App.data.groups?.[id] || null; }
+
+// recipeId -> group. Derived rather than stored on the recipe, so membership
+// has exactly one source of truth and can't drift out of sync.
+function groupIndex() {
+  const idx = {};
+  for (const g of Object.values(App.data.groups || {})) {
+    for (const m of (g.members || [])) idx[m.id] = g;
+  }
+  return idx;
+}
+function groupForRecipe(id) { return groupIndex()[id] || null; }
+
+// Longest run of words shared by every title, used as the group name.
+// "Traditional Swedish Egg Coffee Recipe" / "Must-Have Swedish Egg Coffee" /
+// "Indonesian Version of Swedish Egg Coffee" -> "Swedish Egg Coffee".
+function commonTitlePhrase(titles) {
+  if (titles.length < 2) return '';
+  const words = t => String(t || '').split(/\s+/).filter(Boolean);
+  const first = words(titles[0]);
+  let best = '';
+  for (let i = 0; i < first.length; i++) {
+    for (let j = first.length; j > i; j--) {
+      const phrase = first.slice(i, j).join(' ');
+      if (phrase.length <= best.length) continue;
+      const re = new RegExp(`(^|\\s)${phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$)`, 'i');
+      if (titles.every(t => re.test(t))) best = phrase;
+    }
+  }
+  // A single shared word is only a subject if it's a real noun. Length is the
+  // wrong test — it rejects "Chili" while accepting "Recipe" — so filter on
+  // the filler words that titles happen to share instead.
+  const FILLER = new Set(['recipe','recipes','the','a','an','and','or','with','of','for',
+                          'best','easy','quick','simple','homemade','classic','perfect',
+                          'my','our','style','version','made','make','how','to','in','on']);
+  const parts = best.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) return best;
+  return parts.length === 1 && !FILLER.has(parts[0].toLowerCase()) && parts[0].length >= 4
+    ? best : '';
+}
+
+// What's left of a title once the shared phrase is removed — the bit that
+// actually distinguishes this variant, which is what a tab should say.
+function deriveVariantLabel(title, phrase) {
+  let t = String(title || '');
+  if (phrase) {
+    const re = new RegExp(`(^|\\s)${phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$)`, 'i');
+    t = t.replace(re, ' ');
+  }
+  t = t.replace(/\brecipes?\b/gi, ' ')
+       .replace(/\bversion\s+of\b/gi, ' ')
+       .replace(/[\s\-–—:,]+$/, '')
+       .replace(/^[\s\-–—:,]+/, '')
+       .replace(/\s{2,}/g, ' ')
+       .trim();
+  return t || String(title || '').slice(0, 24);
+}
+
+function suggestGroupFromRecipes(recipes) {
+  const titles = recipes.map(r => r.title || '');
+  const phrase = commonTitlePhrase(titles);
+  return {
+    name: phrase || titles[0] || 'Group',
+    members: recipes.map(r => ({ id: r.id, label: deriveVariantLabel(r.title, phrase) })),
+  };
+}
+
+function saveGroup({ id, name, members }) {
+  if (!App.data.groups) App.data.groups = {};
+  const now = Date.now();
+  const gid = id || genId();
+  const existing = App.data.groups[gid];
+  App.data.groups[gid] = {
+    id: gid,
+    name: (name || '').trim() || 'Group',
+    members: members.filter(m => m.id && getRecipe(m.id)),
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  };
+  // A group of one isn't a group
+  if (App.data.groups[gid].members.length < 2) delete App.data.groups[gid];
+  scheduleSave();
+  return App.data.groups[gid] || null;
+}
+
+function deleteGroup(id) {
+  if (!App.data.groups?.[id]) return;
+  // Ungroup only — the recipes themselves are untouched.
+  delete App.data.groups[id];
+  scheduleSave();
+}
+
+// Drop a recipe from whatever group holds it, cleaning up if too few remain.
+function removeFromGroup(recipeId) {
+  const g = groupForRecipe(recipeId);
+  if (!g) return;
+  g.members = g.members.filter(m => m.id !== recipeId);
+  g.updatedAt = Date.now();
+  if (g.members.length < 2) delete App.data.groups[g.id];
+  scheduleSave();
+}
+
+// ─── Group editor ────────────────────────────────────────────────
+let _groupDraft = null;
+
+function openGroupEditor(groupId, recipeIds) {
+  const existing = groupId ? getGroup(groupId) : null;
+  if (existing) {
+    _groupDraft = { id: existing.id, name: existing.name,
+                    members: existing.members.filter(m => getRecipe(m.id)).map(m => ({ ...m })) };
+  } else {
+    const recipes = (recipeIds || []).map(getRecipe).filter(Boolean);
+    if (recipes.length < 2) { showToast('Pick at least two recipes to group.'); return; }
+    _groupDraft = { id: null, ...suggestGroupFromRecipes(recipes) };
+  }
+
+  document.getElementById('group-editor-title').textContent = existing ? 'Edit Group' : 'Group Recipes';
+  document.getElementById('group-name').value = _groupDraft.name;
+  document.getElementById('group-delete').style.display = existing ? '' : 'none';
+  renderGroupMembers();
+  openModal('modal-group-editor');
+}
+
+function renderGroupMembers() {
+  const wrap = document.getElementById('group-members');
+  if (!wrap || !_groupDraft) return;
+  wrap.innerHTML = _groupDraft.members.map((m, i) => {
+    const r = getRecipe(m.id);
+    return `
+      <div class="group-member-row">
+        <input class="input group-member-label" data-idx="${i}" value="${esc(m.label)}"
+               placeholder="Tab label"/>
+        <span class="group-member-title" title="${esc(r?.title || '')}">${esc(r?.title || '(missing)')}</span>
+        <button class="btn btn-icon group-member-remove" data-idx="${i}" title="Remove from group">✕</button>
+      </div>`;
+  }).join('');
+
+  wrap.querySelectorAll('.group-member-label').forEach(inp =>
+    inp.addEventListener('input', () => { _groupDraft.members[+inp.dataset.idx].label = inp.value; }));
+  wrap.querySelectorAll('.group-member-remove').forEach(btn =>
+    btn.addEventListener('click', () => {
+      _groupDraft.members.splice(+btn.dataset.idx, 1);
+      renderGroupMembers();
+    }));
+}
+
+function saveGroupFromEditor() {
+  if (!_groupDraft) return;
+  _groupDraft.name = document.getElementById('group-name')?.value || _groupDraft.name;
+  if (_groupDraft.members.length < 2) {
+    showToast('A group needs at least two recipes — remove it instead to ungroup.');
+    return;
+  }
+  const g = saveGroup(_groupDraft);
+  _groupDraft = null;
+  closeModal('modal-group-editor');
+  View.selectMode = false;
+  View.selectedRecipeIds.clear();
+  renderRecipes();
+  showToast(g ? `Grouped as “${g.name}” ✓` : 'Group removed');
+}
+
 // ─── In-app confirmation dialog ──────────────────────────────────
 // Replaces window.confirm, which renders in the browser's own chrome — wrong
 // typeface, wrong colours, and prefixed with the bare origin, which looks like
@@ -5897,6 +6186,36 @@ document.addEventListener('DOMContentLoaded', () => {
     closeModal('modal-mealie-import');
     openDedupeModal();
   });
+  document.getElementById('bulk-group-btn')?.addEventListener('click', () => {
+    const ids = [...View.selectedRecipeIds];
+    // Exclusive membership: regrouping has to be an explicit ungroup first, so
+    // a recipe can never appear under two collapsed cards.
+    const already = ids.filter(id => groupForRecipe(id));
+    if (already.length) {
+      showToast(`${already.length} of those ${already.length === 1 ? 'is' : 'are'} already in a group — ungroup ${already.length === 1 ? 'it' : 'them'} first.`);
+      return;
+    }
+    openGroupEditor(null, ids);
+  });
+  document.getElementById('group-save')?.addEventListener('click', saveGroupFromEditor);
+  document.getElementById('group-cancel')?.addEventListener('click', () => {
+    _groupDraft = null; closeModal('modal-group-editor');
+  });
+  document.getElementById('group-delete')?.addEventListener('click', async () => {
+    if (!_groupDraft?.id) return;
+    const g = getGroup(_groupDraft.id);
+    if (!await appConfirm({
+      title: 'Ungroup these recipes?',
+      message: `“${g?.name || 'This group'}” will be removed. The recipes themselves are kept and go back to showing individually.`,
+      confirmLabel: 'Ungroup', danger: true,
+    })) return;
+    deleteGroup(_groupDraft.id);
+    _groupDraft = null;
+    closeModal('modal-group-editor');
+    renderRecipes();
+    showToast('Ungrouped ✓');
+  });
+
   document.getElementById('confirm-ok')?.addEventListener('click', () => _settleConfirm(true));
   document.getElementById('confirm-cancel')?.addEventListener('click', () => _settleConfirm(false));
   document.getElementById('confirm-copy-btn')?.addEventListener('click', async () => {
