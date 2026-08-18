@@ -592,12 +592,17 @@ function renderBulkActionBar(visibleRecipes) {
   deleteBtn.onclick   = () => confirmBulkDelete();
 }
 
-function confirmBulkDelete() {
+async function confirmBulkDelete() {
   const ids = [...View.selectedRecipeIds];
   if (!ids.length) return;
   const titles = ids.map(id => getRecipe(id)?.title).filter(Boolean);
   const preview = titles.slice(0, 5).join(', ') + (titles.length > 5 ? `, +${titles.length - 5} more` : '');
-  if (!confirm(`Delete ${ids.length} recipe${ids.length !== 1 ? 's' : ''}?\n\n${preview}\n\nThis cannot be undone.`)) return;
+  const okBulk = await appConfirm({
+    title: `Delete ${ids.length} recipe${ids.length !== 1 ? 's' : ''}?`,
+    message: `${preview}\n\nThis cannot be undone.`,
+    confirmLabel: 'Delete', danger: true,
+  });
+  if (!okBulk) return;
 
   ids.forEach(id => deleteRecipe(id));
   View.selectedRecipeIds.clear();
@@ -1185,8 +1190,12 @@ function openRecipeDetail(id) {
 
   document.getElementById('detail-print-btn').onclick = () => printRecipe(id);
   document.getElementById('detail-edit-btn').onclick = () => { closeModal('modal-recipe-detail'); openRecipeEditor(id); };
-  document.getElementById('detail-delete-btn').onclick = () => {
-    if (confirm(`Delete "${r.title}"? This cannot be undone.`)) {
+  document.getElementById('detail-delete-btn').onclick = async () => {
+    if (await appConfirm({
+      title: 'Delete recipe?',
+      message: `“${r.title}” will be removed. This cannot be undone.`,
+      confirmLabel: 'Delete', danger: true,
+    })) {
       deleteRecipe(id);
       closeModal('modal-recipe-detail');
       renderRecipes();
@@ -2931,9 +2940,13 @@ function renderShoppingList() {
   });
 
   // Delete this custom list
-  document.getElementById('shopping-delete-list-btn')?.addEventListener('click', () => {
+  document.getElementById('shopping-delete-list-btn')?.addEventListener('click', async () => {
     if (!activeStore) return;
-    if (!confirm(`Delete the "${activeStore.name}" list? Items on it will become unassigned on the Default list. This cannot be undone.`)) return;
+    if (!await appConfirm({
+      title: `Delete "${activeStore.name}"?`,
+      message: 'Items on it become unassigned on the Default list. This cannot be undone.',
+      confirmLabel: 'Delete', danger: true,
+    })) return;
     deleteShoppingStore(activeStore.id);
     renderShoppingList();
   });
@@ -3518,6 +3531,52 @@ function importGuardBlocked() {
          'or the import may create a second copy of everything.';
 }
 
+// ─── In-app confirmation dialog ──────────────────────────────────
+// Replaces window.confirm, which renders in the browser's own chrome — wrong
+// typeface, wrong colours, and prefixed with the bare origin, which looks like
+// a phishing prompt rather than part of the app. It also can't show anything
+// selectable, so a dialog that needs to hand back an account token has nowhere
+// to put it.
+let _confirmResolve = null;
+
+function appConfirm({ title = 'Are you sure?', message = '', confirmLabel = 'Continue',
+                      cancelLabel = 'Cancel', danger = false, copyValue = '' } = {}) {
+  const t   = document.getElementById('confirm-title');
+  const m   = document.getElementById('confirm-message');
+  const ok  = document.getElementById('confirm-ok');
+  const no  = document.getElementById('confirm-cancel');
+  const cw  = document.getElementById('confirm-copy-wrap');
+  const cv  = document.getElementById('confirm-copy-value');
+  if (!t || !m || !ok) return Promise.resolve(window.confirm(message));  // fallback
+
+  t.textContent = title;
+  // Paragraph per blank-line-separated block, so multi-part messages read as
+  // prose rather than one run-on wall.
+  m.innerHTML = String(message).split(/\n\s*\n/)
+    .map(p => `<p>${esc(p).replace(/\n/g, '<br/>')}</p>`).join('');
+
+  ok.textContent = confirmLabel;
+  no.textContent = cancelLabel;
+  ok.className = 'btn ' + (danger ? 'btn-danger' : 'btn-primary');
+
+  if (cw) {
+    cw.style.display = copyValue ? '' : 'none';
+    if (copyValue && cv) cv.value = copyValue;
+  }
+
+  openModal('modal-confirm');
+  setTimeout(() => ok.focus(), 50);
+
+  return new Promise(resolve => { _confirmResolve = resolve; });
+}
+
+function _settleConfirm(result) {
+  closeModal('modal-confirm');
+  const r = _confirmResolve;
+  _confirmResolve = null;
+  if (r) r(result);
+}
+
 // ─── Duplicate recipe cleanup ────────────────────────────────────
 // Importing the same source library twice creates two records per recipe:
 // identity is a random genId(), so nothing links a Mealie recipe imported on
@@ -3701,10 +3760,14 @@ function dupeDescribe(r) {
   return bits.length ? bits.join(', ') : 'the earliest date';
 }
 
-function runDedupe() {
+async function runDedupe() {
   if (!_dupes?.length) return;
   const extra = _dupes.reduce((n, g) => n + g.drop.length, 0);
-  if (!confirm(`Remove ${extra} duplicate recipe records?\n\nMeal plans, cookbooks and templates will be repointed at the copy that's kept. This can't be undone — export a backup first if you haven't.`)) return;
+  if (!await appConfirm({
+    title: `Remove ${extra} duplicate record${extra === 1 ? '' : 's'}?`,
+    message: `Meal plans, cookbooks and templates will be repointed at the copy that's kept.\n\nThis can't be undone — export a backup first if you haven't.`,
+    confirmLabel: 'Merge duplicates', danger: true,
+  })) return;
 
   const res = mergeDuplicateRecipes(_dupes);
   _dupes = null;
@@ -4111,15 +4174,21 @@ function renderTemplateList() {
     btn.addEventListener('click', () => {
       const t = getTemplate(btn.dataset.id);
       if (!t) return;
-      if (!confirm(`Delete the template “${t.name}”? This won't change any meal plans.`)) return;
-      deleteTemplate(btn.dataset.id);
-      renderTemplateList();
-      showToast('Template deleted');
+      appConfirm({
+        title: 'Delete template?',
+        message: `“${t.name}” will be removed. This won't change any meal plans.`,
+        confirmLabel: 'Delete', danger: true,
+      }).then(go => {
+        if (!go) return;
+        deleteTemplate(btn.dataset.id);
+        renderTemplateList();
+        showToast('Template deleted');
+      });
     });
   });
 }
 
-function loadTemplateIntoPlanner(id) {
+async function loadTemplateIntoPlanner(id) {
   const tpl = getTemplate(id);
   if (!tpl) return;
   const mode = document.getElementById('tpl-fill-only')?.checked ? 'fill' : 'replace';
@@ -4129,10 +4198,13 @@ function loadTemplateIntoPlanner(id) {
   if (mode === 'replace') {
     const clashes = tpl.slots.filter(s =>
       slotEntries(App.data.mealplan?.[addWeeks(target, s.w)]?.[s.d]?.[s.slot]).length).length;
-    if (clashes && !confirm(
-      `“${tpl.name}” will overwrite ${clashes} slot${clashes === 1 ? '' : 's'} that already ` +
-      `${clashes === 1 ? 'has' : 'have'} meals planned, starting ${formatWeekLabel(target)}.\n\n` +
-      `Tick “Only fill empty slots” first if you'd rather keep them.`)) return;
+    if (clashes && !await appConfirm({
+      title: 'Overwrite planned meals?',
+      message: `“${tpl.name}” will replace ${clashes} slot${clashes === 1 ? '' : 's'} that already ` +
+        `${clashes === 1 ? 'has' : 'have'} meals planned, starting ${formatWeekLabel(target)}.\n\n` +
+        `Tick “Only fill empty slots” first if you'd rather keep them.`,
+      confirmLabel: 'Overwrite', danger: true,
+    })) return;
   }
 
   const res = applyTemplate(id, target, mode);
@@ -4234,8 +4306,12 @@ function saveCookbook() {
   if (_editingCookbookId) renderCookbookDetail(_editingCookbookId);
 }
 
-function deleteCookbook(id) {
-  if (!confirm('Delete this cookbook? The recipes themselves will not be affected.')) return;
+async function deleteCookbook(id) {
+  if (!await appConfirm({
+    title: 'Delete cookbook?',
+    message: 'The recipes themselves will not be affected.',
+    confirmLabel: 'Delete', danger: true,
+  })) return;
   delete App.data.cookbooks[id];
   scheduleSave();
   closeModal('modal-cookbook-detail');
@@ -5821,6 +5897,20 @@ document.addEventListener('DOMContentLoaded', () => {
     closeModal('modal-mealie-import');
     openDedupeModal();
   });
+  document.getElementById('confirm-ok')?.addEventListener('click', () => _settleConfirm(true));
+  document.getElementById('confirm-cancel')?.addEventListener('click', () => _settleConfirm(false));
+  document.getElementById('confirm-copy-btn')?.addEventListener('click', async () => {
+    const el = document.getElementById('confirm-copy-value');
+    if (!el?.value) return;
+    try { await navigator.clipboard.writeText(el.value); showToast('Copied ✓'); }
+    catch { el.select(); document.execCommand('copy'); showToast('Copied ✓'); }
+  });
+  // Escape must resolve the promise, not just hide the modal, or the caller
+  // waits forever and the app appears to hang.
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && _confirmResolve) _settleConfirm(false);
+  });
+
   document.getElementById('dedupe-go')?.addEventListener('click', runDedupe);
   document.getElementById('dedupe-cancel')?.addEventListener('click', () => closeModal('modal-dedupe'));
   document.getElementById('choice-paste-text')?.addEventListener('click', () => {
@@ -6016,14 +6106,22 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Danger zone buttons (wired fresh each time settings opens via delegation)
-  document.getElementById('modal-settings')?.addEventListener('click', e => {
+  document.getElementById('modal-settings')?.addEventListener('click', async e => {
     if (e.target.id === 'btn-clear-imported') {
-      if (confirm('Remove all Mealie-imported recipes? Hand-entered recipes will be kept.')) {
+      if (await appConfirm({
+        title: 'Remove imported recipes?',
+        message: 'Every recipe brought in from Mealie will be deleted. Hand-entered recipes are kept.',
+        confirmLabel: 'Remove imported', danger: true,
+      })) {
         clearImportedRecipes();
       }
     }
     if (e.target.id === 'btn-wipe-recipes') {
-      if (confirm('Permanently delete ALL recipes and meal plans? This cannot be undone.')) {
+      if (await appConfirm({
+        title: 'Delete everything?',
+        message: 'All recipes and meal plans will be permanently deleted. This cannot be undone.',
+        confirmLabel: 'Delete everything', danger: true,
+      })) {
         wipeAllRecipes();
       }
     }
@@ -6043,15 +6141,21 @@ document.addEventListener('DOMContentLoaded', () => {
     // address already exists. That left a device with a token account no route
     // to any other account at all.
     const token = App.data?.userToken;
-    const warn  = Auth.isTokenAccount() && token
-      ? `Switching accounts replaces the recipes on this device.\n\n` +
-        `This account's token is:\n\n${token}\n\n` +
-        `Write it down first — it is the only way back to this account's data. Continue?`
-      : `Switching accounts replaces the recipes on this device.\n\n` +
-        `They stay safe in sync and come back when you sign in again. Continue?`;
-    if (!confirm(warn)) { openModal('modal-settings'); return; }
-
-    Auth.showAccountSetup();
+    const isToken = Auth.isTokenAccount() && token;
+    appConfirm({
+      title: 'Switch or Create Account',
+      message: isToken
+        ? `Switching replaces the recipes on this device.\n\n` +
+          `Save this account's token first — it is the only way back to its data.`
+        : `Switching replaces the recipes on this device.\n\n` +
+          `They stay safe in sync and come back when you sign in again.`,
+      copyValue: isToken ? token : '',
+      confirmLabel: 'Switch account',
+      danger: true,
+    }).then(go => {
+      if (go) Auth.showAccountSetup();
+      else openModal('modal-settings');
+    });
   });
 
   // Mealie import tabs
