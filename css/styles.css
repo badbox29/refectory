@@ -2979,3 +2979,113 @@ body.modal-open { overflow: hidden; }
 .dupe-meta  { font-size: .76rem; color: var(--muted); margin-top: .1rem; }
 .storage-banner em { font-style: normal; font-weight: 700; }
 .storage-banner-actions { display: inline-flex; gap: .4rem; flex-wrap: wrap; }
+
+/* ── Recipe groups ───────────────────────────────────────────────
+   A group collapses its variants into one card. Tabs sit on the top edge so
+   the card reads as a stack of related things rather than a single recipe. */
+.recipe-card-group { position: relative; }
+.group-tabs {
+  display: flex;
+  gap: .15rem;
+  padding: .3rem .35rem 0;
+  background: var(--cream);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.group-tabs::-webkit-scrollbar { display: none; }
+.group-tab {
+  flex: 0 0 auto;
+  max-width: 8rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  color: var(--muted);
+  font-size: .72rem;
+  padding: .25rem .5rem;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background .12s, color .12s;
+}
+.group-tab:hover { background: rgba(0,0,0,.05); color: var(--ink); }
+.group-tab.is-active {
+  background: var(--white);
+  border-color: var(--border);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: inset 0 2px 0 var(--green-mid);
+}
+.group-edit {
+  margin-left: auto;
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: .78rem;
+  cursor: pointer;
+  padding: .2rem .3rem;
+  opacity: 0;
+  transition: opacity .12s;
+}
+.recipe-card-group:hover .group-edit { opacity: 1; }
+.group-edit:hover { color: var(--ink); }
+.group-name {
+  font-size: .68rem;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--green-mid);
+  font-weight: 700;
+  margin-bottom: .15rem;
+}
+
+/* Detail modal tabs */
+.detail-group-tabs {
+  display: flex;
+  gap: .25rem;
+  padding: .4rem .75rem 0;
+  background: var(--cream);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+.detail-group-tab {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  color: var(--muted);
+  font-size: .8rem;
+  padding: .35rem .6rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.detail-group-tab:hover { background: var(--white); }
+.detail-group-tab.is-active {
+  background: var(--white);
+  border-color: var(--border);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: inset 0 2px 0 var(--green-mid);
+}
+
+/* Group editor rows */
+.group-member-row {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin-bottom: .4rem;
+}
+.group-member-label { flex: 0 0 9rem; font-size: .85rem; }
+.group-member-title {
+  flex: 1;
+  min-width: 0;
+  font-size: .8rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.group-member-remove { flex: 0 0 auto; }
