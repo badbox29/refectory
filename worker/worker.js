@@ -15,6 +15,8 @@
  *   POST   /share               — Create a read-only, self-expiring meal plan link
  *   GET    /share/{id}          — Public meal plan page (no auth, no Origin check)
  *   GET    /scrape              — Proxy-fetch a URL and return HTML for recipe scraping
+ *                                  (falls back to Browser Run when a site refuses
+ *                                   a plain fetch; requires a BROWSER binding)
  *   POST   /auth/google         — Verify Google ID token
  *   POST   /auth/verify         — Re-verify stored Google credential at boot
  *   POST   /auth/migrate        — Token → Google migration (HMAC-authenticated)
@@ -28,8 +30,7 @@ const KV_BINDING          = 'REFECTORY_KV';
 const KV_TTL              = 60 * 60 * 24 * 1825; // 5 years, resets on every write
 const HMAC_SALT           = 'refectory-hmac-v1'; // must never change after deployment
 const MAX_BODY_SIZE       = 5 * 1024 * 1024;      // 5 MB — recipe collections can be large
-const AUTH_RATE_LIMIT     = 60;    // interactive sign-in attempts, per IP per window
-const VERIFY_RATE_LIMIT   = 200;   // boot-time session checks — unattended, cheap, own budget
+const AUTH_RATE_LIMIT     = 20;
 const AUTH_RATE_LIMIT_WIN = 3600;
 const RATE_LIMIT          = 120;
 const RATE_LIMIT_WINDOW   = 60;
@@ -70,24 +71,14 @@ function isValidToken(token) {
 
 // ── IP rate limiting (auth routes) ─────────────────────────────────────────
 
-// Fixed-slot window: the key carries the time bucket, so a counter genuinely
-// expires after AUTH_RATE_LIMIT_WIN instead of drifting on a doubled TTL.
-// Returns { ok, retryAfter?, remaining? }.
-async function checkIpRateLimit(env, ip, opts = {}) {
-  const limit  = opts.limit  || AUTH_RATE_LIMIT;
-  const win    = opts.window || AUTH_RATE_LIMIT_WIN;
-  const bucket = opts.bucket || 'auth';
-  const now    = Math.floor(Date.now() / 1000);
-  const slot   = Math.floor(now / win);
-  const kv     = env[KV_BINDING];
-  const key    = `rl:ip:${bucket}:${ip}:${slot}`;
-  const raw    = await kv.get(key, { type: 'text' });
-  const count  = raw ? parseInt(raw, 10) : 0;
-  if (count >= limit) {
-    return { ok: false, retryAfter: Math.max(1, (slot + 1) * win - now) };
-  }
-  await kv.put(key, String(count + 1), { expirationTtl: Math.max(60, win + 60) });
-  return { ok: true, remaining: limit - count - 1 };
+async function checkIpRateLimit(env, ip) {
+  const kv    = env[KV_BINDING];
+  const key   = `rl:ip:${ip}`;
+  const raw   = await kv.get(key, { type: 'text' });
+  const count = raw ? parseInt(raw, 10) : 0;
+  if (count >= AUTH_RATE_LIMIT) return false;
+  await kv.put(key, String(count + 1), { expirationTtl: AUTH_RATE_LIMIT_WIN * 2 });
+  return true;
 }
 
 // ── HMAC signing (mirrors auth.js exactly) ─────────────────────────────────
@@ -186,28 +177,9 @@ async function handleAuth(url, method, request, env, cors, ip) {
     }), 200, cors);
   }
 
-  // POST /auth/verify — boot-time session check. Fires unattended on nearly
-  // every boot (Google ID tokens live ~1h), so it gets its own generous budget
-  // rather than eating the interactive sign-in allowance.
-  if (url.pathname === '/auth/verify' && method === 'POST') {
-    const vrl = await checkIpRateLimit(env, ip, { bucket: 'verify', limit: VERIFY_RATE_LIMIT });
-    if (!vrl.ok) {
-      return respond(JSON.stringify({ ok: false, error: 'Too many requests — try again later' }),
-        429, { ...cors, 'Retry-After': String(vrl.retryAfter) });
-    }
-    let idToken;
-    try { idToken = (await request.json()).idToken; } catch { return respond(JSON.stringify({ error: 'Invalid body' }), 400, cors); }
-    if (!idToken) return respond(JSON.stringify({ error: 'idToken required' }), 400, cors);
-    const p = await verifyGoogleJWT(idToken, env.GOOGLE_CLIENT_ID);
-    if (!p) return respond(JSON.stringify({ ok: false, error: 'Token expired or invalid' }), 401, cors);
-    return respond(JSON.stringify({ ok: true, profile: p }), 200, cors);
-  }
-
-  // Remaining /auth/* routes are IP rate-limited
-  const rl = await checkIpRateLimit(env, ip);
-  if (!rl.ok) {
-    return respond(JSON.stringify({ error: 'Too many requests — try again later' }),
-      429, { ...cors, 'Retry-After': String(rl.retryAfter) });
+  // All /auth/* routes are IP rate-limited
+  if (!(await checkIpRateLimit(env, ip))) {
+    return respond(JSON.stringify({ error: 'Too many requests — try again later' }), 429, cors);
   }
 
   // POST /auth/google
@@ -218,6 +190,16 @@ async function handleAuth(url, method, request, env, cors, ip) {
     const p = await verifyGoogleJWT(idToken, env.GOOGLE_CLIENT_ID);
     if (!p) return respond(JSON.stringify({ error: 'Invalid or expired Google token' }), 401, cors);
     return respond(JSON.stringify({ ok: true, kvKey: `google:${p.sub}`, profile: p }), 200, cors);
+  }
+
+  // POST /auth/verify
+  if (url.pathname === '/auth/verify' && method === 'POST') {
+    let idToken;
+    try { idToken = (await request.json()).idToken; } catch { return respond(JSON.stringify({ error: 'Invalid body' }), 400, cors); }
+    if (!idToken) return respond(JSON.stringify({ error: 'idToken required' }), 400, cors);
+    const p = await verifyGoogleJWT(idToken, env.GOOGLE_CLIENT_ID);
+    if (!p) return respond(JSON.stringify({ ok: false, error: 'Token expired or invalid' }), 401, cors);
+    return respond(JSON.stringify({ ok: true, profile: p }), 200, cors);
   }
 
   // POST /auth/migrate — FIX: requires HMAC proof of old token ownership
@@ -387,6 +369,88 @@ async function writeLegacyPointer(parsed, newToken, env) {
     delete parsed._legacyToken;
   }
   return parsed;
+}
+
+// ── Scrape fetching ────────────────────────────────────────────────────────
+// The old User-Agent announced itself as "Refectory/1.0; recipe scraper" — a
+// self-identifying bot signature that needs no fingerprinting to filter. These
+// are the headers a real browser sends on a top-level navigation; the
+// Sec-Fetch-* set in particular is a cheap tell when absent.
+const SCRAPE_UAS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0',
+];
+
+function scrapeHeaders(targetUrl) {
+  let origin = '';
+  try { origin = new URL(targetUrl).origin + '/'; } catch {}
+  return {
+    'User-Agent': SCRAPE_UAS[Math.floor(Math.random() * SCRAPE_UAS.length)],
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': origin,
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+  };
+}
+
+// Statuses meaning "we were refused", not "the page is broken". 429 is excluded
+// on purpose — a rate limit clears on its own and spending a metered browser on
+// it would waste the allowance.
+const BLOCKED_STATUSES = [401, 403, 451, 503];
+
+// Browser Run wraps its payload: the body is {"success":true,"result":"<html>…"}
+// rather than raw HTML. Passing that through verbatim means the client parses a
+// JSON string as a document, finds no title and no structured data, and reports
+// "no recipe found" — a parse failure wearing the costume of a missing recipe.
+function unwrapBrowserBody(raw) {
+  if (!raw) return '';
+  const text = String(raw).trim();
+  if (text.startsWith('<')) return text;
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed === 'string') return parsed;
+    return parsed.result || parsed.html || parsed.content || '';
+  } catch {
+    return text;
+  }
+}
+
+// Some sites answer a browser with HTTP 200 and a courtesy page instead of the
+// article. That's a block wearing a success code, and treating it as a real
+// page sends the user hunting for a parser bug.
+function looksLikeBlockPage(html) {
+  if (!html) return true;
+  if (html.length > 4000) return false;
+  const hasTitle = /<title[^>]*>\s*\S/i.test(html);
+  if (hasTitle && html.length > 1500) return false;
+  return /access issue|access denied|are you a robot|enable javascript|unusual traffic|verify you are human|support@/i
+    .test(html) || !hasTitle;
+}
+
+// Fall back to a real headless browser. The cheap fetch is tried first and this
+// only runs when it comes back refused, because browser time is metered.
+// Returns null when the binding isn't configured, so the Worker keeps working
+// without it.
+async function fetchViaBrowser(env, targetUrl) {
+  if (!env || !env.BROWSER || typeof env.BROWSER.quickAction !== 'function') return null;
+  try {
+    const res    = await env.BROWSER.quickAction('content', { url: targetUrl });
+    const html   = unwrapBrowserBody(await res.text());
+    const msUsed = res.headers?.get?.('X-Browser-Ms-Used') || null;
+    // Order matters: a block page is often short, so the emptiness check has to
+    // be strictly "nothing came back" or it swallows the block signal.
+    if (!html) return null;
+    if (looksLikeBlockPage(html)) return { blocked: true, msUsed };
+    return { html, msUsed };
+  } catch (e) {
+    console.error('Browser Run fallback failed:', e && e.message);
+    return null;
+  }
 }
 
 // ── Meal plan sharing ──────────────────────────────────────────────────────
@@ -793,23 +857,51 @@ export default {
         }
         try {
           const res = await fetch(targetUrl, {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (compatible; Refectory/1.0; recipe scraper)',
-              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-              'Accept-Language': 'en-US,en;q=0.9',
-            },
+            headers: scrapeHeaders(targetUrl),
             redirect: 'follow',
             // cacheEverything is required for HTML to be cached at all; with it
             // off the cacheTtl below was a no-op.
             cf: { cacheTtl: 900, cacheEverything: true },
           });
-          if (!res.ok) return respond(JSON.stringify({ error: `Fetch failed: ${res.status}` }), 502, cors);
-          const html = await res.text();
-          // Return HTML — client does all the parsing
-          return new Response(JSON.stringify({ ok: true, html, finalUrl: res.url }), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json', ...cors },
-          });
+
+          if (res.ok) {
+            const html = await res.text();
+            return new Response(
+              JSON.stringify({ ok: true, html, finalUrl: res.url, via: 'fetch' }),
+              { status: 200, headers: { 'Content-Type': 'application/json', ...cors } }
+            );
+          }
+
+          // Refused — try a real browser before giving up.
+          if (BLOCKED_STATUSES.includes(res.status)) {
+            const browsed = await fetchViaBrowser(env, targetUrl);
+            if (browsed && browsed.blocked) {
+              // A real browser was served a block page too — the refusal is by
+              // IP reputation, not headers, so nothing here gets past it.
+              return respond(JSON.stringify({
+                error: `Fetch failed: ${res.status} — site blocked automated access`,
+                blocked: true, upstreamStatus: res.status,
+                browserTried: true, browserMs: browsed.msUsed,
+              }), 502, cors);
+            }
+            if (browsed) {
+              return new Response(
+                JSON.stringify({ ok: true, html: browsed.html, finalUrl: targetUrl,
+                                 via: 'browser', browserMs: browsed.msUsed }),
+                { status: 200, headers: { 'Content-Type': 'application/json', ...cors } }
+              );
+            }
+            return respond(JSON.stringify({
+              error: `Fetch failed: ${res.status} — site blocked automated access`,
+              blocked: true, upstreamStatus: res.status,
+            }), 502, cors);
+          }
+
+          return respond(JSON.stringify({
+            error: `Fetch failed: ${res.status}`,
+            upstreamStatus: res.status,
+          }), 502, cors);
+
         } catch(e) {
           return respond(JSON.stringify({ error: `Could not fetch URL: ${e.message}` }), 502, cors);
         }
