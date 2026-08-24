@@ -2261,10 +2261,15 @@ function updatePlanDropTarget(x, y) {
   }
   PlanDrag.dropIdx = idx;
 
+  // An empty slot now renders a .plan-stack around its + button, so bail before
+  // drawing a line into it — there's nothing to sit between, and the cell
+  // highlight already says where the meal is going.
+  if (!chips.length) return;
+
   const line = document.createElement('div');
   line.className = 'plan-drop-line';
   const stack = cell.querySelector('.plan-stack');
-  if (!stack) { cell.prepend(line); return; }
+  if (!stack) return;
   if (idx >= chips.length) stack.appendChild(line);
   else stack.insertBefore(line, chips[idx]);
 }
@@ -2419,8 +2424,15 @@ function renderPlanAddWrap(ctx, slot, mobile, compact) {
          <button class="plan-dice plan-dice-mobile" ${d} title="Random recipe">🎲 Suggest</button>
          <button class="plan-leftover plan-leftover-mobile" ${d} title="Leftovers">♻ Leftovers</button>
        </div>`
-    : `<div class="plan-add-wrap">
-         <button class="plan-add" ${d} title="Add recipe">+</button>
+    // Desktop empty slot mirrors the anatomy of a filled one — a card-sized
+    // target in a .plan-stack, with the slim dice/leftovers strip beneath —
+    // so the cell is the same height whether it holds nothing or one meal.
+    // Sizing an empty slot from its buttons instead made every row snap taller
+    // or shorter as its last meal came and went.
+    : `<div class="plan-stack">
+         <button class="plan-add plan-add-card" ${d} title="Add recipe">+</button>
+       </div>
+       <div class="plan-add-wrap plan-add-wrap-compact plan-add-wrap-empty">
          <button class="plan-dice" ${d} title="Random recipe">🎲</button>
          <button class="plan-leftover" ${d} title="Leftovers">♻</button>
        </div>`;
