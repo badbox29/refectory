@@ -289,10 +289,35 @@ function startSyncPing() {
 function showToast(msg, duration = 3000) {
   const el = document.getElementById('toast');
   if (!el) return;
-  el.textContent = msg;
+  el.textContent = msg;   // also clears any markup a previous undo toast left
+  el.classList.remove('has-action');
   el.classList.add('show');
   clearTimeout(el._timer);
   el._timer = setTimeout(() => el.classList.remove('show'), duration);
+}
+
+// A toast with one action on it. Used for moves in the planner, where the
+// mistake is cheap to make and annoying to reverse by hand.
+function showUndoToast(msg, onUndo, duration = 6000) {
+  const el = document.getElementById('toast');
+  if (!el) { showToast(msg); return; }
+  el.textContent = '';
+  const text = document.createElement('span');
+  text.textContent = msg;
+  const btn = document.createElement('button');
+  btn.className = 'toast-action';
+  btn.textContent = 'Undo';
+  btn.addEventListener('click', () => {
+    clearTimeout(el._timer);
+    el.classList.remove('show', 'has-action');
+    el.textContent = '';
+    onUndo();
+    showToast('Move undone');
+  });
+  el.append(text, btn);
+  el.classList.add('has-action', 'show');
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => { el.classList.remove('show', 'has-action'); el.textContent = ''; }, duration);
 }
 
 // ─── Modal helpers ────────────────────────────────────────────────
@@ -400,9 +425,81 @@ function addWeeks(weekKey, n) {
   return getISOWeekKey(weekStartDate(weekKey, n));
 }
 
+// Storage-space day names. mealplan[weekKey][dayIdx] is Monday-anchored and
+// stays that way — see the display helpers below for what the planner shows.
 const DAY_NAMES  = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const FULL_DAYS  = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 const MEAL_SLOTS = ['breakfast', 'lunch', 'dinner', 'snack'];
+
+// ─── Display-space week (Sunday-anchored) ────────────────────────
+// The planner reads as a wall calendar: Sunday first. Storage does not change
+// — mealplan is still keyed by ISO week with Monday = index 0, which is what
+// every date-driven consumer (shopping list, share links, Mealie import,
+// Today's Meals) already computes for itself. Only the planner grid is
+// re-windowed, so the leftmost column is the Sunday *before* that ISO week's
+// Monday and therefore lives in the previous week key.
+//
+// Nothing outside these helpers should have to know that. Anything that walks
+// a planner week goes through plannerColumns() and uses the storage
+// coordinates it hands back.
+
+const COL_DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const COL_FULL_DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+// The week key whose Sun–Sat window contains `date`. Differs from
+// getISOWeekKey only on Sundays: ISO puts a Sunday at the end of the week it
+// closes, but on screen that Sunday opens the week ahead. Without this, "This
+// Week" on a Sunday would show the week that just ended.
+function displayWeekKeyFor(date = new Date()) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  const mon = new Date(d);
+  mon.setDate(d.getDate() - d.getDay() + 1);   // the Monday inside this window
+  return getISOWeekKey(mon);
+}
+
+// The Sunday that opens the displayed window for a week key.
+function displayWeekStart(weekKey, offset = 0) {
+  const mon = weekStartDate(weekKey, offset);
+  const sun = new Date(mon);
+  sun.setDate(mon.getDate() - 1);
+  return sun;
+}
+
+// The seven planner columns, left to right, Sun → Sat. Each carries the
+// storage coordinates it reads and writes, so a caller never computes a day
+// index itself.
+function plannerColumns(weekKey) {
+  const sun  = displayWeekStart(weekKey);
+  const prev = addWeeks(weekKey, -1);
+  const cols = [];
+  for (let col = 0; col < 7; col++) {
+    const date = new Date(sun);
+    date.setDate(sun.getDate() + col);
+    cols.push({
+      col,
+      date,
+      name:     COL_DAY_NAMES[col],
+      fullName: COL_FULL_DAYS[col],
+      // Sunday is index 6 of the preceding ISO week; Mon–Sat are 0–5 of this one.
+      weekKey:  col === 0 ? prev : weekKey,
+      dayIdx:   col === 0 ? 6    : col - 1,
+    });
+  }
+  return cols;
+}
+
+function plannerColumn(weekKey, col) {
+  return plannerColumns(weekKey)[Math.max(0, Math.min(6, col | 0))];
+}
+
+// Calendar date a display column refers to.
+function displaySlotDate(weekKey, col) {
+  const d = displayWeekStart(weekKey);
+  d.setDate(d.getDate() + col);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
 // Slots with no real position in the day — available as a same-day leftovers
 // source regardless of where they sit in MEAL_SLOTS.
 const ANYTIME_SLOTS = ['snack'];
@@ -463,9 +560,9 @@ function slotRecipeIds(v) {
 // ─── Current view state ───────────────────────────────────────────
 
 const View = {
-  currentWeek:   getISOWeekKey(),
+  currentWeek:   displayWeekKeyFor(),
   activeSection: 'recipes',  // 'recipes' | 'planner' | 'shopping' | 'cookbooks'
-  plannerDay:    new Date().getDay() === 0 ? 6 : new Date().getDay() - 1, // 0=Mon…6=Sun, default today
+  plannerDay:    new Date().getDay(),  // display column 0=Sun…6=Sat, default today
   recipeSearch:  '',
   recipeTags:    [],          // selected tag filters
   editingId:     null,        // recipe id being edited
@@ -1747,6 +1844,36 @@ function getWeekPlan(weekKey) {
   return App.data.mealplan?.[weekKey] || {};
 }
 
+// Recipe ids planned across one or more *display* weeks. Walking the stored
+// week object directly would be off by a day at each end now that a display
+// window runs Sun–Sat: it would pull in the Monday past the end of the
+// horizon and miss the Sunday at the start of it.
+//
+// Leftovers are already-cooked food and fend nights aren't a meal, so neither
+// contributes anything to buy.
+function plannedRecipeIds(weekKeys) {
+  const ids = new Set();
+  for (const wk of weekKeys) {
+    for (const c of plannerColumns(wk)) {
+      const day = App.data.mealplan?.[c.weekKey]?.[c.dayIdx];
+      if (!day) continue;
+      for (const v of Object.values(day)) {
+        for (const entry of slotEntries(v)) {
+          if (isLeftoverEntry(entry) || isFendEntry(entry)) continue;
+          const id = slotRecipeId(entry);
+          if (id) ids.add(id);
+        }
+      }
+    }
+  }
+  return ids;
+}
+
+// The weeks the shopping list covers: the one on screen plus the next.
+function shoppingHorizonWeeks() {
+  return [View.currentWeek, addWeeks(View.currentWeek, 1)];
+}
+
 
 // ─── Today's Meals widget ──────────────────────────────────────────
 
@@ -1837,10 +1964,13 @@ function pickRandomRecipe(excludeIds = []) {
 }
 
 function suggestRandomMealSlot(weekKey, dayIdx, slot) {
-  // Exclude recipes already planned this week
-  const plan = getWeekPlan(weekKey);
+  // Exclude recipes already planned this week. "This week" means the Sun–Sat
+  // window on screen, not the storage week — on a Sunday those differ, and
+  // the point of the exclusion is to avoid repeats she can actually see.
   const usedIds = [];
-  for (const day of Object.values(plan)) {
+  for (const c of plannerColumns(displayWeekKeyFor(slotDate(weekKey, dayIdx)))) {
+    const day = App.data.mealplan?.[c.weekKey]?.[c.dayIdx];
+    if (!day) continue;
     for (const v of Object.values(day)) usedIds.push(...slotRecipeIds(v));
   }
 
@@ -1911,14 +2041,346 @@ function removeMealSlotEntry(weekKey, dayIdx, slot, idx) {
 }
 
 
+// ─── Moving meals between slots ──────────────────────────────────
+// Deliberately not built on setMealSlot: that stamps lastCooked, and dragging
+// a meal from Tuesday to Wednesday is re-planning it, not cooking it. Same
+// reasoning as leftovers entries and template loads.
+
+function planDayRef(weekKey, dayIdx, create = false) {
+  if (create) {
+    if (!App.data.mealplan) App.data.mealplan = {};
+    if (!App.data.mealplan[weekKey]) App.data.mealplan[weekKey] = {};
+    if (!App.data.mealplan[weekKey][dayIdx]) App.data.mealplan[weekKey][dayIdx] = {};
+  }
+  return App.data.mealplan?.[weekKey]?.[dayIdx] || null;
+}
+
+// Write a slot from a list of entries, pruning the day and week when they
+// empty out. Several render paths test a day for truthiness to decide whether
+// anything is planned, so leaving `{}` behind would light up empty days.
+function writePlanSlot(weekKey, dayIdx, slot, entries) {
+  const day = planDayRef(weekKey, dayIdx, true);
+  const packed = packSlot(entries);
+  if (packed === null) delete day[slot]; else day[slot] = packed;
+  if (!Object.keys(day).length) delete App.data.mealplan[weekKey][dayIdx];
+  if (!Object.keys(App.data.mealplan[weekKey]).length) delete App.data.mealplan[weekKey];
+}
+
+// from / to are { weekKey, dayIdx, slot, idx }. `to.idx` is the position to
+// insert at; null or undefined appends. Pass { copy: true } to duplicate
+// rather than move.
+function moveMealEntry(from, to, opts = {}) {
+  const src = planDayRef(from.weekKey, from.dayIdx);
+  if (!src) return false;
+  const srcEntries = slotEntries(src[from.slot]);
+  const entry = srcEntries[from.idx];
+  if (!entry) return false;
+
+  const sameSlot = from.weekKey === to.weekKey
+                && String(from.dayIdx) === String(to.dayIdx)
+                && from.slot === to.slot;
+
+  if (sameSlot) {
+    const list = srcEntries.slice();
+    let at = to.idx == null ? list.length : to.idx;
+    if (!opts.copy) {
+      list.splice(from.idx, 1);
+      // Removing the entry shifts everything after it down one, so an
+      // insertion point past the old position has to come back by one too.
+      if (at > from.idx) at--;
+    }
+    at = Math.max(0, Math.min(at, list.length));
+    list.splice(at, 0, entry);
+    writePlanSlot(from.weekKey, from.dayIdx, from.slot, list);
+  } else {
+    if (!opts.copy) {
+      const list = srcEntries.slice();
+      list.splice(from.idx, 1);
+      writePlanSlot(from.weekKey, from.dayIdx, from.slot, list);
+    }
+    // Re-read the target after the source write: if source and target share a
+    // day, that write may have pruned the day object out from under us.
+    const dstDay = planDayRef(to.weekKey, to.dayIdx, true);
+    const dstList = slotEntries(dstDay[to.slot]);
+    const at = to.idx == null ? dstList.length : Math.max(0, Math.min(to.idx, dstList.length));
+    dstList.splice(at, 0, entry);
+    writePlanSlot(to.weekKey, to.dayIdx, to.slot, dstList);
+  }
+
+  scheduleSave();
+  renderTodaysMealsTrigger();
+  return true;
+}
+
+// Snapshot just the weeks a move touches, so an undo can put them back
+// without holding a copy of the whole plan.
+function snapshotWeeks(weekKeys) {
+  const snap = {};
+  for (const wk of new Set(weekKeys)) {
+    const w = App.data.mealplan?.[wk];
+    snap[wk] = w ? JSON.parse(JSON.stringify(w)) : null;
+  }
+  return snap;
+}
+
+function restoreWeeks(snap) {
+  if (!App.data.mealplan) App.data.mealplan = {};
+  for (const [wk, val] of Object.entries(snap)) {
+    if (val === null) delete App.data.mealplan[wk];
+    else App.data.mealplan[wk] = val;
+  }
+  scheduleSave();
+  renderTodaysMealsTrigger();
+}
+
+// ─── Planner drag and drop ───────────────────────────────────────
+// Built on Pointer Events rather than HTML5 drag-and-drop. HTML5 DnD never
+// fires on touch, so going that route would mean a second, parallel input
+// system the day this needs to work on a phone. Pointer Events cover both;
+// for now touch is turned away at the door by the pointerType guard in
+// onPlanPointerDown, which leaves scrolling on the mobile planner completely
+// untouched. Enabling mobile later means relaxing that guard, adding a
+// long-press delay so a drag doesn't fight the scroll, and registering the
+// day-tab strip as a drop target — additive, with none of this rewritten.
+
+const PLAN_DRAG_THRESHOLD = 4;    // px of movement before it counts as a drag
+const PLAN_EDGE_SCROLL    = 48;   // px from the edge that starts autoscroll
+
+const PlanDrag = {
+  pending:      null,   // { el, cell, x, y, pointerId }
+  active:       false,
+  from:         null,
+  ghost:        null,
+  srcEl:        null,
+  dropCell:     null,
+  dropIdx:      null,
+  copy:         false,
+  suppressClick: false,
+  scrollTimer:  null,
+};
+
+function planCoordsFrom(el) {
+  if (!el) return null;
+  const { wk, day, slot, idx } = el.dataset;
+  if (wk == null || day == null || !slot) return null;
+  return { weekKey: wk, dayIdx: Number(day), slot, idx: idx == null ? null : Number(idx) };
+}
+
+function attachPlanDrag(root) {
+  if (!root || root._planDragBound) return;
+  root._planDragBound = true;
+  root.addEventListener('pointerdown', onPlanPointerDown);
+}
+
+function onPlanPointerDown(e) {
+  // Desktop only for now. Touch and pen fall through untouched so the mobile
+  // planner keeps scrolling normally.
+  if (e.pointerType !== 'mouse' || e.button !== 0) return;
+  if (e.target.closest('.plan-remove, .plan-add, .plan-dice, .plan-leftover')) return;
+
+  const el = e.target.closest('.plan-recipe');
+  if (!el) return;
+  const from = planCoordsFrom(el);
+  if (!from || from.idx == null) return;
+
+  PlanDrag.pending = { el, x: e.clientX, y: e.clientY, pointerId: e.pointerId };
+  PlanDrag.from    = from;
+  PlanDrag.suppressClick = false;
+
+  window.addEventListener('pointermove', onPlanPointerMove);
+  window.addEventListener('pointerup', onPlanPointerUp);
+  window.addEventListener('pointercancel', cancelPlanDrag);
+  window.addEventListener('keydown', onPlanDragKey);
+}
+
+function onPlanPointerMove(e) {
+  if (!PlanDrag.pending) return;
+  PlanDrag.copy = e.altKey;
+
+  if (!PlanDrag.active) {
+    const dx = e.clientX - PlanDrag.pending.x;
+    const dy = e.clientY - PlanDrag.pending.y;
+    if (Math.hypot(dx, dy) < PLAN_DRAG_THRESHOLD) return;
+    startPlanDrag();
+  }
+
+  e.preventDefault();
+  positionPlanGhost(e.clientX, e.clientY);
+  updatePlanDropTarget(e.clientX, e.clientY);
+  edgeScrollPlanner(e.clientX);
+}
+
+function startPlanDrag() {
+  const el = PlanDrag.pending.el;
+  PlanDrag.active = true;
+  PlanDrag.srcEl  = el;
+
+  const rect  = el.getBoundingClientRect();
+  const ghost = el.cloneNode(true);
+  ghost.classList.add('plan-drag-ghost');
+  ghost.classList.remove('plan-recipe-mobile');
+  ghost.querySelector('.plan-remove')?.remove();
+  ghost.style.width  = `${rect.width}px`;
+  ghost.style.height = `${rect.height}px`;
+  ghost._offsetX = PlanDrag.pending.x - rect.left;
+  ghost._offsetY = PlanDrag.pending.y - rect.top;
+  document.body.appendChild(ghost);
+  PlanDrag.ghost = ghost;
+
+  el.classList.add('plan-drag-source');
+  document.body.classList.add('plan-dragging');
+}
+
+function positionPlanGhost(x, y) {
+  const g = PlanDrag.ghost;
+  if (!g) return;
+  g.style.left = `${x - g._offsetX}px`;
+  g.style.top  = `${y - g._offsetY}px`;
+  g.classList.toggle('plan-drag-ghost-copy', !!PlanDrag.copy);
+}
+
+// Work out which cell is under the cursor and where in its stack the entry
+// would land. The ghost is pointer-events:none, so it never hit-tests itself.
+function updatePlanDropTarget(x, y) {
+  const under = document.elementFromPoint(x, y);
+  const cell  = under?.closest?.('.plan-cell');
+
+  if (cell !== PlanDrag.dropCell) {
+    PlanDrag.dropCell?.classList.remove('plan-cell-drop');
+    cell?.classList.add('plan-cell-drop');
+    PlanDrag.dropCell = cell || null;
+  }
+  clearPlanDropLine();
+  if (!cell) { PlanDrag.dropIdx = null; return; }
+
+  const chips = [...cell.querySelectorAll('.plan-recipe')];
+  let idx = chips.length;
+  for (let i = 0; i < chips.length; i++) {
+    const r = chips[i].getBoundingClientRect();
+    if (y < r.top + r.height / 2) { idx = i; break; }
+  }
+  PlanDrag.dropIdx = idx;
+
+  const line = document.createElement('div');
+  line.className = 'plan-drop-line';
+  const stack = cell.querySelector('.plan-stack');
+  if (!stack) { cell.prepend(line); return; }
+  if (idx >= chips.length) stack.appendChild(line);
+  else stack.insertBefore(line, chips[idx]);
+}
+
+function clearPlanDropLine() {
+  document.querySelectorAll('.plan-drop-line').forEach(n => n.remove());
+}
+
+// Nudge the week grid sideways when dragging near its edge — the table
+// scrolls horizontally on narrower desktop windows.
+function edgeScrollPlanner(x) {
+  const wrap = document.querySelector('.planner-table-wrap');
+  clearInterval(PlanDrag.scrollTimer);
+  if (!wrap || wrap.scrollWidth <= wrap.clientWidth) return;
+  const r = wrap.getBoundingClientRect();
+  let dir = 0;
+  if (x < r.left + PLAN_EDGE_SCROLL)  dir = -1;
+  if (x > r.right - PLAN_EDGE_SCROLL) dir = 1;
+  if (!dir) return;
+  PlanDrag.scrollTimer = setInterval(() => { wrap.scrollLeft += dir * 14; }, 16);
+}
+
+function onPlanDragKey(e) {
+  if (e.key === 'Escape') cancelPlanDrag();
+  if (PlanDrag.active && (e.key === 'Alt' || e.altKey !== PlanDrag.copy)) {
+    PlanDrag.copy = e.altKey;
+    PlanDrag.ghost?.classList.toggle('plan-drag-ghost-copy', !!PlanDrag.copy);
+  }
+}
+
+function onPlanPointerUp() {
+  if (!PlanDrag.active) { teardownPlanDrag(); return; }
+
+  const cell = PlanDrag.dropCell;
+  const to   = cell ? planCoordsFrom(cell) : null;
+  const from = PlanDrag.from;
+  const copy = PlanDrag.copy;
+  const idx  = PlanDrag.dropIdx;
+
+  // A click handler fires after pointerup on the source chip; without this it
+  // would open the recipe every time she finishes a drag.
+  PlanDrag.suppressClick = true;
+  setTimeout(() => { PlanDrag.suppressClick = false; }, 0);
+
+  teardownPlanDrag();
+  if (!to || !from) { renderPlanner(); return; }
+
+  // Dropping an entry back where it started is a no-op, not a move.
+  const unchanged = from.weekKey === to.weekKey
+                 && from.dayIdx === to.dayIdx
+                 && from.slot === to.slot
+                 && (idx === from.idx || idx === from.idx + 1);
+  if (unchanged && !copy) { renderPlanner(); return; }
+
+  const before = snapshotWeeks([from.weekKey, to.weekKey]);
+  if (!moveMealEntry(from, { ...to, idx }, { copy })) { renderPlanner(); return; }
+  renderPlanner();
+
+  const label = copy ? 'Copied' : 'Moved';
+  showUndoToast(`${label} to ${planDropLabel(to)}`, () => {
+    restoreWeeks(before);
+    renderPlanner();
+  });
+}
+
+// "Wed dinner" — enough to confirm where it landed without reading the grid.
+function planDropLabel(to) {
+  const d = slotDate(to.weekKey, to.dayIdx);
+  return `${d.toLocaleDateString('en-US', { weekday: 'short' })} ${to.slot}`;
+}
+
+function cancelPlanDrag() {
+  const wasActive = PlanDrag.active;
+  teardownPlanDrag();
+  if (wasActive) renderPlanner();
+}
+
+function teardownPlanDrag() {
+  clearInterval(PlanDrag.scrollTimer);
+  clearPlanDropLine();
+  PlanDrag.ghost?.remove();
+  PlanDrag.srcEl?.classList.remove('plan-drag-source');
+  PlanDrag.dropCell?.classList.remove('plan-cell-drop');
+  document.body.classList.remove('plan-dragging');
+
+  PlanDrag.pending = null;
+  PlanDrag.active  = false;
+  PlanDrag.from    = null;
+  PlanDrag.ghost   = null;
+  PlanDrag.srcEl   = null;
+  PlanDrag.dropCell = null;
+  PlanDrag.dropIdx = null;
+  PlanDrag.copy    = false;
+
+  window.removeEventListener('pointermove', onPlanPointerMove);
+  window.removeEventListener('pointerup', onPlanPointerUp);
+  window.removeEventListener('pointercancel', cancelPlanDrag);
+  window.removeEventListener('keydown', onPlanDragKey);
+}
+
 // ─── Planner chip rendering ──────────────────────────────────────
 // One chip per entry. `idx` is the entry's position in the slot so the remove
 // button can take out just that one and leave the rest of the day intact.
-function renderPlanChip(entry, idx, di, slot, mobile) {
+// `ctx` is a plannerColumns() entry — it carries both the display column and
+// the storage coordinates, so chips and buttons can be addressed without the
+// handler having to re-derive which week a Sunday belongs to.
+function planCoordAttrs(ctx, slot) {
+  return `data-wk="${esc(ctx.weekKey)}" data-day="${ctx.dayIdx}" data-col="${ctx.col}" data-slot="${slot}"`;
+}
+
+function renderPlanChip(entry, idx, ctx, slot, mobile) {
   const cls  = mobile ? ' plan-recipe-mobile' : '';
-  const rm   = `<button class="plan-remove" data-day="${di}" data-slot="${slot}" data-idx="${idx}" title="Remove">✕</button>`;
+  const coords = planCoordAttrs(ctx, slot);
+  const rm   = `<button class="plan-remove" ${coords} data-idx="${idx}" title="Remove">✕</button>`;
   if (isFendEntry(entry)) {
-    return `<div class="plan-recipe${cls} plan-recipe-fend">
+    return `<div class="plan-recipe${cls} plan-recipe-fend" ${coords} data-idx="${idx}">
               <div class="plan-recipe-img plan-recipe-img-fend">${PLACEHOLDER_ART}</div>
               <span class="fend-badge">${FEND_LABEL}</span>
               ${rm}
@@ -1928,7 +2390,7 @@ function renderPlanChip(entry, idx, di, slot, mobile) {
   const r   = rid ? getRecipe(rid) : null;
   if (!r) return '';
   const isLeft = isLeftoverEntry(entry);
-  return `<div class="plan-recipe${cls}${isLeft ? ' plan-recipe-leftover' : ''}" data-id="${esc(rid)}">
+  return `<div class="plan-recipe${cls}${isLeft ? ' plan-recipe-leftover' : ''}" data-id="${esc(rid)}" ${coords} data-idx="${idx}">
             <div class="plan-recipe-img" data-plan-img="${esc(rid)}"></div>
             <div class="plan-recipe-img-placeholder">${PLACEHOLDER_ART}</div>
             ${isLeft ? `<span class="leftovers-badge">${LEFTOVERS_LABEL}</span>` : ''}
@@ -1940,10 +2402,10 @@ function renderPlanChip(entry, idx, di, slot, mobile) {
 // The add / dice / leftovers controls. Shown full-size on an empty slot, and
 // as a slim strip under existing chips so a second meal can be added to a day
 // that already has one planned.
-function renderPlanAddWrap(di, slot, mobile, compact) {
+function renderPlanAddWrap(ctx, slot, mobile, compact) {
   const m = mobile ? '-mobile' : '';
   const c = compact ? ' plan-add-wrap-compact' : '';
-  const d = `data-day="${di}" data-slot="${slot}"`;
+  const d = planCoordAttrs(ctx, slot);
   if (compact) {
     return `<div class="plan-add-wrap${m ? ' plan-add-wrap-mobile' : ''}${c}">
               <button class="plan-add plan-add${m}" ${d} title="Add another">+</button>
@@ -1964,12 +2426,12 @@ function renderPlanAddWrap(di, slot, mobile, compact) {
        </div>`;
 }
 
-function renderPlanSlot(entries, di, slot, mobile) {
-  if (!entries.length) return renderPlanAddWrap(di, slot, mobile, false);
+function renderPlanSlot(entries, ctx, slot, mobile) {
+  if (!entries.length) return renderPlanAddWrap(ctx, slot, mobile, false);
   return `<div class="plan-stack${entries.length > 1 ? ' plan-stack-multi' : ''}">
-            ${entries.map((e, i) => renderPlanChip(e, i, di, slot, mobile)).join('')}
+            ${entries.map((e, i) => renderPlanChip(e, i, ctx, slot, mobile)).join('')}
           </div>
-          ${renderPlanAddWrap(di, slot, mobile, true)}`;
+          ${renderPlanAddWrap(ctx, slot, mobile, true)}`;
 }
 
 // ─── Mobile planner (single-day view) ────────────────────────────
@@ -1979,23 +2441,21 @@ function isMobilePlanner() {
 }
 
 function renderPlannerMobile() {
-  const wk    = View.currentWeek;
-  const start = weekStartDate(wk);
-  const plan  = getWeekPlan(wk);
-  const di    = View.plannerDay;
+  const wk   = View.currentWeek;
+  const cols = plannerColumns(wk);
+  const di   = Math.max(0, Math.min(6, View.plannerDay | 0));
 
   // Day tabs
-  const todayIdx = todayIndexIn(wk);
+  const todayCol = todayColumnIn(wk);
   const tabsEl = document.getElementById('planner-day-tabs');
   if (tabsEl) {
-    tabsEl.innerHTML = DAY_NAMES.map((name, i) => {
-      const date = new Date(start);
-      date.setDate(start.getDate() + i);
-      const hasRecipe = MEAL_SLOTS.some(slot => plan[i]?.[slot]);
-      const isToday   = i === todayIdx;
-      return `<button class="planner-day-tab${i === di ? ' active' : ''}${isToday ? ' is-today' : ''}" data-di="${i}"${isToday ? ' title="Today"' : ''}>
-        <span class="planner-day-tab-name">${name.slice(0,1)}</span>
-        <span class="planner-day-tab-date">${date.getDate()}</span>
+    tabsEl.innerHTML = cols.map(c => {
+      const day = App.data.mealplan?.[c.weekKey]?.[c.dayIdx];
+      const hasRecipe = MEAL_SLOTS.some(slot => day?.[slot]);
+      const isToday   = c.col === todayCol;
+      return `<button class="planner-day-tab${c.col === di ? ' active' : ''}${isToday ? ' is-today' : ''}" data-di="${c.col}"${isToday ? ' title="Today"' : ''}>
+        <span class="planner-day-tab-name">${c.name.slice(0,1)}</span>
+        <span class="planner-day-tab-date">${c.date.getDate()}</span>
         ${hasRecipe ? '<span class="planner-day-tab-dot"></span>' : ''}
       </button>`;
     }).join('');
@@ -2011,17 +2471,17 @@ function renderPlannerMobile() {
   const dayEl = document.getElementById('planner-mobile-day');
   if (!dayEl) return;
 
-  const date = new Date(start);
-  date.setDate(start.getDate() + di);
-  const dateLabel = date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  const ctx  = cols[di];
+  const plan = App.data.mealplan?.[ctx.weekKey]?.[ctx.dayIdx] || {};
+  const dateLabel = ctx.date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
 
   dayEl.innerHTML = `
-    <div class="planner-mobile-date-label">${dateLabel}${di === todayIdx ? ' <span class="today-pill">Today</span>' : ''}</div>
+    <div class="planner-mobile-date-label">${dateLabel}${di === todayCol ? ' <span class="today-pill">Today</span>' : ''}</div>
     ${MEAL_SLOTS.map(slot => `
         <div class="planner-mobile-slot">
           <div class="planner-mobile-slot-label">${capitalise(slot)}</div>
           <div class="planner-mobile-slot-content">
-            ${renderPlanSlot(slotEntries(plan[di]?.[slot]), di, slot, true)}
+            ${renderPlanSlot(slotEntries(plan[slot]), ctx, slot, true)}
           </div>
         </div>`).join('')}
   `;
@@ -2029,7 +2489,7 @@ function renderPlannerMobile() {
   // Wire add buttons
   dayEl.querySelectorAll('.plan-add').forEach(btn => {
     btn.addEventListener('click', () => {
-      openPickRecipeModal(wk, parseInt(btn.dataset.day), btn.dataset.slot);
+      openPickRecipeModal(btn.dataset.wk, parseInt(btn.dataset.day), btn.dataset.slot);
     });
   });
 
@@ -2037,7 +2497,7 @@ function renderPlannerMobile() {
   dayEl.querySelectorAll('.plan-remove').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
-      removeMealSlotEntry(wk, parseInt(btn.dataset.day), btn.dataset.slot, parseInt(btn.dataset.idx));
+      removeMealSlotEntry(btn.dataset.wk, parseInt(btn.dataset.day), btn.dataset.slot, parseInt(btn.dataset.idx));
       renderPlannerMobile();
     });
   });
@@ -2045,14 +2505,14 @@ function renderPlannerMobile() {
   // Wire leftovers buttons (mobile)
   dayEl.querySelectorAll('.plan-leftover').forEach(btn => {
     btn.addEventListener('click', () => {
-      openPickRecipeModal(wk, parseInt(btn.dataset.day), btn.dataset.slot, 'leftovers');
+      openPickRecipeModal(btn.dataset.wk, parseInt(btn.dataset.day), btn.dataset.slot, 'leftovers');
     });
   });
 
   // Wire dice buttons (mobile)
   dayEl.querySelectorAll('.plan-dice').forEach(btn => {
     btn.addEventListener('click', () => {
-      suggestRandomMealSlot(wk, parseInt(btn.dataset.day), btn.dataset.slot);
+      suggestRandomMealSlot(btn.dataset.wk, parseInt(btn.dataset.day), btn.dataset.slot);
     });
   });
 
@@ -2073,9 +2533,8 @@ function renderPlannerMobile() {
 }
 
 function renderPlanner() {
-  const wk      = View.currentWeek;
-  const start   = weekStartDate(wk);
-  const plan    = getWeekPlan(wk);
+  const wk   = View.currentWeek;
+  const cols = plannerColumns(wk);
 
   document.getElementById('planner-week-label').textContent = formatWeekLabel(wk);
 
@@ -2089,31 +2548,29 @@ function renderPlanner() {
   if (dayTabs)    dayTabs.style.display    = isMobile ? '' : 'none';
   if (isMobile) { renderPlannerMobile(); return; }
 
-  const todayIdx = todayIndexIn(wk);
+  const todayCol = todayColumnIn(wk);
 
   const table = document.getElementById('planner-table');
   table.innerHTML = `
     <thead>
       <tr>
         <th class="slot-col"></th>
-        ${DAY_NAMES.map((d, i) => {
-          const date = new Date(start);
-          date.setDate(start.getDate() + i);
-          return `<th class="day-col${i === todayIdx ? ' is-today' : ''}">
-            <div class="day-name">${d}</div>
-            <div class="day-date">${date.getMonth() + 1}/${date.getDate()}</div>
-          </th>`;
-        }).join('')}
+        ${cols.map(c => `<th class="day-col${c.col === todayCol ? ' is-today' : ''}">
+            <div class="day-name">${c.name}</div>
+            <div class="day-date">${c.date.getMonth() + 1}/${c.date.getDate()}</div>
+          </th>`).join('')}
       </tr>
     </thead>
     <tbody>
       ${MEAL_SLOTS.map(slot => `
         <tr>
           <td class="slot-label">${capitalise(slot)}</td>
-          ${[0,1,2,3,4,5,6].map(di => `
-              <td class="plan-cell${di === todayIdx ? ' is-today' : ''}" data-day="${di}" data-slot="${slot}">
-                ${renderPlanSlot(slotEntries(plan[di]?.[slot]), di, slot, false)}
-              </td>`).join('')}
+          ${cols.map(c => {
+            const day = App.data.mealplan?.[c.weekKey]?.[c.dayIdx];
+            return `<td class="plan-cell${c.col === todayCol ? ' is-today' : ''}" ${planCoordAttrs(c, slot)}>
+                ${renderPlanSlot(slotEntries(day?.[slot]), c, slot, false)}
+              </td>`;
+          }).join('')}
         </tr>
       `).join('')}
     </tbody>
@@ -2122,7 +2579,7 @@ function renderPlanner() {
   // Plan add buttons
   table.querySelectorAll('.plan-add').forEach(btn => {
     btn.addEventListener('click', () => {
-      openPickRecipeModal(wk, parseInt(btn.dataset.day), btn.dataset.slot);
+      openPickRecipeModal(btn.dataset.wk, parseInt(btn.dataset.day), btn.dataset.slot);
     });
   });
 
@@ -2130,7 +2587,7 @@ function renderPlanner() {
   table.querySelectorAll('.plan-remove').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
-      removeMealSlotEntry(wk, parseInt(btn.dataset.day), btn.dataset.slot, parseInt(btn.dataset.idx));
+      removeMealSlotEntry(btn.dataset.wk, parseInt(btn.dataset.day), btn.dataset.slot, parseInt(btn.dataset.idx));
       renderPlanner();
     });
   });
@@ -2138,22 +2595,27 @@ function renderPlanner() {
   // Random suggestion buttons (desktop)
   table.querySelectorAll('.plan-dice').forEach(btn => {
     btn.addEventListener('click', () => {
-      suggestRandomMealSlot(wk, parseInt(btn.dataset.day), btn.dataset.slot);
+      suggestRandomMealSlot(btn.dataset.wk, parseInt(btn.dataset.day), btn.dataset.slot);
     });
   });
 
   // Leftovers buttons (desktop)
   table.querySelectorAll('.plan-leftover').forEach(btn => {
     btn.addEventListener('click', () => {
-      openPickRecipeModal(wk, parseInt(btn.dataset.day), btn.dataset.slot, 'leftovers');
+      openPickRecipeModal(btn.dataset.wk, parseInt(btn.dataset.day), btn.dataset.slot, 'leftovers');
     });
   });
 
-  // Click card to view recipe
+  // Click card to view recipe. A click that ends a drag isn't a click.
   table.querySelectorAll('.plan-recipe').forEach(el => {
     if (!el.dataset.id) return;
-    el.addEventListener('click', () => openRecipeDetail(el.dataset.id));
+    el.addEventListener('click', () => {
+      if (PlanDrag.suppressClick) return;
+      openRecipeDetail(el.dataset.id);
+    });
   });
+
+  attachPlanDrag(table);
 
   // Async-load plan card images from IndexedDB
   table.querySelectorAll('[data-plan-img]').forEach(async imgEl => {
@@ -2166,7 +2628,7 @@ function renderPlanner() {
 }
 
 function formatWeekLabel(weekKey) {
-  const start = weekStartDate(weekKey);
+  const start = displayWeekStart(weekKey);
   const end   = new Date(start);
   end.setDate(start.getDate() + 6);
   const fmt = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
@@ -2177,8 +2639,8 @@ function formatWeekLabel(weekKey) {
 // a single week, so a 4-week template save would show the first week's dates
 // and quietly misstate what it was about to capture.
 function formatWeekRangeLabel(startWeek, weeks) {
-  const start = weekStartDate(startWeek);
-  const end   = weekStartDate(addWeeks(startWeek, Math.max(1, weeks) - 1));
+  const start = displayWeekStart(startWeek);
+  const end   = displayWeekStart(addWeeks(startWeek, Math.max(1, weeks) - 1));
   end.setDate(end.getDate() + 6);
   const fmt = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   // Only repeat the year when the span crosses one
@@ -2249,13 +2711,14 @@ function getRecentlyPlanned(days = 7, anchor = null) {
     .map(([id]) => getRecipe(id));
 }
 
-// Index of today's column within a week, or -1 when the week isn't this one.
-// Compared on local calendar date rather than timestamps so a meal planned at
-// 11pm and one at 1am don't land on different days.
-function todayIndexIn(weekKey) {
+// Which planner column is today, or -1 when today isn't in this window.
+// Display space: 0 = Sunday. Compared on local calendar date rather than
+// timestamps so a meal planned at 11pm and one at 1am don't land on
+// different days.
+function todayColumnIn(weekKey) {
   const now = new Date();
-  if (getISOWeekKey(now) !== weekKey) return -1;
-  return (now.getDay() + 6) % 7;
+  if (displayWeekKeyFor(now) !== weekKey) return -1;
+  return now.getDay();
 }
 
 // A placeholder recipe standing in for "we ate leftovers" rather than a dish
@@ -2681,22 +3144,7 @@ function openShoppingPrintPicker() {
 // This lets print modes pull "all lists" data even if you're viewing one
 // specific store tab when you open the print modal.
 function gatherAllShoppingItems() {
-  const weeks     = [View.currentWeek, addWeeks(View.currentWeek, 1)];
-  const recipeIds = new Set();
-  for (const wk of weeks) {
-    const plan = getWeekPlan(wk);
-    for (const day of Object.values(plan)) {
-      for (const v of Object.values(day)) {
-        for (const entry of slotEntries(v)) {
-          // Leftovers are already-cooked food, fend nights aren't a meal —
-          // neither contributes anything to buy
-          if (isLeftoverEntry(entry) || isFendEntry(entry)) continue;
-          const id = slotRecipeId(entry);
-          if (id) recipeIds.add(id);
-        }
-      }
-    }
-  }
+  const recipeIds = plannedRecipeIds(shoppingHorizonWeeks());
 
   const rawEntries = [];
   for (const rid of recipeIds) {
@@ -2817,22 +3265,7 @@ function renderShoppingList() {
   renderShoppingTabs();
 
   // Collect all recipes in current + next week plan
-  const weeks     = [View.currentWeek, addWeeks(View.currentWeek, 1)];
-  const recipeIds = new Set();
-  for (const wk of weeks) {
-    const plan = getWeekPlan(wk);
-    for (const day of Object.values(plan)) {
-      for (const v of Object.values(day)) {
-        for (const entry of slotEntries(v)) {
-          // Leftovers are already-cooked food, fend nights aren't a meal —
-          // neither contributes anything to buy
-          if (isLeftoverEntry(entry) || isFendEntry(entry)) continue;
-          const id = slotRecipeId(entry);
-          if (id) recipeIds.add(id);
-        }
-      }
-    }
-  }
+  const recipeIds = plannedRecipeIds(shoppingHorizonWeeks());
 
   const isDefaultTab = View.activeShoppingTab === 'default';
   const activeStore  = isDefaultTab ? null : getShoppingStore(View.activeShoppingTab);
@@ -4085,8 +4518,8 @@ function shareDateInputs() {
   }
 
   const weeks = sel === 'week' ? 1 : parseInt(sel) || 1;
-  const from  = weekStartDate(View.currentWeek);
-  const to    = weekStartDate(addWeeks(View.currentWeek, weeks - 1));
+  const from  = displayWeekStart(View.currentWeek);
+  const to    = displayWeekStart(addWeeks(View.currentWeek, weeks - 1));
   to.setDate(to.getDate() + 6);
   return { from, to, fromStr: iso(from), toStr: iso(to) };
 }
@@ -4156,11 +4589,11 @@ function updateShareHint() {
 
 function openSharePlanModal() {
   const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  const mon = weekStartDate(View.currentWeek);
-  const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+  const start = displayWeekStart(View.currentWeek);
+  const end   = new Date(start); end.setDate(start.getDate() + 6);
   const f = document.getElementById('share-from'), t = document.getElementById('share-to');
-  if (f && !f.value) f.value = iso(mon);
-  if (t && !t.value) t.value = iso(sun);
+  if (f && !f.value) f.value = iso(start);
+  if (t && !t.value) t.value = iso(end);
 
   document.getElementById('share-result').style.display = 'none';
   document.getElementById('share-title').value = '';
@@ -4220,6 +4653,36 @@ async function createSharePlanLink() {
 // week later. Templates store week index + day of week, never dates, so
 // loading one preserves the weekday rhythm wherever it lands.
 
+// Templates saved before the planner became Sunday-first store `d` as a
+// Monday-anchored day index (Mon=0), relative to a Mon–Sun week. Everything
+// now reasons in display columns (Sun=0) over a Sun–Sat week, so those old
+// records have to be re-pinned or a loaded template would land a day off.
+//
+// This is a pure relative remap — templates hold no dates, only offsets. The
+// Sunday that opens week w's display window is the day *before* that week's
+// Monday, so every old offset shifts forward by one and a template can gain a
+// trailing week. Marked with `anchor` so it only ever runs once per record.
+function migrateTemplateAnchors() {
+  const tpls = App.data.templates;
+  if (!tpls) return 0;
+  let changed = 0;
+
+  for (const tpl of Object.values(tpls)) {
+    if (!tpl || tpl.anchor === 'sun') continue;
+    const slots = (tpl.slots || []).map(s => {
+      const offset = (Number(s.w) || 0) * 7 + (Number(s.d) || 0) + 1;
+      return { ...s, w: Math.floor(offset / 7), d: offset % 7 };
+    });
+    tpl.slots  = slots;
+    tpl.weeks  = slots.length ? Math.max(...slots.map(s => s.w)) + 1 : (tpl.weeks || 1);
+    tpl.anchor = 'sun';
+    changed++;
+  }
+
+  if (changed) scheduleSave();
+  return changed;
+}
+
 function getTemplates() {
   return Object.values(App.data.templates || {})
     .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
@@ -4239,14 +4702,16 @@ function captureTemplateSlots(startWeek, weeks, range = null) {
   const to    = range?.to   ? new Date(range.to).setHours(23, 59, 59, 999) : null;
 
   for (let w = 0; w < weeks; w++) {
-    const wk   = addWeeks(startWeek, w);
-    const plan = App.data.mealplan?.[wk];
-    if (!plan) continue;
-    for (let d = 0; d < 7; d++) {
-      const day = plan[d];
+    const wk = addWeeks(startWeek, w);
+    // Walk display columns, so `d` is Sun=0 — the same week the user sees on
+    // screen. Saving "this week" has to capture the Sunday she's looking at,
+    // not the one that closes the underlying ISO week.
+    for (const c of plannerColumns(wk)) {
+      const d   = c.col;
+      const day = App.data.mealplan?.[c.weekKey]?.[c.dayIdx];
       if (!day) continue;
       if (from !== null || to !== null) {
-        const ts = slotDate(wk, d).getTime();
+        const ts = c.date.getTime();
         if (from !== null && ts < from) continue;
         if (to   !== null && ts > to)   continue;
       }
@@ -4261,10 +4726,10 @@ function captureTemplateSlots(startWeek, weeks, range = null) {
 }
 
 // Turn a pair of dates into the week-anchored span the template model wants:
-// the ISO week the range starts in, and how many weeks it touches.
+// the display week the range starts in, and how many weeks it touches.
 function rangeToWeekSpan(fromDate, toDate) {
-  const startWeek = getISOWeekKey(fromDate);
-  const endWeek   = getISOWeekKey(toDate);
+  const startWeek = displayWeekKeyFor(fromDate);
+  const endWeek   = displayWeekKeyFor(toDate);
   let weeks = 1;
   while (weeks < 60 && addWeeks(startWeek, weeks - 1) !== endWeek) weeks++;
   return { startWeek, weeks };
@@ -4281,6 +4746,9 @@ function saveTemplate(name, startWeek, weeks, range = null) {
     name: name.trim() || `Template ${new Date(now).toLocaleDateString()}`,
     weeks,
     slots,
+    // Marks `d` as a display column (Sun=0). Templates saved before the
+    // Sunday-first change carry no anchor and are migrated on load.
+    anchor: 'sun',
     createdAt: now,
     updatedAt: now,
   };
@@ -4331,10 +4799,10 @@ function applyTemplate(id, startWeek, mode = 'replace') {
     });
     if (!kept.length) continue;
 
-    const wk = addWeeks(startWeek, s.w);
-    App.data.mealplan[wk]        = App.data.mealplan[wk] || {};
-    App.data.mealplan[wk][s.d]   = App.data.mealplan[wk][s.d] || {};
-    const day = App.data.mealplan[wk][s.d];
+    // s.d is a display column; plannerColumns turns it back into the week and
+    // day index the plan is actually stored under.
+    const c   = plannerColumn(addWeeks(startWeek, s.w), s.d);
+    const day = planDayRef(c.weekKey, c.dayIdx, true);
 
     if (mode === 'fill' && slotEntries(day[s.slot]).length) {
       skippedOccupied += kept.length;
@@ -4361,12 +4829,12 @@ function openTemplatesModal() {
   // Seed the custom inputs with the week on screen, so switching to Custom
   // starts somewhere sensible rather than blank.
   const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  const mon = weekStartDate(View.currentWeek);
-  const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+  const start = displayWeekStart(View.currentWeek);
+  const end   = new Date(start); end.setDate(start.getDate() + 6);
   const fromEl = document.getElementById('tpl-from');
   const toEl   = document.getElementById('tpl-to');
-  if (fromEl && !fromEl.value) fromEl.value = iso(mon);
-  if (toEl   && !toEl.value)   toEl.value   = iso(sun);
+  if (fromEl && !fromEl.value) fromEl.value = iso(start);
+  if (toEl   && !toEl.value)   toEl.value   = iso(end);
 
   updateTemplateSaveHint();   // sets the range label to match the current span
   renderTemplateList();
@@ -4485,8 +4953,10 @@ async function loadTemplateIntoPlanner(id) {
 
   // Replacing can overwrite meals already planned, so say so before doing it.
   if (mode === 'replace') {
-    const clashes = tpl.slots.filter(s =>
-      slotEntries(App.data.mealplan?.[addWeeks(target, s.w)]?.[s.d]?.[s.slot]).length).length;
+    const clashes = tpl.slots.filter(s => {
+      const c = plannerColumn(addWeeks(target, s.w), s.d);
+      return slotEntries(App.data.mealplan?.[c.weekKey]?.[c.dayIdx]?.[s.slot]).length;
+    }).length;
     if (clashes && !await appConfirm({
       title: 'Overwrite planned meals?',
       message: `“${tpl.name}” will replace ${clashes} slot${clashes === 1 ? '' : 's'} that already ` +
@@ -6085,6 +6555,10 @@ async function boot() {
   const stored = ls.get(STORAGE_KEY);
   App.data     = stored ? mergeData(stored) : defaultData();
 
+  // Re-pin any Monday-anchored templates in the local store. Runs again after
+  // the worker pull, since that can bring in un-migrated records too.
+  migrateTemplateAnchors();
+
   // Fetch Google Client ID from worker if we have a worker URL configured.
   // Falls back to empty string (disables Google sign-in) until URL is set.
   const googleClientId = await fetchGoogleClientId();
@@ -6165,6 +6639,10 @@ async function boot() {
 
   const ok = await Auth.bootCheck(tokenBeforePull);
   if (!ok) return;
+
+  // Run before the first render: a template pulled from the worker may still
+  // be Monday-anchored even if this device migrated its local copy already.
+  migrateTemplateAnchors();
 
   renderAll();
   migrateImageUrls();
@@ -6379,7 +6857,8 @@ document.addEventListener('DOMContentLoaded', () => {
     renderPlanner();
   });
   document.getElementById('planner-today')?.addEventListener('click', () => {
-    View.currentWeek = getISOWeekKey();
+    View.currentWeek = displayWeekKeyFor();
+    View.plannerDay  = new Date().getDay();
     renderPlanner();
   });
 
