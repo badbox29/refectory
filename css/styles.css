@@ -727,6 +727,48 @@ textarea.input { resize: vertical; min-height: 80px; }
 }
 .plan-add:hover { border-color: var(--green-soft); color: var(--green-deep); background: rgba(143,160,104,.08); }
 
+/* ── Planner drag and drop (desktop) ─────────────────────────── */
+
+/* The chip stays put and dims; the ghost is what follows the cursor. Keeping
+   the original in place means the grid doesn't reflow mid-drag, so the drop
+   target under the cursor never shifts out from under it. */
+.plan-drag-source { opacity: .32; filter: saturate(.5); }
+
+.plan-drag-ghost {
+  position: fixed;
+  z-index: 9999;
+  pointer-events: none;
+  margin: 0;
+  opacity: .92;
+  transform: rotate(-1.5deg) scale(1.03);
+  box-shadow: 0 8px 22px rgba(0,0,0,.28);
+  border-color: var(--green-soft);
+  cursor: grabbing;
+}
+.plan-drag-ghost-copy { box-shadow: 0 8px 22px rgba(0,0,0,.28), 0 0 0 2px var(--green-soft); }
+
+/* Only suppress selection while a drag is actually running — the planner is
+   still ordinary selectable text the rest of the time. */
+body.plan-dragging { user-select: none; -webkit-user-select: none; cursor: grabbing; }
+body.plan-dragging .plan-recipe { cursor: grabbing; }
+
+.plan-cell-drop {
+  background: rgba(143,160,104,.13);
+  box-shadow: inset 0 0 0 2px var(--green-soft);
+}
+
+.plan-drop-line {
+  height: 3px;
+  margin: 1px 0;
+  border-radius: 99px;
+  background: var(--green-deep);
+  box-shadow: 0 0 0 1px rgba(255,255,255,.5);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .plan-recipe { cursor: grab; }
+}
+
 /* ── Shopping list ───────────────────────────────────────────── */
 .shopping-header {
   display: flex;
@@ -1315,6 +1357,27 @@ textarea.input { resize: vertical; min-height: 80px; }
   opacity: 1;
   transform: translateX(-50%) translateY(0);
 }
+
+/* The plain toast is click-through by design; one carrying an Undo button
+   has to take the click. */
+#toast.has-action {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: .85rem;
+}
+.toast-action {
+  background: none;
+  border: 1px solid rgba(255,255,255,.35);
+  color: var(--cream);
+  font: inherit;
+  font-weight: 600;
+  padding: .15rem .6rem;
+  border-radius: 99px;
+  cursor: pointer;
+  transition: background .12s, border-color .12s;
+}
+.toast-action:hover { background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.6); }
 
 /* ── Misc helpers ────────────────────────────────────────────── */
 body.modal-open { overflow: hidden; }
