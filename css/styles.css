@@ -729,6 +729,24 @@ textarea.input { resize: vertical; min-height: 80px; }
 
 /* ── Planner drag and drop (desktop) ─────────────────────────── */
 
+/* Empty desktop slot: a card-sized target matching .plan-recipe's 4/3 box, so
+   an empty cell and a one-meal cell are the same height and rows don't jump
+   when a meal is dragged in or out. Also gives the drag a target worth aiming
+   at rather than a thin strip. */
+.plan-add-card {
+  aspect-ratio: 4 / 3;
+  width: 100%;
+  min-height: 0;
+  font-size: 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* The strip under a filled slot appears on hover; under an empty one the dice
+   and leftovers buttons stay visible, as they always have. Two classes so this
+   outranks .plan-add-wrap-compact's opacity:0, which is defined further down. */
+.plan-add-wrap.plan-add-wrap-empty { opacity: 1; }
+
 /* The chip stays put and dims; the ghost is what follows the cursor. Keeping
    the original in place means the grid doesn't reflow mid-drag, so the drop
    target under the cursor never shifts out from under it. */
@@ -757,9 +775,20 @@ body.plan-dragging .plan-recipe { cursor: grabbing; }
   box-shadow: inset 0 0 0 2px var(--green-soft);
 }
 
+/* Drawn out of flow via a pseudo-element: a line with real height would grow
+   the cell it's inserted into, nudging the very drop target being aimed at. */
 .plan-drop-line {
+  height: 0;
+  margin: 0;
+  position: relative;
+}
+.plan-drop-line::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -2px;
   height: 3px;
-  margin: 1px 0;
   border-radius: 99px;
   background: var(--green-deep);
   box-shadow: 0 0 0 1px rgba(255,255,255,.5);
