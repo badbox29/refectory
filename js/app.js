@@ -124,6 +124,19 @@ function defaultData() {
     templates:   {},
     // Shopping stores (custom lists): { [id]: { id, name, createdAt } }
     shoppingStores: {},
+    // Pantry: { [pantryKey]: { name, addedAt } }
+    // What's actually in the house. Keyed on a normalised ingredient name so
+    // "2 cups plain flour" and "flour" are the same thing. Presence only —
+    // no quantities, and nothing decrements when a meal is cooked. Both were
+    // considered and rejected: they make the pantry drift out of step with
+    // reality, and a pantry she stops trusting is worse than no pantry.
+    pantry:      {},
+    pantryUpdatedAt: 0,
+    // Staples: [pantryKey, ...] — things usually in the house that aren't
+    // worth listing. Deliberately NOT assumed present: a recipe needing an
+    // unlisted staple is flagged rather than silently counted as matched,
+    // because sometimes you're out of flour and the app can't know.
+    staples:     null,   // null = never customised, use PANTRY_DEFAULT_STAPLES
     // Item → store assignment: { [itemKey]: storeId }
     // itemKey is the merge key for recipe-derived items, or the manual item's id
     itemStoreAssignments: {},
@@ -140,6 +153,7 @@ function mergeData(raw) {
     recipes:   (raw.recipes   && typeof raw.recipes   === 'object') ? raw.recipes   : d.recipes,
     mealplan:  (raw.mealplan  && typeof raw.mealplan  === 'object') ? raw.mealplan  : d.mealplan,
     planStamps: (raw.planStamps && typeof raw.planStamps === 'object') ? raw.planStamps : d.planStamps,
+    pantry:     (raw.pantry && typeof raw.pantry === 'object') ? raw.pantry : d.pantry,
     cookbooks: (raw.cookbooks && typeof raw.cookbooks === 'object') ? raw.cookbooks : d.cookbooks,
     templates: (raw.templates && typeof raw.templates === 'object') ? raw.templates : d.templates,
     groups:    (raw.groups && typeof raw.groups === 'object') ? raw.groups : d.groups,
@@ -245,6 +259,15 @@ function mergeProfiles(local, remote) {
   out.shoppingStores       = mergeAssignments(L.shoppingStores, R.shoppingStores);
   out.itemStoreAssignments = mergeAssignments(L.itemStoreAssignments, R.itemStoreAssignments);
 
+  // Pantry is a per-item union, same reasoning as the store assignments: one
+  // device adding eggs shouldn't drop the milk another device added. Removals
+  // lose to additions here, which is the safe direction — a stale entry shows
+  // a recipe she can't quite make, where a lost entry hides one she can.
+  out.pantry           = mergeAssignments(L.pantry, R.pantry);
+  out.pantryUpdatedAt  = Math.max(L.pantryUpdatedAt || 0, R.pantryUpdatedAt || 0);
+  // Staples: whichever side has customised wins; local breaks the tie.
+  out.staples = (L.staples ?? R.staples) ?? null;
+
   // Identity and settings are device-local concerns; taking them from remote
   // would swap the worker URL or auth method out from under a live session.
   const LOCAL_ONLY = ['workerUrl', 'authMethod', 'userToken', 'linkedGoogle',
@@ -260,7 +283,8 @@ function mergeProfiles(local, remote) {
   // that cost an evening of meal planning, so an undecided field fails safe.
   const handled = new Set([
     'recipes', 'mealplan', 'planStamps', 'templates', 'cookbooks', 'groups',
-    'shoppingStores', 'itemStoreAssignments', 'lastModified', ...LOCAL_ONLY,
+    'shoppingStores', 'itemStoreAssignments', 'pantry', 'pantryUpdatedAt',
+    'staples', 'lastModified', ...LOCAL_ONLY,
   ]);
   for (const k of Object.keys(defaultData())) {
     if (handled.has(k)) continue;
@@ -582,8 +606,14 @@ function handleAuthFailure(source) {
 
 // ─── Worker sync ──────────────────────────────────────────────────
 
+// The Worker's own address. Set this once the worker lives at a stable
+// hostname you control; the Settings field then becomes an override rather
+// than something every new device has to have typed into it correctly. Left
+// empty, behaviour is exactly as before: Settings is the only source.
+const DEFAULT_WORKER_URL = '';
+
 function getWorkerUrl() {
-  return App.data?.workerUrl || '';
+  return App.data?.workerUrl || DEFAULT_WORKER_URL || '';
 }
 
 async function pushToWorker() {
@@ -1000,6 +1030,7 @@ function showSection(name) {
   if (name === 'planner')   renderPlanner();
   if (name === 'shopping')  renderShoppingList();
   if (name === 'cookbooks') renderCookbooks();
+  if (name === 'pantry')    renderPantry();
 }
 
 // ─── Recipe CRUD ──────────────────────────────────────────────────
@@ -3691,6 +3722,296 @@ function mergeShoppingIngredients(entries) {
       sources,
     };
   }).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// ─── Pantry ──────────────────────────────────────────────────────
+// "What can I cook from what's in the house?" Matching reuses the shopping
+// list's ingredient normaliser so the two features agree on what counts as
+// the same thing — a pantry that disagreed with the shopping list about
+// whether "tomatoes" and "diced tomatoes" match would be worse than useless.
+
+const PANTRY_DEFAULT_STAPLES = [
+  'salt', 'pepper', 'black pepper', 'olive oil', 'vegetable oil', 'butter',
+  'flour', 'plain flour', 'sugar', 'water', 'garlic', 'onion',
+  'baking powder', 'baking soda', 'vinegar', 'soy sauce',
+];
+
+// Pantry key: the shopping normaliser, minus the unit prefix (a pantry holds
+// "flour", not "2 cups of flour"), plus naive plural folding so "tomatoes" in
+// a recipe finds "tomato" in the pantry. The plural rule is crude on purpose
+// — over-clever stemming produces confident wrong matches, and here a missed
+// match is a mild annoyance while a false match sends her to the kitchen for
+// something that isn't there.
+function pantryKey(text) {
+  const parsed = parseIngredientForMerge(String(text || ''));
+  let name = normalizeIngredientName(parsed.name || '') || String(text || '').toLowerCase().trim();
+  // Qualifiers that describe a variant rather than a different ingredient.
+  // "plain flour" and "flour" are the same jar. This list is conservative on
+  // purpose: strip too much and distinct things start colliding.
+  name = name.replace(/\b(fresh|dried|ground|large|small|medium|whole|ripe|plain|all[- ]purpose|unsalted|salted|extra[- ]virgin|boneless|skinless|low[- ]fat|full[- ]fat|caster|granulated)\b/g, '')
+             .replace(/\s+/g, ' ').trim();
+  if (name.length > 3 && /ies$/.test(name))          name = name.replace(/ies$/, 'y');
+  else if (name.length > 3 && /oes$/.test(name))     name = name.replace(/es$/, '');
+  else if (name.length > 3 && /(ches|shes|xes|sses)$/.test(name)) name = name.replace(/es$/, '');
+  else if (name.length > 3 && /s$/.test(name) && !/ss$/.test(name)) name = name.replace(/s$/, '');
+  return name;
+}
+
+function getPantry()      { return App.data.pantry || (App.data.pantry = {}); }
+function getStaples()     { return App.data.staples ?? PANTRY_DEFAULT_STAPLES; }
+function getStapleKeys()  { return new Set(getStaples().map(pantryKey).filter(Boolean)); }
+
+function addPantryItem(text) {
+  const key = pantryKey(text);
+  if (!key) return false;
+  const p = getPantry();
+  if (p[key]) return false;
+  p[key] = { name: String(text).trim(), addedAt: Date.now() };
+  App.data.pantryUpdatedAt = Date.now();
+  scheduleSave();
+  return true;
+}
+
+function removePantryItem(key) {
+  const p = getPantry();
+  if (!p[key]) return;
+  delete p[key];
+  App.data.pantryUpdatedAt = Date.now();
+  scheduleSave();
+}
+
+function clearPantry() {
+  App.data.pantry = {};
+  App.data.pantryUpdatedAt = Date.now();
+  scheduleSave();
+}
+
+function addStaple(text) {
+  const key = pantryKey(text);
+  if (!key) return false;
+  const list = [...getStaples()];
+  if (list.some(x => pantryKey(x) === key)) return false;
+  list.push(String(text).trim());
+  App.data.staples = list;
+  scheduleSave();
+  return true;
+}
+
+function removeStaple(key) {
+  App.data.staples = getStaples().filter(x => pantryKey(x) !== key);
+  scheduleSave();
+}
+
+// Score one recipe against the pantry.
+//   present  — in the pantry
+//   missing  — neither in the pantry nor a staple; this alone sets the band
+//   unlisted — a staple she hasn't entered. Uncertainty, not absence: she
+//              knows whether there's flour in the cupboard, so the app says
+//              so rather than guessing either way.
+function scoreRecipeAgainstPantry(recipe, pantryKeys, stapleKeys) {
+  const present = [], missing = [], unlisted = [];
+  const seen = new Set();
+
+  for (const raw of (recipe.ingredients || [])) {
+    const text = typeof raw === 'string' ? raw : ingredientText(raw);
+    if (!text?.trim()) continue;
+    const key = pantryKey(text);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const label = (typeof raw === 'string' ? raw : (raw.name || text)).trim();
+    if (pantryKeys.has(key))      present.push(label);
+    else if (stapleKeys.has(key)) unlisted.push(label);
+    else                          missing.push(label);
+  }
+
+  const total = present.length + missing.length + unlisted.length;
+  let band;
+  if (!total)                  band = null;            // no usable ingredients
+  else if (missing.length === 0) band = 'ready';
+  else if (missing.length === 1) band = 'almost';
+  else if (missing.length <= 3)  band = 'short';
+  else                           band = 'far';
+  return { recipe, present, missing, unlisted, band };
+}
+
+// Banded by count of missing items rather than a proportion: "Almost" meaning
+// exactly one thing to pick up is a promise the app can keep, where a
+// percentage would put a 15-ingredient braise missing two in the same bucket
+// as a 3-ingredient dish missing one.
+const PANTRY_BAND_ORDER  = { ready: 0, almost: 1, short: 2, far: 3 };
+const PANTRY_BAND_LABEL  = { ready: 'Ready', almost: 'Almost', short: 'Short', far: '' };
+
+function pantryMatches() {
+  const pantryKeys = new Set(Object.keys(getPantry()));
+  const stapleKeys = getStapleKeys();
+  if (!pantryKeys.size) return [];
+
+  return Object.values(App.data.recipes || {})
+    .map(r => scoreRecipeAgainstPantry(r, pantryKeys, stapleKeys))
+    .filter(m => m.band && m.present.length)     // nothing on hand, nothing to show
+    .sort((a, b) =>
+      (PANTRY_BAND_ORDER[a.band] - PANTRY_BAND_ORDER[b.band]) ||
+      (a.missing.length - b.missing.length) ||
+      ((b.recipe.rating || 0) - (a.recipe.rating || 0)) ||
+      ((a.recipe.lastCooked || 0) - (b.recipe.lastCooked || 0)) ||
+      (a.recipe.title || '').localeCompare(b.recipe.title || '')
+    );
+}
+
+// ─── Pantry rendering ────────────────────────────────────────────
+
+let _pantryShowAll = false;
+
+function relativeDayLabel(ts) {
+  if (!ts) return 'never';
+  const days = Math.floor((Date.now() - ts) / 86400000);
+  if (days <= 0) return 'today';
+  if (days === 1) return 'yesterday';
+  if (days < 30)  return `${days} days ago`;
+  return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function renderPantrySuggestions() {
+  const list = document.getElementById('pantry-suggestions');
+  if (!list) return;
+  const names = new Map();
+  for (const r of Object.values(App.data.recipes || {})) {
+    for (const raw of (r.ingredients || [])) {
+      const text = typeof raw === 'string' ? raw : (raw.name || ingredientText(raw));
+      const key  = pantryKey(text);
+      if (key && !names.has(key)) names.set(key, key);
+    }
+  }
+  list.innerHTML = [...names.values()].sort()
+    .map(n => `<option value="${esc(n)}"></option>`).join('');
+}
+
+function renderPantryChips() {
+  const wrap = document.getElementById('pantry-chips');
+  if (!wrap) return;
+  const items = Object.entries(getPantry())
+    .sort((a, b) => (a[1].name || '').localeCompare(b[1].name || ''));
+
+  wrap.innerHTML = items.length
+    ? items.map(([key, v]) => `
+        <span class="pantry-chip">${esc(v.name || key)}
+          <button class="pantry-chip-x" data-pantry-remove="${esc(key)}" title="Remove">✕</button>
+        </span>`).join('')
+    : `<span class="muted f13">Nothing listed yet.</span>`;
+
+  wrap.querySelectorAll('[data-pantry-remove]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      removePantryItem(btn.dataset.pantryRemove);
+      renderPantry();
+    });
+  });
+
+  const upd = document.getElementById('pantry-updated');
+  if (upd) {
+    upd.textContent = items.length
+      ? `${items.length} item${items.length === 1 ? '' : 's'} · updated ${relativeDayLabel(App.data.pantryUpdatedAt)}`
+      : '';
+  }
+}
+
+function renderPantryResults() {
+  const wrap = document.getElementById('pantry-results');
+  if (!wrap) return;
+
+  if (!Object.keys(getPantry()).length) {
+    wrap.innerHTML = `<p class="muted f13">Add a few things above and matching recipes will appear here.</p>`;
+    return;
+  }
+
+  const all     = pantryMatches();
+  const shown   = _pantryShowAll ? all : all.filter(m => m.band !== 'far');
+  const hidden  = all.length - shown.length;
+
+  if (!shown.length) {
+    wrap.innerHTML = `<p class="muted f13">Nothing close yet — try adding a few more ingredients.</p>` +
+      (hidden ? `<button class="btn btn-outline btn-sm" id="pantry-show-more">Show ${hidden} more distant match${hidden === 1 ? '' : 'es'}</button>` : '');
+  } else {
+    wrap.innerHTML = shown.map(m => {
+      const band = PANTRY_BAND_LABEL[m.band];
+      return `
+      <div class="pantry-result">
+        <div class="pantry-result-head">
+          <span class="pantry-result-title">${esc(m.recipe.title || 'Untitled')}</span>
+          ${band ? `<span class="pantry-badge band-${m.band}">${band}</span>` : ''}
+          ${m.unlisted.length ? `<span class="pantry-badge band-staple" title="${esc(m.unlisted.join(', '))}">${m.unlisted.length} staple${m.unlisted.length === 1 ? '' : 's'} not listed</span>` : ''}
+        </div>
+        ${m.missing.length
+          ? `<div class="pantry-missing f13">Missing: ${esc(m.missing.join(', '))}</div>`
+          : `<div class="pantry-missing f13 muted">You have everything listed.</div>`}
+        <div class="pantry-result-actions">
+          <button class="btn btn-sm btn-outline" data-pantry-open="${esc(m.recipe.id)}">Open</button>
+          ${m.missing.length ? `<button class="btn btn-sm btn-outline" data-pantry-shop="${esc(m.recipe.id)}">Add missing to list</button>` : ''}
+        </div>
+      </div>`;
+    }).join('') +
+    (hidden && !_pantryShowAll
+      ? `<button class="btn btn-outline btn-sm" id="pantry-show-more" style="margin-top:.6rem;">Show ${hidden} more distant match${hidden === 1 ? '' : 'es'}</button>`
+      : '');
+  }
+
+  wrap.querySelector('#pantry-show-more')?.addEventListener('click', () => {
+    _pantryShowAll = true;
+    renderPantryResults();
+  });
+  wrap.querySelectorAll('[data-pantry-open]').forEach(b =>
+    b.addEventListener('click', () => openRecipeDetail(b.dataset.pantryOpen)));
+  wrap.querySelectorAll('[data-pantry-shop]').forEach(b =>
+    b.addEventListener('click', () => addMissingToShoppingList(b.dataset.pantryShop)));
+}
+
+// The missing items are the most actionable thing on the card — "grab one
+// thing on the way home" — so they get a one-tap route onto the list.
+function addMissingToShoppingList(recipeId) {
+  const r = getRecipe(recipeId);
+  if (!r) return;
+  const match = scoreRecipeAgainstPantry(r, new Set(Object.keys(getPantry())), getStapleKeys());
+  if (!match.missing.length) return;
+  // Added as manual shopping items. Note these live in View, not App.data —
+  // pre-existing behaviour, so like anything typed into the shopping list by
+  // hand they don't survive a reload.
+  const existing = new Set(View.manualItems.map(i => pantryKey(i.name)));
+  let added = 0;
+  for (const name of match.missing) {
+    const k = pantryKey(name);
+    if (existing.has(k)) continue;
+    existing.add(k);
+    View.manualItems.push({ id: genId(), name, checked: false });
+    added++;
+  }
+  if (View.activeSection === 'shopping') renderShoppingList();
+  showToast(added
+    ? `Added ${added} item${added === 1 ? '' : 's'} to the shopping list ✓`
+    : 'Those are already on the list.');
+}
+
+function renderStapleChips() {
+  const wrap = document.getElementById('staple-chips');
+  if (!wrap) return;
+  const list = getStaples();
+  wrap.innerHTML = list.length
+    ? list.slice().sort((a, b) => a.localeCompare(b)).map(n => `
+        <span class="pantry-chip">${esc(n)}
+          <button class="pantry-chip-x" data-staple-remove="${esc(pantryKey(n))}" title="Remove">✕</button>
+        </span>`).join('')
+    : `<span class="muted f13">No staples — every ingredient will count.</span>`;
+  wrap.querySelectorAll('[data-staple-remove]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      removeStaple(btn.dataset.stapleRemove);
+      renderStapleChips();
+      if (View.activeSection === 'pantry') renderPantryResults();
+    });
+  });
+}
+
+function renderPantry() {
+  renderPantrySuggestions();
+  renderPantryChips();
+  renderPantryResults();
 }
 
 // Builds and triggers the print-friendly shopping list view.
@@ -7053,7 +7374,10 @@ function openSettings() {
   document.getElementById('settings-lastname-input').value  = d.lastName   || '';
   document.getElementById('settings-username-input').value  = d.username   || '';
   const workerEl = document.getElementById('settings-worker-url');
-  if (workerEl) workerEl.value = d.workerUrl || '';
+  if (workerEl) {
+    workerEl.value = d.workerUrl || '';
+    if (DEFAULT_WORKER_URL) workerEl.placeholder = `${DEFAULT_WORKER_URL} (default)`;
+  }
   renderSnapshotList();
   openModal('modal-settings');
 }
@@ -7116,7 +7440,13 @@ function saveSettings() {
   App.data.lastName  = document.getElementById('settings-lastname-input').value.trim();
   App.data.username  = document.getElementById('settings-username-input').value.trim();
   const workerEl = document.getElementById('settings-worker-url');
-  if (workerEl) App.data.workerUrl = workerEl.value.trim().replace(/\/+$/, '');
+  if (workerEl) {
+    const typed = workerEl.value.trim().replace(/\/+$/, '');
+    // Clearing the field falls back to DEFAULT_WORKER_URL rather than
+    // disabling sync outright — otherwise emptying it looks like a reset and
+    // silently strands the device.
+    App.data.workerUrl = (typed === DEFAULT_WORKER_URL) ? '' : typed;
+  }
   scheduleSave();
   closeModal('modal-settings');
   showToast('Settings saved ✓');
@@ -7518,6 +7848,62 @@ document.addEventListener('DOMContentLoaded', () => {
       document.querySelectorAll('#editor-steps-list .step-num').forEach((el, i) => { el.textContent = i + 1; });
     });
     list.appendChild(div);
+  });
+
+  // ── Pantry ──
+  const pantryInput = document.getElementById('pantry-add-input');
+  const addPantry = () => {
+    const v = pantryInput?.value.trim();
+    if (!v) return;
+    if (!addPantryItem(v)) showToast('Already in the pantry.');
+    if (pantryInput) pantryInput.value = '';
+    renderPantry();
+    pantryInput?.focus();
+  };
+  document.getElementById('pantry-add-btn')?.addEventListener('click', addPantry);
+  pantryInput?.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addPantry(); } });
+
+  document.getElementById('pantry-clear-btn')?.addEventListener('click', async () => {
+    const n = Object.keys(getPantry()).length;
+    if (!n) return;
+    if (!await appConfirm({
+      title: `Clear all ${n} pantry item${n === 1 ? '' : 's'}?`,
+      message: 'Your recipes and meal plan are untouched — this only empties the list of what you have in the house.',
+      confirmLabel: 'Clear pantry', danger: true,
+    })) return;
+    clearPantry();
+    _pantryShowAll = false;
+    renderPantry();
+    showToast('Pantry cleared ✓');
+  });
+
+  document.getElementById('pantry-staples-btn')?.addEventListener('click', () => {
+    renderStapleChips();
+    openModal('modal-pantry-staples');
+  });
+
+  const stapleInput = document.getElementById('staple-add-input');
+  const addStapleFromInput = () => {
+    const v = stapleInput?.value.trim();
+    if (!v) return;
+    if (!addStaple(v)) showToast('Already a staple.');
+    if (stapleInput) stapleInput.value = '';
+    renderStapleChips();
+    if (View.activeSection === 'pantry') renderPantryResults();
+  };
+  document.getElementById('staple-add-btn')?.addEventListener('click', addStapleFromInput);
+  stapleInput?.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addStapleFromInput(); } });
+
+  document.getElementById('staple-reset-btn')?.addEventListener('click', async () => {
+    if (!await appConfirm({
+      title: 'Reset staples to the defaults?',
+      message: 'Any staples you have added or removed will go back to the built-in list.',
+      confirmLabel: 'Reset', danger: true,
+    })) return;
+    App.data.staples = null;
+    scheduleSave();
+    renderStapleChips();
+    if (View.activeSection === 'pantry') renderPantryResults();
   });
 
   document.getElementById('btn-save-recipe').onclick = saveEditorRecipe;
