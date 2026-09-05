@@ -3263,3 +3263,82 @@ body.modal-open { overflow: hidden; }
   background: rgba(0,0,0,.03);
 }
 .editor-image-controls .btn { margin-top: .35rem; }
+
+
+/* ── Pantry ──────────────────────────────────────────────────── */
+.pantry-entry {
+  display: flex;
+  gap: .5rem;
+  align-items: center;
+}
+.pantry-entry .input { flex: 1; }
+
+.pantry-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+}
+.pantry-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: .3rem;
+  padding: .22rem .5rem;
+  border-radius: 999px;
+  background: var(--cream, #f6f3ec);
+  border: 1px solid var(--line, rgba(0,0,0,.12));
+  font-size: .82rem;
+}
+.pantry-chip-x {
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: .72rem;
+  line-height: 1;
+  padding: 0;
+  color: var(--muted);
+}
+.pantry-chip-x:hover { color: var(--red, #c07070); }
+
+.pantry-result {
+  border: 1px solid var(--line, rgba(0,0,0,.12));
+  border-radius: var(--r-md, 8px);
+  padding: .6rem .75rem;
+  margin-bottom: .5rem;
+}
+.pantry-result-head {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  flex-wrap: wrap;
+  margin-bottom: .25rem;
+}
+.pantry-result-title { font-weight: 600; }
+.pantry-missing { line-height: 1.5; }
+.pantry-result-actions {
+  display: flex;
+  gap: .4rem;
+  margin-top: .45rem;
+  flex-wrap: wrap;
+}
+
+/* Band badges. The staple badge is deliberately a different, quieter colour:
+   it flags uncertainty rather than absence, and shouldn't read as a warning. */
+.pantry-badge {
+  font-size: .68rem;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  font-weight: 700;
+  padding: .16rem .45rem;
+  border-radius: 999px;
+}
+.pantry-badge.band-ready  { background: var(--green-deep, #5a6b3f); color: #fff; }
+.pantry-badge.band-almost { background: var(--saffron, #d4982a); color: #fff; }
+.pantry-badge.band-short  { background: rgba(0,0,0,.1); color: var(--muted); }
+.pantry-badge.band-staple {
+  background: transparent;
+  border: 1px dashed var(--line, rgba(0,0,0,.25));
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+}
