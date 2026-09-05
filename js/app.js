@@ -3965,16 +3965,23 @@ function renderPantryResults() {
   } else {
     wrap.innerHTML = shown.map(m => {
       const band = PANTRY_BAND_LABEL[m.band];
+      // Staples get their own row and are named rather than counted. A number
+      // alone told her something was uncertain without telling her what to go
+      // and check, and the names were hidden in a tooltip no phone can reach.
       return `
       <div class="pantry-result">
         <div class="pantry-result-head">
           <span class="pantry-result-title">${esc(m.recipe.title || 'Untitled')}</span>
           ${band ? `<span class="pantry-badge band-${m.band}">${band}</span>` : ''}
-          ${m.unlisted.length ? `<span class="pantry-badge band-staple" title="${esc(m.unlisted.join(', '))}">${m.unlisted.length} staple${m.unlisted.length === 1 ? '' : 's'} not listed</span>` : ''}
         </div>
         ${m.missing.length
           ? `<div class="pantry-missing f13">Missing: ${esc(m.missing.join(', '))}</div>`
           : `<div class="pantry-missing f13 muted">You have everything listed.</div>`}
+        ${m.unlisted.length ? `
+          <div class="pantry-staple-row f13">
+            <span class="pantry-staple-label">Staples not listed:</span>
+            ${m.unlisted.map(n => `<span class="pantry-staple-pill">${esc(pantryKey(n) || n)}</span>`).join('')}
+          </div>` : ''}
         <div class="pantry-result-actions">
           <button class="btn btn-sm btn-outline" data-pantry-open="${esc(m.recipe.id)}">Open</button>
           ${m.missing.length ? `<button class="btn btn-sm btn-outline" data-pantry-shop="${esc(m.recipe.id)}">Add missing to list</button>` : ''}
