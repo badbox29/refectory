@@ -76,6 +76,7 @@
     <!-- Persistent warning when writes aren't reaching storage. Sits above
          every section, since it applies to the whole app rather than one view. -->
     <div id="storage-banner" class="storage-banner" style="display:none;"></div>
+    <div id="sync-banner" class="storage-banner sync-banner" style="display:none;"></div>
 
     <!-- ── Recipes section ─────────────────────────────────── -->
     <section id="section-recipes" class="section active">
@@ -667,7 +668,7 @@
           <div id="settings-sync-controls" style="display:none;">
             <div class="settings-row">
               <span class="settings-row-label">Sync now</span>
-              <button class="btn btn-outline btn-sm" onclick="syncToWorker().then(()=>showToast('Synced ✓'))">Sync</button>
+              <button class="btn btn-outline btn-sm" onclick="syncToWorker(true).then(ok=>showToast(ok ? 'Synced ✓' : 'Could not sync — your work is safe on this device.'))">Sync</button>
             </div>
           </div>
 
@@ -684,6 +685,18 @@
             </button>
           </div>
 
+        </div>
+      </div>
+
+      <!-- Backups -->
+      <div class="settings-section">
+        <div class="settings-section-header">Backups</div>
+        <div class="settings-section-body">
+          <div class="settings-row-sub" style="margin-bottom:.5rem;">
+            Refectory keeps a copy of your data from just before each of the last few
+            times it synced with the server. If something goes missing, you can put one back.
+          </div>
+          <div id="settings-snapshots"></div>
         </div>
       </div>
 
@@ -965,6 +978,16 @@
         photo, name and description, but not ingredients. The link updates if you
         change the plan, and stops working at the end of the range.
       </p>
+
+      <div class="form-group">
+        <label class="form-label">Meals to include</label>
+        <div class="share-slot-row">
+          <label><input type="checkbox" id="share-slot-breakfast" checked/> Breakfast</label>
+          <label><input type="checkbox" id="share-slot-lunch"     checked/> Lunch</label>
+          <label><input type="checkbox" id="share-slot-dinner"    checked/> Dinner</label>
+          <label><input type="checkbox" id="share-slot-snack"     checked/> Snacks</label>
+        </div>
+      </div>
 
       <div class="form-group">
         <label class="form-label">Range</label>
