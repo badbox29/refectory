@@ -3181,3 +3181,35 @@ body.modal-open { overflow: hidden; }
   white-space: nowrap;
 }
 .group-member-remove { flex: 0 0 auto; }
+
+
+/* ── Sync status banner ──────────────────────────────────────────
+   Shares the storage-banner shell. Distinct colour so "not reaching the
+   server" doesn't read as "not saving at all" — the two failures have very
+   different stakes and very different fixes. */
+.sync-banner {
+  background: var(--saffron-wash, rgba(212,160,60,.12));
+  border-color: var(--saffron, #d4a03c);
+  color: var(--ink, inherit);
+}
+
+/* ── Share modal: meal type filter ────────────────────────────── */
+.share-slot-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .35rem .9rem;
+}
+.share-slot-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  font-size: .85rem;
+  cursor: pointer;
+  user-select: none;
+}
+.share-slot-row input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--green-deep);
+  cursor: pointer;
+}
