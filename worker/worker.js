@@ -492,6 +492,32 @@ function dayIndexUTC(y, m, d) {
 const SHARE_SLOTS = ['breakfast', 'lunch', 'dinner', 'snack'];
 const LEFTOVERS_PFX = 'leftovers:';
 
+const SLOT_LABELS = {
+  breakfast: 'Breakfast', lunch: 'Lunch', dinner: 'Dinner', snack: 'Snacks',
+};
+
+// Never trust the client's ordering or contents. Unknown values are dropped,
+// duplicates collapsed, and an absent or empty list means all four — so a
+// client from before this feature existed keeps working unchanged.
+function normaliseShareSlots(slots) {
+  if (!Array.isArray(slots) || !slots.length) return SHARE_SLOTS;
+  const want = new Set(slots.map(s => String(s)));
+  const out  = SHARE_SLOTS.filter(s => want.has(s));
+  return out.length ? out : SHARE_SLOTS;
+}
+
+// Shown on the page whenever the link isn't all four. Without it a kid
+// opening a dinner-only link can't tell whether breakfast is unplanned or
+// just hidden.
+function shareSlotsLabel(slots) {
+  const use = normaliseShareSlots(slots);
+  if (use.length === SHARE_SLOTS.length) return '';
+  const names = use.map(s => SLOT_LABELS[s] || s);
+  return names.length === 1
+    ? `${names[0]} only`
+    : `${names.slice(0, -1).join(', ')} & ${names[names.length - 1]}`;
+}
+
 function shareSlotEntries(v) {
   if (v == null) return [];
   return (Array.isArray(v) ? v : [v]).filter(Boolean);
@@ -506,7 +532,12 @@ function shortDesc(text, max = 180) {
 }
 
 // Walk the shared date range and pull out what the page needs.
-function buildShareDays(profile, fromStr, toStr) {
+// `slots` limits which meal types the page shows — she sends the kids, who
+// are home all day, a different link from the one she sends someone who's
+// only home for dinner. Applied here at render time rather than baked in at
+// creation, so a filtered link stays live like any other.
+function buildShareDays(profile, fromStr, toStr, slots) {
+  const useSlots = normaliseShareSlots(slots);
   const recipes = profile?.recipes || {};
   const plan    = profile?.mealplan || {};
   const [fy, fm, fd] = fromStr.split('-').map(Number);
@@ -521,7 +552,7 @@ function buildShareDays(profile, fromStr, toStr) {
     const dayPlan = plan?.[isoWeekKeyUTC(y, m, d)]?.[dayIndexUTC(y, m, d)] || {};
 
     const meals = [];
-    for (const slot of SHARE_SLOTS) {
+    for (const slot of useSlots) {
       for (const entry of shareSlotEntries(dayPlan[slot])) {
         if (entry === 'fend') { meals.push({ slot, fend: true }); continue; }
         const leftover = typeof entry === 'string' && entry.startsWith(LEFTOVERS_PFX);
@@ -550,14 +581,16 @@ function buildShareDays(profile, fromStr, toStr) {
   return days;
 }
 
-function sharePage({ title, subtitle, days, expired }) {
+function sharePage({ title, subtitle, slotsLabel, days, expired }) {
   const body = expired
     ? `<div class="gone"><h1>This link has expired</h1>
          <p>Meal plan links stop working at the end of the range they cover.
             Ask for a fresh one.</p></div>`
     : !days.length
-      ? `<div class="gone"><h1>${escHtml(title)}</h1><p>Nothing planned for these days yet.</p></div>`
-      : `<header><h1>${escHtml(title)}</h1><p class="sub">${escHtml(subtitle)}</p></header>
+      ? `<div class="gone"><h1>${escHtml(title)}</h1><p>Nothing planned for these days yet${
+           slotsLabel ? ` — this link shows ${escHtml(slotsLabel.toLowerCase())}` : ''}.</p></div>`
+      : `<header><h1>${escHtml(title)}</h1><p class="sub">${escHtml(subtitle)}</p>
+         ${slotsLabel ? `<p class="filt">Showing ${escHtml(slotsLabel.toLowerCase())}</p>` : ''}</header>
          ${days.map(day => `
            <section class="day">
              <h2>${escHtml(day.label)}</h2>
@@ -593,6 +626,9 @@ function sharePage({ title, subtitle, days, expired }) {
   header { padding:.5rem 0 1rem; }
   h1 { font-size:1.5rem; line-height:1.2; }
   .sub { color:var(--muted); font-size:.9rem; margin-top:.2rem; }
+  .filt { display:inline-block; margin-top:.45rem; padding:.2rem .5rem;
+          border-radius:999px; background:rgba(0,0,0,.06); color:var(--muted);
+          font-size:.72rem; text-transform:uppercase; letter-spacing:.05em; }
   .day { margin-bottom:1.5rem; }
   .day h2 { font-size:.8rem; text-transform:uppercase; letter-spacing:.06em;
             color:var(--green); font-weight:700; margin-bottom:.5rem;
@@ -652,10 +688,11 @@ async function handleSharePage(id, env) {
   let profile;
   try { profile = JSON.parse(profileRaw); } catch { return html(sharePage({ expired: true }), 500); }
 
-  const days = buildShareDays(profile, rec.from, rec.to);
+  const days = buildShareDays(profile, rec.from, rec.to, rec.slots);
   return html(sharePage({
     title: rec.title || 'Meal Plan',
     subtitle: rec.subtitle || `${rec.from} – ${rec.to}`,
+    slotsLabel: shareSlotsLabel(rec.slots),
     days,
   }), 200);
 }
@@ -694,12 +731,18 @@ async function handleCreateShare(request, env, cors) {
   if (expiresAt > maxExpiry)
     return respond(JSON.stringify({ error: 'expiresAt too far ahead' }), 400, cors);
 
+  // Absent means all four, so older clients keep working.
+  if (b.slots !== undefined && !Array.isArray(b.slots))
+    return respond(JSON.stringify({ error: 'slots must be an array' }), 400, cors);
+  const slots = normaliseShareSlots(b.slots);
+
   const id  = shareId();
   const ttl = Math.max(60, Math.ceil((expiresAt - Date.now()) / 1000));
   await env[KV_BINDING].put(`share:${id}`, JSON.stringify({
     token,
     from: b.from,
     to:   b.to,
+    slots,
     title:    String(b.title || '').slice(0, 120),
     subtitle: String(b.subtitle || '').slice(0, 160),
     expiresAt,
