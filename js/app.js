@@ -3745,6 +3745,17 @@ const PANTRY_DEFAULT_STAPLES = [
 function pantryKey(text) {
   const parsed = parseIngredientForMerge(String(text || ''));
   let name = normalizeIngredientName(parsed.name || '') || String(text || '').toLowerCase().trim();
+
+  // A range like "3-4 medium tomatoes" leaves "-4" behind: the quantity parser
+  // takes the 3 and the rest of the range stays glued to the front. Drop any
+  // leading non-letters, which also clears stray fractions and punctuation.
+  name = name.replace(/^[^a-z]+/i, '').trim();
+
+  // Trailing purpose phrases describe how an ingredient is used, not what it
+  // is — "oil for frying" is oil.
+  name = name.replace(/\b(for|to)\s+(frying|serving|serve|garnish|dusting|greasing|taste|drizzling|brushing|topping|decorating)\b.*$/i, '')
+             .replace(/\b(as needed|if needed|optional|plus more.*|divided)\b.*$/i, '')
+             .replace(/\s+/g, ' ').trim();
   // Qualifiers that describe a variant rather than a different ingredient.
   // "plain flour" and "flour" are the same jar. This list is conservative on
   // purpose: strip too much and distinct things start colliding.
@@ -3755,6 +3766,27 @@ function pantryKey(text) {
   else if (name.length > 3 && /(ches|shes|xes|sses)$/.test(name)) name = name.replace(/es$/, '');
   else if (name.length > 3 && /s$/.test(name) && !/ss$/.test(name)) name = name.replace(/s$/, '');
   return name;
+}
+
+// Head-noun fallback. A single-word key matches a multi-word one only when it
+// is that key's LAST word: "oil" matches "vegetable oil", "flour" matches
+// "bread flour". Deliberately not general substring matching — that would let
+// "flour" match "flour tortillas", and a false match sends her to the cupboard
+// for something that isn't there. Missed matches are merely annoying; false
+// ones are invisible and worse.
+function pantryKeyMatches(recipeKey, pantryKeySet) {
+  if (pantryKeySet.has(recipeKey)) return true;
+  const rWords = recipeKey.split(' ');
+  // Pantry holds the general form ("oil"), recipe names a specific one.
+  if (rWords.length > 1 && pantryKeySet.has(rWords[rWords.length - 1])) return true;
+  // Recipe names the general form, pantry holds a specific one.
+  if (rWords.length === 1) {
+    for (const pk of pantryKeySet) {
+      const pWords = pk.split(' ');
+      if (pWords.length > 1 && pWords[pWords.length - 1] === recipeKey) return true;
+    }
+  }
+  return false;
 }
 
 function getPantry()      { return App.data.pantry || (App.data.pantry = {}); }
@@ -3819,9 +3851,9 @@ function scoreRecipeAgainstPantry(recipe, pantryKeys, stapleKeys) {
     if (!key || seen.has(key)) continue;
     seen.add(key);
     const label = (typeof raw === 'string' ? raw : (raw.name || text)).trim();
-    if (pantryKeys.has(key))      present.push(label);
-    else if (stapleKeys.has(key)) unlisted.push(label);
-    else                          missing.push(label);
+    if (pantryKeyMatches(key, pantryKeys))      present.push(label);
+    else if (pantryKeyMatches(key, stapleKeys)) unlisted.push(label);
+    else                                        missing.push(label);
   }
 
   const total = present.length + missing.length + unlisted.length;
