@@ -69,6 +69,9 @@
     <button class="nav-btn" data-section="shopping">
       <span class="nav-icon">🛒</span>Shopping
     </button>
+    <button class="nav-btn" data-section="pantry">
+      <span class="nav-icon">🥫</span>Pantry
+    </button>
   </nav>
 
   <!-- ── Main content ────────────────────────────────────────── -->
@@ -146,6 +149,36 @@
     </section>
 
     <!-- ── Shopping section ────────────────────────────────── -->
+    <!-- ── Pantry ───────────────────────────────────────────── -->
+    <section id="section-pantry" class="section">
+      <div class="section-header">
+        <h2 class="section-title">Pantry</h2>
+        <div class="section-actions">
+          <button class="btn btn-outline btn-sm" id="pantry-staples-btn">Staples</button>
+          <button class="btn btn-outline btn-sm" id="pantry-clear-btn">Clear pantry</button>
+        </div>
+      </div>
+
+      <p class="f13 lh muted" style="margin-bottom:.75rem;">
+        List what you have in the house, and Refectory will show what you can cook from it.
+      </p>
+
+      <div class="pantry-entry">
+        <input class="input" id="pantry-add-input" list="pantry-suggestions"
+               placeholder="Add an ingredient — e.g. chicken thighs" autocomplete="off"/>
+        <datalist id="pantry-suggestions"></datalist>
+        <button class="btn btn-primary btn-sm" id="pantry-add-btn">Add</button>
+      </div>
+
+      <div class="f13 muted" id="pantry-updated" style="margin:.4rem 0 .6rem;"></div>
+      <div class="pantry-chips" id="pantry-chips"></div>
+
+      <div class="section-header" style="margin-top:1.25rem;">
+        <h2 class="section-title" style="font-size:1rem;">What you can make</h2>
+      </div>
+      <div id="pantry-results"></div>
+    </section>
+
     <section id="section-shopping" class="section">
       <div class="section-header">
         <h1 class="section-title">Shopping List</h1>
@@ -751,6 +784,32 @@
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal('modal-settings')">Cancel</button>
       <button class="btn btn-primary" id="settings-save-btn">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Pantry staples modal ────────────────────────────────── -->
+<div class="modal-overlay" id="modal-pantry-staples" role="dialog" aria-modal="true">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <h2 class="modal-title">Staples</h2>
+      <button class="modal-close" title="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="f13 lh muted" style="margin-bottom:.75rem;">
+        Things you usually have but wouldn't bother listing. They never count against a
+        match — instead a recipe that needs one you haven't added to the pantry is
+        flagged, so you can check the cupboard yourself.
+      </p>
+      <div class="pantry-entry">
+        <input class="input" id="staple-add-input" placeholder="e.g. olive oil" autocomplete="off"/>
+        <button class="btn btn-primary btn-sm" id="staple-add-btn">Add</button>
+      </div>
+      <div class="pantry-chips" id="staple-chips" style="margin-top:.6rem;"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" id="staple-reset-btn">Reset to defaults</button>
+      <button class="btn btn-primary" onclick="closeModal('modal-pantry-staples')">Done</button>
     </div>
   </div>
 </div>
