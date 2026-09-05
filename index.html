@@ -325,8 +325,28 @@
             <input class="input" id="editor-source-url" type="url" placeholder="https://…"/>
           </div>
           <div class="form-group" style="grid-column:1/-1">
-            <label class="form-label">Image URL</label>
-            <input class="input" id="editor-image-url" type="url" placeholder="https://… or leave blank"/>
+            <label class="form-label">Photo</label>
+            <div class="editor-image-block">
+              <div class="editor-image-preview" id="editor-image-preview">
+                <span class="editor-image-empty" id="editor-image-empty">No photo</span>
+                <img id="editor-image-thumb" alt="" style="display:none;"/>
+              </div>
+              <div class="editor-image-controls">
+                <div class="editor-image-drop" id="editor-image-drop">
+                  Drop a photo here, paste one, or
+                  <button type="button" class="btn btn-sm btn-outline" id="editor-image-pick">Choose file</button>
+                </div>
+                <button type="button" class="btn btn-sm btn-ghost" id="editor-image-remove"
+                        style="display:none;">Remove photo</button>
+                <div class="form-hint" id="editor-image-hint">
+                  Photos you add here stay on this device — they won't sync to your
+                  other devices or appear on shared meal plan links.
+                </div>
+              </div>
+            </div>
+            <input type="file" id="editor-image-file" accept="image/*" style="display:none;"/>
+            <label class="form-label" style="margin-top:.6rem;">Image URL <span class="muted">(optional)</span></label>
+            <input class="input" id="editor-image-url" type="url" placeholder="https://… — a link here does sync"/>
           </div>
         </div>
 
