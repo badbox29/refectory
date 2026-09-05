@@ -94,7 +94,13 @@ async function deriveHmacKey(token) {
   );
 }
 
-async function verifyHmac(request, token, body) {
+// `secret` is the signing key; `msgToken` is the account identifier that goes
+// into the signed message. For token accounts these are the same value — the
+// token is both. For Google accounts they differ: the secret is the minted
+// write key, while the message still names `google:{sub}` so a signature is
+// bound to the account it claims to be for.
+async function verifyHmac(request, secret, body, msgToken) {
+  const token = msgToken === undefined ? secret : msgToken;
   const timestamp = request.headers.get('X-Timestamp') || '';
   const signature = request.headers.get('X-Signature') || '';
   if (!timestamp || !signature) return { ok: false, reason: 'Missing HMAC headers' };
@@ -108,15 +114,73 @@ async function verifyHmac(request, token, body) {
 
   const message  = `${request.method.toUpperCase()}:${token}:${timestamp}:${bodyHash}`;
   try {
-    const key      = await deriveHmacKey(token);
+    const key      = await deriveHmacKey(secret);
     const sigBytes = Uint8Array.from(atob(signature.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
     const valid    = await crypto.subtle.verify('HMAC', key, sigBytes, enc.encode(message));
     return valid ? { ok: true } : { ok: false, reason: 'Invalid signature' };
   } catch { return { ok: false, reason: 'Verification error' }; }
 }
 
+// ── Write keys (Google accounts) ───────────────────────────────────────────
+// Google ID tokens live about an hour, and the client used to send one as a
+// Bearer header on every write. So a long session would quietly cross the
+// expiry line and every write after that failed — which is how an evening of
+// meal planning got lost.
+//
+// The fix is to stop making writes depend on a short-lived credential. Google
+// establishes identity at sign-in; writes are then signed with a per-account
+// secret that doesn't expire.
+//
+// That secret can NOT be the account token. For token accounts the token is
+// 128 bits of randomness and is the secret, so deriving a signing key from it
+// is sound. For Google accounts the token is `google:{sub}`, and `sub` is not
+// secret: it sits in the ID token payload (base64, not encrypted), every app
+// she has ever signed into with Google has seen it, and it appears in the URL
+// path of every storage request. Deriving a signing key from that would let
+// anyone who knows her `sub` forge writes — strictly worse than the expiring
+// Bearer token it replaced. Hence a separate random secret, minted here and
+// never derivable from anything public.
+const WRITE_KEY_BYTES = 32;
+
+function writeKeyId(token) { return `wkey:${token}`; }
+
+function newWriteKey() {
+  const b = new Uint8Array(WRITE_KEY_BYTES);
+  crypto.getRandomValues(b);
+  return [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+
+async function getWriteKey(env, token) {
+  return await env[KV_BINDING].get(writeKeyId(token), { type: 'text' });
+}
+
+// Per-account rather than per-device: one household, and a shared key keeps
+// the mint/store flow to a single step per device. Deleting the KV entry
+// revokes every device at once, which is also the "sign out everywhere"
+// primitive the app otherwise lacks.
+async function mintWriteKey(env, token) {
+  const existing = await getWriteKey(env, token);
+  if (existing) return existing;
+  const key = newWriteKey();
+  await env[KV_BINDING].put(writeKeyId(token), key);
+  return key;
+}
+
 async function checkAuth(request, token, cors, requireHmac, body, env) {
   if (token.startsWith('google:')) {
+    // Signed request: verify against the stored write key. Preferred, because
+    // it doesn't depend on the Google session still being alive.
+    if (request.headers.get('X-Signature')) {
+      const wkey = await getWriteKey(env, token);
+      if (!wkey) return { ok: false, res: respond(JSON.stringify({ error: 'No write key — sign in again' }), 401, cors) };
+      const hmac = await verifyHmac(request, wkey, body, token);
+      if (hmac.ok) return { ok: true };
+      return { ok: false, res: respond(JSON.stringify({ error: `Auth failed: ${hmac.reason}` }), 401, cors) };
+    }
+
+    // Bearer fallback. Still needed for the request that mints the write key
+    // in the first place, for re-linking, and for any client from before this
+    // change — so upgrading the worker never strands an older frontend.
     const authHeader = request.headers.get('Authorization') || '';
     const idToken    = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
     if (!idToken) return { ok: false, res: respond(JSON.stringify({ error: 'Authorization required' }), 401, cors) };
@@ -190,6 +254,32 @@ async function handleAuth(url, method, request, env, cors, ip) {
     const p = await verifyGoogleJWT(idToken, env.GOOGLE_CLIENT_ID);
     if (!p) return respond(JSON.stringify({ error: 'Invalid or expired Google token' }), 401, cors);
     return respond(JSON.stringify({ ok: true, kvKey: `google:${p.sub}`, profile: p }), 200, cors);
+  }
+
+  // POST /auth/writekey — mint (or return) the account's request-signing key.
+  // Authenticated by a live Google ID token: the one moment a fresh Google
+  // credential is genuinely required, and a moment when a re-auth prompt is
+  // entirely appropriate. Returned once over HTTPS and stored client-side.
+  if (url.pathname === '/auth/writekey' && method === 'POST') {
+    let idToken;
+    try { idToken = (await request.json()).idToken; } catch { return respond(JSON.stringify({ error: 'Invalid body' }), 400, cors); }
+    if (!idToken) return respond(JSON.stringify({ error: 'idToken required' }), 400, cors);
+    const p = await verifyGoogleJWT(idToken, env.GOOGLE_CLIENT_ID);
+    if (!p) return respond(JSON.stringify({ error: 'Invalid or expired Google token' }), 401, cors);
+    const key = await mintWriteKey(env, `google:${p.sub}`);
+    return respond(JSON.stringify({ ok: true, writeKey: key }), 200, cors);
+  }
+
+  // POST /auth/revokekeys — drop the write key, locking out every device
+  // until each signs in again.
+  if (url.pathname === '/auth/revokekeys' && method === 'POST') {
+    let idToken;
+    try { idToken = (await request.json()).idToken; } catch { return respond(JSON.stringify({ error: 'Invalid body' }), 400, cors); }
+    if (!idToken) return respond(JSON.stringify({ error: 'idToken required' }), 400, cors);
+    const p = await verifyGoogleJWT(idToken, env.GOOGLE_CLIENT_ID);
+    if (!p) return respond(JSON.stringify({ error: 'Invalid or expired Google token' }), 401, cors);
+    await env[KV_BINDING].delete(writeKeyId(`google:${p.sub}`));
+    return respond(JSON.stringify({ ok: true }), 200, cors);
   }
 
   // POST /auth/verify
