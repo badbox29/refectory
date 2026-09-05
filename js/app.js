@@ -26,6 +26,25 @@ const STORAGE_AUTH_KEY   = 'ref_google_id_token';
 const STORAGE_DISMISS_KEY= 'ref_token_upgrade_dismissed';
 const SYNC_INTERVAL_MS   = 60_000; // 1 minute
 
+// Local-is-ahead-of-remote, kept in its own localStorage key rather than
+// inside App.data. If the profile write is the thing that failed, a flag
+// living inside the profile goes down with it — and "local is ahead" is
+// exactly the fact you most need to survive that failure.
+const DIRTY_KEY          = 'ref_sync_dirty';
+
+// Pre-merge rollback copies. The boot merge is the only thing in the app that
+// can overwrite hours of work in one go, so it takes a copy first.
+const SNAPSHOT_PREFIX    = 'ref_snapshot_';
+const SNAPSHOT_KEEP      = 3;
+
+// Meal plan day stamps older than this with no surviving plan data are
+// dropped at boot so the sidecar doesn't grow without bound.
+const PLAN_STAMP_GC_DAYS = 120;
+
+// How long local can be ahead with a failing push before closing the tab
+// warrants a warning.
+const UNSAVED_WARN_MS    = 2 * 60_000;
+
 // ─── Theme ────────────────────────────────────────────────────
 
 const THEME_KEY = 'ref_theme';
@@ -50,7 +69,13 @@ function initTheme() {
 const App = {
   data: null,       // full data blob — profile + recipes + mealplan
   syncTimer: null,
-  pendingSync: false,
+  pendingSync: false,   // in-memory fast path only — DIRTY_KEY is the truth
+  // Sync health, surfaced by renderSyncBanner(). Distinct from storageBlocked,
+  // which is about the local write failing rather than the remote one.
+  syncState: null,      // null | 'push-failed' | 'session-expired' | 'tab-conflict'
+  syncFailures: 0,
+  authPromptOpen: false,
+  sessionWatchTimer: null,
 };
 
 // Default data shape
@@ -71,6 +96,14 @@ function defaultData() {
     // A slot value is an entry string, or an array of them when more than one
     // thing is cooked in that slot. Read with slotEntries(), write with packSlot().
     mealplan:    {},
+    // Meal plan day stamps: { [weekKey]: { [dayIndex]: epochMs } }
+    // Deliberately a sidecar rather than a field inside each day. Plan writes
+    // prune empty days and empty weeks out of `mealplan` entirely, so a stamp
+    // stored inside a day would be destroyed by the one operation whose
+    // timestamp matters most — clearing a day. Kept outside, an emptied day
+    // still carries proof of when it was emptied, which is what lets a merge
+    // tell "she cleared Tuesday" from "this device hasn't seen Tuesday yet".
+    planStamps:  {},
     // Cookbooks: { [id]: { id, name, description, recipeIds: [] } }
     cookbooks:   {},
     // Recipe groups: { [id]: { id, name, members: [{ id, label }], createdAt, updatedAt } }
@@ -106,12 +139,135 @@ function mergeData(raw) {
     ...raw,
     recipes:   (raw.recipes   && typeof raw.recipes   === 'object') ? raw.recipes   : d.recipes,
     mealplan:  (raw.mealplan  && typeof raw.mealplan  === 'object') ? raw.mealplan  : d.mealplan,
+    planStamps: (raw.planStamps && typeof raw.planStamps === 'object') ? raw.planStamps : d.planStamps,
     cookbooks: (raw.cookbooks && typeof raw.cookbooks === 'object') ? raw.cookbooks : d.cookbooks,
     templates: (raw.templates && typeof raw.templates === 'object') ? raw.templates : d.templates,
     groups:    (raw.groups && typeof raw.groups === 'object') ? raw.groups : d.groups,
     shoppingStores: (raw.shoppingStores && typeof raw.shoppingStores === 'object') ? raw.shoppingStores : d.shoppingStores,
     itemStoreAssignments: (raw.itemStoreAssignments && typeof raw.itemStoreAssignments === 'object') ? raw.itemStoreAssignments : d.itemStoreAssignments,
   };
+}
+
+// ─── Merging local and remote ─────────────────────────────────────
+// The boot merge used to give recipes a careful per-record comparison and
+// then take everything else — meal plan, templates, cookbooks — wholesale
+// from the remote copy, writing the result straight over localStorage. If the
+// remote copy was stale, that silently destroyed local work. Every collection
+// now gets an explicit rule, and anything without one keeps the local value.
+
+// Per-day meal plan merge. Resolution, in order:
+//   stamped both sides  → later stamp wins, day taken whole
+//   stamped one side    → that side wins
+//   neither stamped     → local wins (pre-migration data; first write stamps)
+//   local stamped, remote day absent → local wins, *including when local's
+//     day is empty* — that's a deletion propagating correctly rather than the
+//     remote copy resurrecting it
+function mergePlanStamped(localPlan, localStamps, remotePlan, remoteStamps) {
+  const plan   = {};
+  const stamps = {};
+  const lp = localPlan  || {}, rp = remotePlan  || {};
+  const ls_ = localStamps || {}, rs = remoteStamps || {};
+
+  for (const wk of new Set([...Object.keys(lp), ...Object.keys(rp),
+                            ...Object.keys(ls_), ...Object.keys(rs)])) {
+    const lWeek = lp[wk] || {}, rWeek = rp[wk] || {};
+    const lSt   = ls_[wk] || {}, rSt   = rs[wk] || {};
+    const days  = new Set([...Object.keys(lWeek), ...Object.keys(rWeek),
+                           ...Object.keys(lSt),   ...Object.keys(rSt)]);
+
+    for (const d of days) {
+      const lTs = lSt[d] || 0, rTs = rSt[d] || 0;
+      const takeLocal = lTs || rTs ? lTs >= rTs : true;
+      const day = takeLocal ? lWeek[d] : rWeek[d];
+      const ts  = Math.max(lTs, rTs);
+
+      if (ts) { stamps[wk] = stamps[wk] || {}; stamps[wk][d] = ts; }
+      // An empty or absent day is a real outcome, not a gap to fill from the
+      // other side. Only write it through when there's something in it.
+      if (day && Object.keys(day).length) { plan[wk] = plan[wk] || {}; plan[wk][d] = day; }
+    }
+  }
+  return { mealplan: plan, planStamps: stamps };
+}
+
+// Per-record merge for id-keyed collections. Later `updatedAt` wins; a record
+// present on only one side is kept; local wins ties. Records with no
+// timestamp at all fall back to local, same reasoning as unstamped days.
+function mergeById(local, remote, tsField = 'updatedAt') {
+  const out = { ...(remote || {}) };
+  for (const [id, lRec] of Object.entries(local || {})) {
+    const rRec = remote?.[id];
+    if (!rRec) { out[id] = lRec; continue; }
+    out[id] = (lRec?.[tsField] || 0) >= (rRec?.[tsField] || 0) ? lRec : rRec;
+  }
+  return out;
+}
+
+// Flat key→value maps of small assignments. A union is safer than a winner
+// here: these are per-item choices, and losing a whole map because the other
+// device touched one item would be a bad trade. Local wins ties.
+function mergeAssignments(local, remote) {
+  return { ...(remote || {}), ...(local || {}) };
+}
+
+// Top-level merge. `local` is authoritative for anything without an explicit
+// rule — a new field added later fails toward keeping local data rather than
+// silently taking remote, which is the mistake this whole pass exists to fix.
+function mergeProfiles(local, remote) {
+  const L = local || {}, R = remote || {};
+  const out = { ...R };
+
+  // Recipes: per-record on updatedAt, with imageUrl grafted across in both
+  // directions. An imageUrl the other side lacks is strictly new information,
+  // never a stale value worth discarding, so a re-pull's results survive a
+  // later edit and vice versa.
+  const localRecipes = L.recipes || {}, remoteRecipes = R.recipes || {};
+  const recipes = { ...remoteRecipes };
+  for (const [id, localR] of Object.entries(localRecipes)) {
+    const remoteR = remoteRecipes[id];
+    if (!remoteR || (localR.updatedAt || 0) >= (remoteR.updatedAt || 0)) {
+      recipes[id] = (!localR.imageUrl && remoteR?.imageUrl)
+        ? { ...localR, imageUrl: remoteR.imageUrl } : localR;
+    } else {
+      recipes[id] = (localR.imageUrl && !remoteR.imageUrl)
+        ? { ...remoteR, imageUrl: localR.imageUrl } : remoteR;
+    }
+  }
+  out.recipes = recipes;
+
+  const plan = mergePlanStamped(L.mealplan, L.planStamps, R.mealplan, R.planStamps);
+  out.mealplan   = plan.mealplan;
+  out.planStamps = plan.planStamps;
+
+  out.templates = mergeById(L.templates, R.templates);
+  out.cookbooks = mergeById(L.cookbooks, R.cookbooks);
+  out.groups    = mergeById(L.groups,    R.groups);
+  out.shoppingStores       = mergeAssignments(L.shoppingStores, R.shoppingStores);
+  out.itemStoreAssignments = mergeAssignments(L.itemStoreAssignments, R.itemStoreAssignments);
+
+  // Identity and settings are device-local concerns; taking them from remote
+  // would swap the worker URL or auth method out from under a live session.
+  const LOCAL_ONLY = ['workerUrl', 'authMethod', 'userToken', 'linkedGoogle',
+                      'firstName', 'lastName', 'username', 'imageUrlMigration'];
+  for (const k of LOCAL_ONLY) {
+    if (L[k] !== undefined) out[k] = L[k];
+  }
+  out.lastModified = Math.max(L.lastModified || 0, R.lastModified || 0);
+
+  // Anything in the data shape without a rule above keeps its local value.
+  // The warning is the point: it means someone added a field and didn't
+  // decide how it merges. Defaulting to "remote wins" is exactly the mistake
+  // that cost an evening of meal planning, so an undecided field fails safe.
+  const handled = new Set([
+    'recipes', 'mealplan', 'planStamps', 'templates', 'cookbooks', 'groups',
+    'shoppingStores', 'itemStoreAssignments', 'lastModified', ...LOCAL_ONLY,
+  ]);
+  for (const k of Object.keys(defaultData())) {
+    if (handled.has(k)) continue;
+    console.warn(`[Refectory] no merge rule for "${k}" — keeping local copy`);
+    if (L[k] !== undefined) out[k] = L[k];
+  }
+  return mergeData(out);
 }
 
 // ─── LocalStorage helpers ─────────────────────────────────────────
@@ -121,6 +277,122 @@ const ls = {
   set:    (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch(e) { console.error('[Refectory] localStorage.set failed:', e); } },
   remove: k => { try { localStorage.removeItem(k); } catch {} },
 };
+
+// ─── Unsynced-work flag ───────────────────────────────────────────
+// Durable answer to "does this device hold work the worker hasn't got?".
+// Set on every local write, cleared only by a *verified* push success.
+
+function markDirty() {
+  try {
+    const cur = ls.get(DIRTY_KEY);
+    if (cur?.dirty) return;                       // keep the original `since`
+    ls.set(DIRTY_KEY, { dirty: true, since: Date.now() });
+  } catch {}
+}
+
+function clearDirty() {
+  try { ls.remove(DIRTY_KEY); } catch {}
+}
+
+function isDirty() {
+  try { return !!ls.get(DIRTY_KEY)?.dirty; } catch { return false; }
+}
+
+function dirtySince() {
+  try { return ls.get(DIRTY_KEY)?.since || 0; } catch { return 0; }
+}
+
+// ─── Rollback snapshots ───────────────────────────────────────────
+// A copy of local data taken immediately before the boot merge — the only
+// operation in the app that can replace a large amount of work at once. Kept
+// deliberately dumb: three rotating slots, no compression, no cleverness.
+
+function snapshotKeys() {
+  const keys = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(SNAPSHOT_PREFIX)) keys.push(k);
+    }
+  } catch {}
+  // Key suffix is the timestamp, so lexical sort is chronological.
+  return keys.sort();
+}
+
+function listSnapshots() {
+  return snapshotKeys().map(k => {
+    const snap = ls.get(k);
+    if (!snap?.data) return null;
+    let meals = 0;
+    for (const wk of Object.values(snap.data.mealplan || {}))
+      for (const day of Object.values(wk || {}))
+        for (const slot of Object.values(day || {}))
+          meals += slotEntries(slot).length;
+    return {
+      key: k,
+      at: snap.at || 0,
+      recipes: Object.keys(snap.data.recipes || {}).length,
+      meals,
+    };
+  }).filter(Boolean).sort((a, b) => b.at - a.at);
+}
+
+// Best-effort by design: a snapshot that can't be written must never stop the
+// app from booting. Losing the safety net is bad; failing to start is worse.
+function writeSnapshot(data) {
+  try {
+    const json = JSON.stringify(data);
+    const existing = snapshotKeys();
+    // An idle reload shouldn't rotate a good copy out for an identical one.
+    if (existing.length) {
+      const newest = ls.get(existing[existing.length - 1]);
+      if (newest && JSON.stringify(newest.data) === json) return;
+    }
+    ls.set(`${SNAPSHOT_PREFIX}${String(Date.now()).padStart(14, '0')}`,
+           { at: Date.now(), data: JSON.parse(json) });
+    pruneSnapshots(SNAPSHOT_KEEP);
+  } catch (e) {
+    console.warn('[Refectory] snapshot skipped:', e);
+  }
+}
+
+// Drop oldest-first down to `keep`. Also called from saveLocal() on a quota
+// failure: reclaiming space for live data beats holding history.
+function pruneSnapshots(keep) {
+  const keys = snapshotKeys();
+  let removed = 0;
+  while (keys.length > keep) { ls.remove(keys.shift()); removed++; }
+  return removed;
+}
+
+async function restoreSnapshot(key) {
+  const snap = ls.get(key);
+  if (!snap?.data) { showToast('That backup could not be read.'); return; }
+  const when = new Date(snap.at).toLocaleString('en-US',
+    { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  if (!await appConfirm({
+    title: `Restore the copy from ${when}?`,
+    message: 'Everything currently on this device is replaced by that copy, and it becomes the version your other devices sync to.\n\nA backup of the current state is taken first.',
+    confirmLabel: 'Restore', danger: true,
+  })) return;
+
+  writeSnapshot(App.data);                 // current state becomes restorable too
+  App.data = mergeData(snap.data);
+
+  // Stamp every restored day as now, so the restore wins the next merge
+  // instead of losing to whatever is sitting on the worker.
+  const now = Date.now();
+  App.data.planStamps = App.data.planStamps || {};
+  for (const [wk, week] of Object.entries(App.data.mealplan || {})) {
+    App.data.planStamps[wk] = App.data.planStamps[wk] || {};
+    for (const dayIdx of Object.keys(week || {})) App.data.planStamps[wk][dayIdx] = now;
+  }
+
+  scheduleSave();
+  renderAll();
+  await syncToWorker();
+  showToast('Restored ✓');
+}
 
 // Persist to localStorage, and be loud when it doesn't work.
 //
@@ -132,22 +404,38 @@ const ls = {
 // are gone. A banner that stays put is the whole point: silent data loss is
 // far worse than a loud failure.
 function saveLocal() {
-  try {
+  const attempt = () => {
     const json = JSON.stringify(App.data);
     localStorage.setItem(STORAGE_KEY, json);
     // Verify the write actually landed. Some browsers accept setItem and
     // discard the value under storage pressure rather than throwing.
     const back = localStorage.getItem(STORAGE_KEY);
     if (!back || back.length !== json.length) throw new Error('write did not persist');
-    if (App.storageBlocked) { App.storageBlocked = false; renderStorageBanner(); }
-    return true;
+  };
+
+  try {
+    attempt();
   } catch (e) {
-    console.error('[Refectory] saveLocal failed — data NOT persisted:', e);
-    App.storageBlocked = true;
-    App.storageError    = e?.name === 'QuotaExceededError' ? 'quota' : (e?.message || 'unknown');
-    renderStorageBanner();
-    return false;
+    // Out of room: rollback history is the most expendable thing here. Live
+    // data beats a safety net for data that no longer exists.
+    let recovered = false;
+    if (e?.name === 'QuotaExceededError' && pruneSnapshots(0) > 0) {
+      try { attempt(); recovered = true; } catch {}
+    }
+    if (!recovered) {
+      console.error('[Refectory] saveLocal failed — data NOT persisted:', e);
+      App.storageBlocked = true;
+      App.storageError    = e?.name === 'QuotaExceededError' ? 'quota' : (e?.message || 'unknown');
+      renderStorageBanner();
+      // Local write failed and the worker copy is stale — this is the most
+      // "ahead" a device can be, so the flag stays up.
+      markDirty();
+      return false;
+    }
   }
+
+  if (App.storageBlocked) { App.storageBlocked = false; renderStorageBanner(); }
+  return true;
 }
 
 // Persistent, dismissible-only-by-fixing banner. Also reports how much of the
@@ -194,6 +482,103 @@ function renderStorageBanner() {
   });
 }
 
+// ─── Sync status banner ───────────────────────────────────────────
+// Every way syncing can fail ends up visible here. The old behaviour — a
+// console.error and a timer retrying forever — is what let two hours of
+// planning sit unsynced without a word.
+
+function setSyncState(state) {
+  if (App.syncState === state) return;
+  App.syncState = state;
+  renderSyncBanner();
+}
+
+function renderSyncBanner() {
+  const el = document.getElementById('sync-banner');
+  if (!el) return;
+  if (!App.syncState) { el.style.display = 'none'; el.innerHTML = ''; return; }
+
+  const ago = () => {
+    const since = dirtySince();
+    if (!since) return '';
+    const mins = Math.round((Date.now() - since) / 60000);
+    if (mins < 1)  return ' Unsaved changes from the last minute.';
+    if (mins < 60) return ` Unsaved changes from the last ${mins} minute${mins === 1 ? '' : 's'}.`;
+    const hrs = Math.round(mins / 60);
+    return ` Unsaved changes going back about ${hrs} hour${hrs === 1 ? '' : 's'}.`;
+  };
+
+  const views = {
+    'session-expired': {
+      title: '⚠️ Your sign-in has expired.',
+      body: `Your work is safe on this device, but it isn't reaching your other devices.${ago()}`,
+      actions: `<button class="btn btn-sm btn-outline" id="sync-banner-signin">Sign in again</button>`,
+    },
+    'push-failed': {
+      title: '⚠️ Changes aren\u2019t syncing.',
+      body: `Everything is saved on this device, but the server isn't getting it.${ago()}`,
+      actions: `<button class="btn btn-sm btn-outline" id="sync-banner-retry">Try again</button>
+                <button class="btn btn-sm btn-outline" id="sync-banner-export">Export a backup</button>`,
+    },
+    'tab-conflict': {
+      title: '⚠️ Refectory is open in another tab.',
+      body: `Both tabs are writing to the same place, so whichever saves last wins and the other tab's edits are lost. Reload this tab to pick up the latest, or close the other one.`,
+      actions: `<button class="btn btn-sm btn-outline" id="sync-banner-reload">Reload</button>`,
+    },
+  };
+
+  const v = views[App.syncState];
+  if (!v) { el.style.display = 'none'; return; }
+
+  el.style.display = '';
+  el.innerHTML = `<strong>${v.title}</strong>${v.body}
+    <span class="storage-banner-actions">${v.actions}</span>`;
+
+  el.querySelector('#sync-banner-signin')?.addEventListener('click', () => handleAuthFailure('banner'));
+  el.querySelector('#sync-banner-reload')?.addEventListener('click', () => location.reload());
+  el.querySelector('#sync-banner-export')?.addEventListener('click', () => openExportModal());
+  el.querySelector('#sync-banner-retry')?.addEventListener('click', async () => {
+    showToast('Syncing…');
+    if (await syncToWorker(true)) showToast('Synced ✓');
+    else showToast('Still not syncing. Your work is safe on this device.');
+  });
+}
+
+// ─── Session expiry ───────────────────────────────────────────────
+// One entry point for both routes: a 401/403 coming back from a write
+// (reactive) and the token-expiry watcher (proactive). Idempotent — a second
+// trigger while the modal is open is a no-op rather than a second modal.
+
+function handleAuthFailure(source) {
+  if (Auth.isGuest()) return;
+  if (!Auth.isGoogleAccount()) {
+    // Token accounts sign with HMAC and don't expire, so a 401 here means
+    // something else is wrong. Surface it rather than prompting for a
+    // sign-in that wouldn't fix anything.
+    setSyncState('push-failed');
+    return;
+  }
+  if (App.authPromptOpen) return;
+  App.authPromptOpen = true;
+  setSyncState('session-expired');
+
+  Auth.showSessionRefresh({
+    reason: source === 'watch'
+      ? 'Your sign-in is about to expire.'
+      : 'Your sign-in has expired.',
+    onDone: async (ok) => {
+      App.authPromptOpen = false;
+      if (!ok) return;   // dismissed — banner stays up, watcher re-prompts
+      // Credential restored. Push immediately rather than waiting up to a
+      // minute for the next tick. Deliberately no pull: re-auth restores a
+      // credential, it has no business reading and merging remote data.
+      setSyncState(null);
+      App.syncFailures = 0;
+      if (await syncToWorker(true)) showToast('Signed in — your changes are synced ✓');
+    },
+  });
+}
+
 // ─── Worker sync ──────────────────────────────────────────────────
 
 function getWorkerUrl() {
@@ -228,11 +613,14 @@ async function pushToWorker() {
     if (!res.ok) {
       const errText = await res.text().catch(() => String(res.status));
       console.error(`[Refectory] pushToWorker failed (${res.status}):`, errText);
+      // 401/403 is an expired or rejected credential, not a transient blip.
+      // Retrying it on a timer forever is what made this silent before.
+      if (res.status === 401 || res.status === 403) handleAuthFailure('push');
     }
-    return res.ok;
+    return { ok: res.ok, status: res.status };
   } catch(e) {
     console.error('[Refectory] pushToWorker network error:', e);
-    return false;
+    return { ok: false, status: 0 };
   }
 }
 
@@ -260,22 +648,49 @@ async function pullFromWorker() {
       return App.data;
     }
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) handleAuthFailure('pull');
+      return null;
+    }
     const j = await res.json();
     return j.value ?? j;
   } catch { return null; }
 }
 
-async function syncToWorker() {
-  if (Auth.isGuest()) return;
-  if (!App.pendingSync) return;
+// Push if there is anything to push. `force` bypasses the in-memory fast path
+// — used at boot and after re-auth, where the durable flag is the only thing
+// that knows this device is ahead.
+async function syncToWorker(force = false) {
+  if (Auth.isGuest()) return false;
+  if (!force && !App.pendingSync && !isDirty()) return false;
   App.pendingSync = false;
-  const ok = await pushToWorker();
-  if (!ok) App.pendingSync = true; // retry next tick
+
+  const res = await pushToWorker();
+  if (res?.ok) {
+    // Only a verified success clears the flag. Not an attempt, not a
+    // response we couldn't read — a 2xx we actually saw.
+    App.syncFailures = 0;
+    clearDirty();
+    if (App.syncState === 'push-failed') setSyncState(null);
+    return true;
+  }
+
+  App.pendingSync = true;                 // retry next tick
+  App.syncFailures++;
+  markDirty();
+  // One failure is usually a flaky network. Two in a row means she should
+  // know, because from here on every edit is local-only.
+  if (App.syncFailures >= 2 && App.syncState !== 'session-expired') setSyncState('push-failed');
+  return false;
 }
 
 function scheduleSave() {
   App.pendingSync = true;
+  // lastModified was initialised at account creation and then never touched
+  // again, which made it a lie. It's a useful coarse tiebreaker and a useful
+  // diagnostic, so keep it honest.
+  if (App.data) App.data.lastModified = Date.now();
+  markDirty();
   saveLocal();
 }
 
@@ -2006,6 +2421,44 @@ function stampCooked(entry) {
   if (r) { r.lastCooked = Date.now(); saveRecipe(r); }
 }
 
+// ─── Meal plan day stamps ────────────────────────────────────────
+// Every plan write records when the *day* changed. Day granularity rather
+// than slot is a deliberate reliability trade: a merge has to resolve
+// deletions, and a deleted slot leaves nothing behind to carry a timestamp.
+// Per-slot stamping would need tombstone records — deleted markers that have
+// to be merged and garbage-collected — and a bug in that machinery either
+// resurrects deleted meals or eats live ones. Stamping the whole day makes a
+// deletion just a newer version of that day, which last-writer-wins resolves
+// with no tombstones at all. The cost is that two devices editing different
+// slots of the same day without syncing in between will lose one of them.
+
+function stampPlanDay(weekKey, dayIdx) {
+  if (!weekKey || dayIdx == null) return;
+  if (!App.data.planStamps) App.data.planStamps = {};
+  if (!App.data.planStamps[weekKey]) App.data.planStamps[weekKey] = {};
+  App.data.planStamps[weekKey][String(dayIdx)] = Date.now();
+}
+
+// Stamps outlive the days they describe — that's the whole point — but not
+// forever. Anything well in the past with no surviving plan data is dropped.
+// An over-eager sweep is harmless: the day falls back to the unstamped rule,
+// which prefers local.
+function gcPlanStamps() {
+  const stamps = App.data?.planStamps;
+  if (!stamps) return 0;
+  const cutoff = Date.now() - PLAN_STAMP_GC_DAYS * 86400000;
+  let dropped = 0;
+  for (const [wk, days] of Object.entries(stamps)) {
+    for (const [d, ts] of Object.entries(days || {})) {
+      if (ts >= cutoff) continue;
+      if (App.data.mealplan?.[wk]?.[d]) continue;   // still describes live data
+      delete days[d]; dropped++;
+    }
+    if (!Object.keys(days || {}).length) delete stamps[wk];
+  }
+  return dropped;
+}
+
 // Write a slot. Passing null for `entry` clears the slot entirely (unchanged).
 // Pass { append: true } to add alongside whatever is already there instead of
 // replacing it.
@@ -2023,6 +2476,7 @@ function setMealSlot(weekKey, dayIdx, slot, entry, opts = {}) {
   } else {
     delete day[slot];
   }
+  stampPlanDay(weekKey, dayIdx);
   scheduleSave();
   renderTodaysMealsTrigger();
 }
@@ -2036,6 +2490,7 @@ function removeMealSlotEntry(weekKey, dayIdx, slot, idx) {
   entries.splice(idx, 1);
   const packed = packSlot(entries);
   if (packed === null) delete day[slot]; else day[slot] = packed;
+  stampPlanDay(weekKey, dayIdx);
   scheduleSave();
   renderTodaysMealsTrigger();
 }
@@ -2062,6 +2517,9 @@ function writePlanSlot(weekKey, dayIdx, slot, entries) {
   const day = planDayRef(weekKey, dayIdx, true);
   const packed = packSlot(entries);
   if (packed === null) delete day[slot]; else day[slot] = packed;
+  // Stamped before the pruning below, and stored outside `mealplan`, so an
+  // emptied day still records when it was emptied.
+  stampPlanDay(weekKey, dayIdx);
   if (!Object.keys(day).length) delete App.data.mealplan[weekKey][dayIdx];
   if (!Object.keys(App.data.mealplan[weekKey]).length) delete App.data.mealplan[weekKey];
 }
@@ -2128,6 +2586,14 @@ function restoreWeeks(snap) {
   for (const [wk, val] of Object.entries(snap)) {
     if (val === null) delete App.data.mealplan[wk];
     else App.data.mealplan[wk] = val;
+    // An undo is a fresh edit as far as merging is concerned. Stamp every day
+    // the undo could have touched, including ones it emptied — otherwise a
+    // stale remote copy wins the next merge and puts the meal back.
+    const days = new Set([
+      ...Object.keys(val || {}),
+      ...Object.keys(App.data.planStamps?.[wk] || {}),
+    ]);
+    for (const d of days) stampPlanDay(wk, d);
   }
   scheduleSave();
   renderTodaysMealsTrigger();
@@ -4515,9 +4981,30 @@ async function runDedupe() {
 // and reads live data, so the link stays current; it expires on its own at
 // midnight after the final day.
 
+// Which meal types go into the link. Defaults to all four every time the
+// modal opens rather than remembering the last choice — a dinner-only link
+// silently becoming the default is a good way to send the kids a page that
+// looks like nothing is planned all day.
+function shareSelectedSlots() {
+  return MEAL_SLOTS.filter(s =>
+    document.getElementById(`share-slot-${s}`)?.checked);
+}
+
+const SLOT_LABELS = { breakfast: 'Breakfast', lunch: 'Lunch', dinner: 'Dinner', snack: 'Snacks' };
+
+function shareSlotsLabel(slots) {
+  if (!slots || slots.length === MEAL_SLOTS.length) return '';
+  const names = slots.map(s => SLOT_LABELS[s] || s);
+  if (names.length === 1) return `${names[0]} only`;
+  return `${names.slice(0, -1).join(', ')} & ${names[names.length - 1]}`;
+}
+
 function shareDateInputs() {
   const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   const sel = document.getElementById('share-range')?.value || 'week';
+
+  const slots = shareSelectedSlots();
+  if (!slots.length) return { error: 'Pick at least one meal type.' };
 
   if (sel === 'custom') {
     const from = parseLocalDate(document.getElementById('share-from')?.value || '');
@@ -4526,14 +5013,14 @@ function shareDateInputs() {
     if (to < from)    return { error: 'The end date is before the start date.' };
     const days = Math.round((to - from) / 86400000) + 1;
     if (days > 62)    return { error: 'Ranges longer than 62 days can’t be shared.' };
-    return { from, to, fromStr: iso(from), toStr: iso(to) };
+    return { from, to, fromStr: iso(from), toStr: iso(to), slots };
   }
 
   const weeks = sel === 'week' ? 1 : parseInt(sel) || 1;
   const from  = displayWeekStart(View.currentWeek);
   const to    = displayWeekStart(addWeeks(View.currentWeek, weeks - 1));
   to.setDate(to.getDate() + 6);
-  return { from, to, fromStr: iso(from), toStr: iso(to) };
+  return { from, to, fromStr: iso(from), toStr: iso(to), slots };
 }
 
 // Midnight after the final day, in *her* timezone. The worker runs in UTC and
@@ -4553,7 +5040,7 @@ function shareRangeLabel(from, to) {
 
 // Count what the recipients would actually see, so a plan with no images or
 // no meals is obvious before the link goes out rather than after.
-function shareRangeStats(from, to) {
+function shareRangeStats(from, to, slots = MEAL_SLOTS) {
   let meals = 0, withImg = 0, days = 0;
   for (let ts = new Date(from).setHours(0,0,0,0);
        ts <= new Date(to).setHours(0,0,0,0); ts += 86400000) {
@@ -4561,7 +5048,7 @@ function shareRangeStats(from, to) {
     const wk = getISOWeekKey(d);
     const dayPlan = App.data.mealplan?.[wk]?.[(d.getDay() + 6) % 7] || {};
     let any = false;
-    for (const slot of MEAL_SLOTS) {
+    for (const slot of slots) {
       for (const entry of slotEntries(dayPlan[slot])) {
         if (isFendEntry(entry)) { meals++; any = true; continue; }
         const r = getRecipe(slotRecipeId(entry));
@@ -4585,15 +5072,19 @@ function updateShareHint() {
   const r = shareDateInputs();
   if (r.error) { hint.textContent = r.error; hint.style.color = 'var(--saffron)'; return; }
 
-  const st = shareRangeStats(r.from, r.to);
+  const st    = shareRangeStats(r.from, r.to, r.slots);
+  const filt  = shareSlotsLabel(r.slots);
   if (!st.meals) {
-    hint.textContent = `Nothing planned for ${shareRangeLabel(r.from, r.to)}.`;
+    hint.textContent = filt
+      ? `No ${filt.replace(' only', '').toLowerCase()} planned for ${shareRangeLabel(r.from, r.to)}.`
+      : `Nothing planned for ${shareRangeLabel(r.from, r.to)}.`;
     hint.style.color = 'var(--saffron)';
     return;
   }
   const noImg = st.meals - st.withImg;
   hint.textContent =
-    `${shareRangeLabel(r.from, r.to)} · ${st.meals} meal${st.meals === 1 ? '' : 's'} across ` +
+    `${shareRangeLabel(r.from, r.to)}` + (filt ? ` · ${filt}` : '') +
+    ` · ${st.meals} meal${st.meals === 1 ? '' : 's'} across ` +
     `${st.days} day${st.days === 1 ? '' : 's'}` +
     (noImg ? ` · ${noImg} without a photo` : '');
   hint.style.color = 'var(--muted)';
@@ -4606,6 +5097,12 @@ function openSharePlanModal() {
   const f = document.getElementById('share-from'), t = document.getElementById('share-to');
   if (f && !f.value) f.value = iso(start);
   if (t && !t.value) t.value = iso(end);
+
+  // Always back to all four on open.
+  for (const slot of MEAL_SLOTS) {
+    const cb = document.getElementById(`share-slot-${slot}`);
+    if (cb) cb.checked = true;
+  }
 
   document.getElementById('share-result').style.display = 'none';
   document.getElementById('share-title').value = '';
@@ -4625,11 +5122,13 @@ async function createSharePlanLink() {
   const token = App.data?.userToken;
   if (!token) { showToast('No account token — try signing in again.'); return; }
 
-  const label = shareRangeLabel(r.from, r.to);
+  const filt  = shareSlotsLabel(r.slots);
+  const label = shareRangeLabel(r.from, r.to) + (filt ? ` · ${filt}` : '');
   const body  = JSON.stringify({
     token,
     from: r.fromStr,
     to:   r.toStr,
+    slots: r.slots,
     title:    (document.getElementById('share-title')?.value || '').trim() || 'Meal Plan',
     subtitle: label,
     expiresAt: shareExpiryFor(r.to),
@@ -4644,6 +5143,13 @@ async function createSharePlanLink() {
       body,
     });
     const data = await res.json().catch(() => ({}));
+    if (res.status === 401 || res.status === 403) {
+      // Prompt for re-auth, then let her press Create again. Auto-retrying
+      // would produce a link minutes after the action that asked for it,
+      // without her confirming the range or the meal types.
+      handleAuthFailure('share');
+      throw new Error('your sign-in expired — sign in and try again');
+    }
     if (!res.ok || !data.id) throw new Error(data.error || `HTTP ${res.status}`);
 
     const url = `${base}/share/${data.id}`;
@@ -6443,7 +6949,38 @@ function openSettings() {
   document.getElementById('settings-username-input').value  = d.username   || '';
   const workerEl = document.getElementById('settings-worker-url');
   if (workerEl) workerEl.value = d.workerUrl || '';
+  renderSnapshotList();
   openModal('modal-settings');
+}
+
+// Rollback copies, newest first. Counts rather than raw sizes, because
+// "412 recipes, 23 planned meals" tells you whether it's the copy you want
+// and "1.8 MB" doesn't.
+function renderSnapshotList() {
+  const el = document.getElementById('settings-snapshots');
+  if (!el) return;
+  const snaps = listSnapshots();
+  if (!snaps.length) {
+    el.innerHTML = `<div class="settings-row-sub muted">No backups yet — one is taken each time the app starts and syncs.</div>`;
+    return;
+  }
+  el.innerHTML = snaps.map(sn => `
+    <div class="settings-row">
+      <div>
+        <div class="settings-row-label">${esc(new Date(sn.at).toLocaleString('en-US',
+          { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}</div>
+        <div class="settings-row-sub">${sn.recipes} recipe${sn.recipes === 1 ? '' : 's'} · ${sn.meals} planned meal${sn.meals === 1 ? '' : 's'}</div>
+      </div>
+      <button class="btn btn-sm btn-outline" data-snapshot="${esc(sn.key)}"
+              style="white-space:nowrap;flex-shrink:0;">Restore</button>
+    </div>`).join('');
+
+  el.querySelectorAll('[data-snapshot]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      await restoreSnapshot(btn.dataset.snapshot);
+      renderSnapshotList();
+    });
+  });
 }
 
 function clearImportedRecipes() {
@@ -6538,6 +7075,7 @@ async function migrateImageUrls() {
 
 function renderAll() {
   renderStorageBanner();
+  renderSyncBanner();
   renderRecipes();
   if (View.activeSection === 'planner')   renderPlanner();
   if (View.activeSection === 'shopping')  renderShoppingList();
@@ -6606,40 +7144,47 @@ async function boot() {
     return;
   }
 
-  // Existing session — pull from worker and merge with local data
-  // Local recipes win if they are newer (updatedAt), so a large import
-  // right before a reload doesn't get clobbered by a stale worker copy.
+  // Existing session.
+  //
+  // Order matters here, and it didn't used to. The pull ran first and its
+  // result was written straight over localStorage, so a stale remote copy —
+  // which is exactly what you have when the session died an hour ago and
+  // every push since has 401'd — would destroy local work before anyone
+  // checked whether the session was even alive. Auth is established first
+  // now, and the merge resolves per record and per day rather than letting
+  // remote win by default.
   const tokenBeforePull = App.data.userToken;
-  const localRecipes    = { ...(App.data.recipes || {}) };
-  const remote          = await pullFromWorker();
+
+  // 1. Establish auth before reading anything. A dead session means whatever
+  //    the worker would return is stale by definition.
+  const authOk = await Auth.bootCheck(tokenBeforePull);
+  if (!authOk) {
+    // Re-auth is being shown. Local data stands untouched and the app stays
+    // usable behind it; nothing is pulled, nothing is merged, nothing is
+    // overwritten.
+    App.bootPullDone   = true;
+    App.bootPullLoaded = false;
+    migrateTemplateAnchors();
+    renderAll();
+    return;
+  }
+
+  // 2. Take a rollback copy before the one operation that can replace a lot
+  //    of work at once.
+  writeSnapshot(App.data);
+
+  // 3. Pull and merge.
+  const wasDirty = isDirty();
+  const remote   = await pullFromWorker();
+
   if (remote) {
-    const remoteRecipes = remote.recipes || {};
-    // Merge: for each recipe take whichever copy has the later updatedAt
-    const merged = { ...remoteRecipes };
-    for (const [id, localR] of Object.entries(localRecipes)) {
-      const remoteR = remoteRecipes[id];
-      if (!remoteR || (localR.updatedAt || 0) >= (remoteR.updatedAt || 0)) {
-        // Local wins, but don't discard an image link the remote copy has
-        // and this device hasn't migrated yet.
-        merged[id] = (!localR.imageUrl && remoteR?.imageUrl)
-          ? { ...localR, imageUrl: remoteR.imageUrl }
-          : localR;
-      } else {
-        // Remote wins on recency — but taking it wholesale threw away image
-        // links recovered locally. An imageUrl the remote lacks is strictly
-        // new information, never a stale value worth discarding, so graft it
-        // on rather than losing a re-pull's results to any later edit.
-        merged[id] = (localR.imageUrl && !remoteR.imageUrl)
-          ? { ...remoteR, imageUrl: localR.imageUrl }
-          : remoteR;
-      }
-    }
-    App.data = mergeData({ ...remote, recipes: merged });
+    App.data = mergeProfiles(App.data, remote);
     saveLocal();
-    // Push merged result back to worker so it stays in sync
-    if (Object.keys(localRecipes).length > Object.keys(remoteRecipes).length) {
-      pushToWorker();
-    }
+  } else {
+    // No remote copy came back. Change nothing — but say so, because it means
+    // this device is diverging from the others and silence is what caused
+    // the problem this release exists to fix.
+    if (!Auth.isGuest() && getWorkerUrl()) setSyncState('push-failed');
   }
 
   // The boot pull has settled — either remote data merged in, or we know it
@@ -6649,16 +7194,21 @@ async function boot() {
   App.bootPullDone   = true;
   App.bootPullLoaded = !!remote;
 
-  const ok = await Auth.bootCheck(tokenBeforePull);
-  if (!ok) return;
-
   // Run before the first render: a template pulled from the worker may still
   // be Monday-anchored even if this device migrated its local copy already.
   migrateTemplateAnchors();
+  gcPlanStamps();
 
   renderAll();
   migrateImageUrls();
-  if (!Auth.isGuest()) startSyncPing();
+
+  if (!Auth.isGuest()) {
+    startSyncPing();
+    Auth.startSessionWatch(() => handleAuthFailure('watch'));
+    // 4. This device was holding unsynced work. Get it onto the worker now
+    //    rather than waiting up to a minute for the first tick.
+    if (wasDirty || isDirty()) syncToWorker(true);
+  }
 }
 
 // ─── Event wiring ─────────────────────────────────────────────────
@@ -6732,6 +7282,9 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('share-range')?.addEventListener('change', updateShareHint);
   document.getElementById('share-from')?.addEventListener('change', updateShareHint);
   document.getElementById('share-to')?.addEventListener('change', updateShareHint);
+  for (const slot of MEAL_SLOTS) {
+    document.getElementById(`share-slot-${slot}`)?.addEventListener('change', updateShareHint);
+  }
   document.getElementById('share-create')?.addEventListener('click', createSharePlanLink);
   document.getElementById('share-cancel')?.addEventListener('click', () => closeModal('modal-share-plan'));
   document.getElementById('share-copy')?.addEventListener('click', async () => {
@@ -7072,12 +7625,45 @@ document.addEventListener('DOMContentLoaded', () => {
   // Today's Meals — toggle drawer; clicking the label again while open closes it
   document.getElementById('btn-todays-meals')?.addEventListener('click', toggleTodaysMealsDrawer);
 
-  // Safety save when tab is hidden or page is closing
+  // Safety save when tab is hidden or page is closing.
+  //
+  // These used to save locally and stop there, which left a gap: an edit made
+  // 59 seconds before the laptop lid closes would sit on one device until the
+  // next visit, invisible. Pushing here too closes it.
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden' && App.data) saveLocal();
+    if (document.visibilityState !== 'hidden' || !App.data) return;
+    saveLocal();
+    if (!Auth.isGuest() && isDirty()) syncToWorker(true);
   });
   window.addEventListener('pagehide', () => {
-    if (App.data) saveLocal();
+    if (!App.data) return;
+    saveLocal();
+    if (Auth.isGuest() || !isDirty()) return;
+    // Deliberately not sendBeacon: every worker write is signed, and beacons
+    // can't carry the auth headers. An unauthenticated write endpoint to make
+    // this work would be a much worse bug than the one it fixes. The
+    // visibilitychange push above already covers the realistic case — a tab
+    // is hidden before it's closed — and the dirty flag covers the rest on
+    // next boot.
+    syncToWorker(true);
+  });
+
+  // Two tabs each hold their own copy of App.data and each writes the whole
+  // document, so the second one to save silently overwrites the first one's
+  // work. Detection only for now — cross-tab live sync is a bigger piece of
+  // work — but detection beats the silence.
+  window.addEventListener('storage', e => {
+    if (e.key !== STORAGE_KEY || !App.data) return;
+    setSyncState('tab-conflict');
+  });
+
+  // Don't let her close the tab on work that hasn't reached the server.
+  window.addEventListener('beforeunload', e => {
+    if (Auth.isGuest() || !isDirty()) return;
+    const stuck = dirtySince() && (Date.now() - dirtySince()) > UNSAVED_WARN_MS;
+    if (!stuck || App.syncState === null) return;
+    e.preventDefault();
+    e.returnValue = '';
   });
 
   // Re-render planner on resize (fold open/close)

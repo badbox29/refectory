@@ -412,6 +412,8 @@ const Auth = (() => {
     C.toast('Signed out. Your data is still stored securely.');
   }
 
+  let _sessionWatchTimer = null;
+
   // ── verifyGoogleSession() ────────────────────────────────────────
   // Called at boot for Google accounts. First checks the stored JWT's
   // exp claim locally — no network needed if the token has >5 minutes
@@ -557,6 +559,121 @@ const Auth = (() => {
           'Sign-in cancelled — try again or use a different account.');
       }
     });
+  }
+
+  // ── showSessionRefresh() ─────────────────────────────────────────
+  // Mid-session re-auth. Deliberately NOT showGoogleReauth(), which is a
+  // boot-time full-screen takeover that assumes the app hasn't rendered yet —
+  // firing that over a half-finished week of meal planning would be alarming
+  // at best.
+  //
+  // This is an overlay. The app stays rendered and untouched underneath,
+  // nothing re-renders, no state is rebuilt, and it can be dismissed. Above
+  // all it does not pull: restoring a credential has no business reading and
+  // merging remote data, and a pull against a stale worker copy is precisely
+  // how work got destroyed before.
+  //
+  // opts: { reason, onDone(ok) }
+  function showSessionRefresh(opts = {}) {
+    const d       = getData();
+    const name    = d.linkedGoogle?.name    || [d.firstName, d.lastName].filter(Boolean).join(' ') || '';
+    const email   = d.linkedGoogle?.email   || '';
+    const picture = d.linkedGoogle?.picture || '';
+    const done    = typeof opts.onDone === 'function' ? opts.onDone : () => {};
+
+    let host = document.getElementById('auth-session-refresh');
+    if(host) host.remove();
+
+    host = document.createElement('div');
+    host.id = 'auth-session-refresh';
+    host.className = 'modal-overlay open';
+    // Above any modal she might already have open — this is the thing that
+    // needs answering.
+    host.style.zIndex = '400';
+    host.setAttribute('role', 'dialog');
+    host.setAttribute('aria-modal', 'true');
+    host.innerHTML = `
+      <div class="modal modal-sm">
+        <div class="modal-header">
+          <h2 class="modal-title">Sign in again</h2>
+          <button class="modal-close" id="auth-refresh-x" title="Close">✕</button>
+        </div>
+        <div class="modal-body">
+          <p class="f13 lh muted" style="margin-bottom:1rem;">
+            ${_esc(opts.reason || 'Your sign-in has expired.')}
+            Your work is safe on this device — signing in again sends it to your
+            other devices.
+          </p>
+          ${picture || name ? `
+            <div class="auth-google-info" style="margin-bottom:1rem;">
+              ${picture ? `<img src="${_esc(picture)}" class="auth-google-avatar" alt="">` : ''}
+              <div>
+                ${name  ? `<div style="font-size:.85rem;font-weight:500;">${_esc(name)}</div>`  : ''}
+                ${email ? `<div style="font-size:.78rem;opacity:.6;">${_esc(email)}</div>` : ''}
+              </div>
+            </div>` : ''}
+          <div id="auth-refresh-container" style="width:100%;min-height:44px;"></div>
+          <div id="auth-refresh-status"
+               style="min-height:1.3rem;font-size:.82rem;margin-top:.5rem;color:var(--red,#c07070);"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost btn-sm" id="auth-refresh-later">Not now</button>
+        </div>
+      </div>`;
+    document.body.appendChild(host);
+
+    // Dismissible on purpose. Blocking the app would be its own kind of work
+    // loss — she'd close the tab. The host app keeps its banner up and the
+    // watcher re-prompts later.
+    const close = (ok) => { host.remove(); done(!!ok); };
+    host.querySelector('#auth-refresh-x').addEventListener('click', () => close(false));
+    host.querySelector('#auth-refresh-later').addEventListener('click', () => close(false));
+    host.addEventListener('click', e => { if(e.target === host) close(false); });
+
+    const statusEl = host.querySelector('#auth-refresh-status');
+    signInWithGoogle(host.querySelector('#auth-refresh-container')).then(result => {
+      if(result?.ok) close(true);
+      else statusEl.textContent = _signInMsg(result, 'Sign-in cancelled — try again.');
+    });
+  }
+
+  // ── startSessionWatch() ──────────────────────────────────────────
+  // Google ID tokens live about an hour, and _authHeaders() sends the stored
+  // one as a Bearer header on every worker write. Verification only ever ran
+  // at boot, so a long session would quietly cross the expiry line and every
+  // write from then on would 401 into a console.error.
+  //
+  // This checks the token's own exp claim on a timer — a local decode, no
+  // network call — and fires before it lapses rather than after. From the
+  // user's side the token never actually expires; it just occasionally asks
+  // for a tap.
+  const SESSION_CHECK_MS  = 3 * 60_000;
+  const SESSION_MARGIN_S  = 5 * 60;
+
+  function tokenSecondsLeft() {
+    const idToken = store.get(C.storageAuthKey);
+    if(!idToken) return 0;
+    try {
+      const parts = idToken.split('.');
+      if(parts.length !== 3) return 0;
+      const payload = JSON.parse(atob(parts[1].replace(/-/g,'+').replace(/_/g,'/')));
+      return (payload.exp || 0) - Math.floor(Date.now() / 1000);
+    } catch { return 0; }
+  }
+
+  function startSessionWatch(onExpiring) {
+    if(_sessionWatchTimer) clearInterval(_sessionWatchTimer);
+    if(!isGoogleAccount()) return;
+    _sessionWatchTimer = setInterval(() => {
+      if(!isGoogleAccount()) return;
+      if(tokenSecondsLeft() > SESSION_MARGIN_S) return;
+      try { onExpiring?.(); } catch(e) { console.warn('[Auth] session watch handler failed:', e); }
+    }, SESSION_CHECK_MS);
+  }
+
+  function stopSessionWatch() {
+    if(_sessionWatchTimer) clearInterval(_sessionWatchTimer);
+    _sessionWatchTimer = null;
   }
 
   // ── handlePullMigration() ────────────────────────────────────────
@@ -1056,7 +1173,10 @@ const Auth = (() => {
       d.authMethod = 'token';
       C.setData(d);
 
-      const ok = await C.pushToWorker();
+      // pushToWorker may return a bare boolean or { ok, status } depending on
+      // the host app — accept either rather than treating an object as truthy.
+      const pushed = await C.pushToWorker();
+      const ok = (pushed === true) || !!pushed?.ok;
       if(!ok) {
         statusEl.style.color = 'var(--red, #c07070)';
         statusEl.textContent = 'Could not reach Worker URL — check it and try again.';
@@ -1471,6 +1591,10 @@ const Auth = (() => {
     showSetupLoadToken,     // S3B enter existing token (call from Settings)
     showGoogleUpgradeFlow,  // token → Google upgrade (call from Settings)
     showGoogleReauth,       // re-auth after session expiry (called automatically by bootCheck)
+    showSessionRefresh,     // mid-session re-auth overlay — non-destructive, dismissible
+    startSessionWatch,      // poll the token's exp claim and warn before it lapses
+    stopSessionWatch,
+    tokenSecondsLeft,
     showGuestSwitchConfirm, // guest switch/reset (call from Settings)
     showTokenUpgradePrompt, // legacy token upgrade prompt (call from boot)
 
