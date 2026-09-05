@@ -3334,11 +3334,24 @@ body.modal-open { overflow: hidden; }
 .pantry-badge.band-ready  { background: var(--green-deep, #5a6b3f); color: #fff; }
 .pantry-badge.band-almost { background: var(--saffron, #d4982a); color: #fff; }
 .pantry-badge.band-short  { background: rgba(0,0,0,.1); color: var(--muted); }
-.pantry-badge.band-staple {
-  background: transparent;
-  border: 1px dashed var(--line, rgba(0,0,0,.25));
+/* Staples row: named, not counted, and on its own line above the actions.
+   Quieter than the missing-items line because it flags uncertainty rather
+   than absence — she knows whether there's salt in the cupboard. */
+.pantry-staple-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .3rem;
+  margin-top: .35rem;
   color: var(--muted);
-  text-transform: none;
-  letter-spacing: 0;
-  font-weight: 500;
+}
+.pantry-staple-label { margin-right: .1rem; }
+.pantry-staple-pill {
+  display: inline-block;
+  padding: .1rem .4rem;
+  border-radius: 999px;
+  border: 1px dashed var(--line, rgba(0,0,0,.25));
+  font-size: .76rem;
+  line-height: 1.5;
+  color: var(--muted);
 }
