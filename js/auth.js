@@ -128,10 +128,10 @@ const Auth = (() => {
   // credential. Transparent to the user — no UX change.
   // Must match the derivation in auth-worker.js / worker.js exactly.
 
-  async function _deriveHmacKey(token) {
+  async function _deriveHmacKey(secret) {
     const enc    = new TextEncoder();
     const keyMat = await crypto.subtle.importKey(
-      'raw', enc.encode(token), { name: 'HKDF' }, false, ['deriveKey']
+      'raw', enc.encode(secret), { name: 'HKDF' }, false, ['deriveKey']
     );
     return crypto.subtle.deriveKey(
       { name: 'HKDF', hash: 'SHA-256',
@@ -143,26 +143,89 @@ const Auth = (() => {
     );
   }
 
-  async function _signRequest(method, token, body) {
+  // `secret` signs; `token` names the account inside the signed message. They
+  // are the same value for token accounts and differ for Google ones.
+  async function _signRequest(method, token, body, secret) {
     const enc       = new TextEncoder();
     const timestamp = String(Date.now());
     const bodyHash  = Array.from(
       new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(body || '')))
     ).map(b => b.toString(16).padStart(2,'0')).join('');
     const message  = `${method.toUpperCase()}:${token}:${timestamp}:${bodyHash}`;
-    const key      = await _deriveHmacKey(token);
+    const key      = await _deriveHmacKey(secret || token);
     const sigBytes = await crypto.subtle.sign('HMAC', key, enc.encode(message));
     const sig      = btoa(String.fromCharCode(...new Uint8Array(sigBytes)))
       .replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
     return { 'X-Timestamp': timestamp, 'X-Signature': sig };
   }
 
+  // ── Write key (Google accounts) ──────────────────────────────────
+  // A per-account signing secret minted by the worker at sign-in. Writes are
+  // signed with this instead of riding on the Google ID token, which expires
+  // after about an hour and used to take every push down with it silently.
+  //
+  // Deliberately NOT derived from the account token: for a Google account the
+  // token is `google:{sub}`, and `sub` is public — it is in the ID token
+  // payload and in every storage URL. A key derived from it would be forgeable
+  // by anyone who has seen it.
+  const WRITE_KEY_STORAGE = 'ref_write_key';
+
+  function getWriteKey() {
+    try { return localStorage.getItem(WRITE_KEY_STORAGE) || ''; } catch { return ''; }
+  }
+  function setWriteKey(k) {
+    try { k ? localStorage.setItem(WRITE_KEY_STORAGE, k) : localStorage.removeItem(WRITE_KEY_STORAGE); } catch {}
+  }
+
+  // Fetch the key using the Google ID token — the one place a live Google
+  // credential is genuinely needed. Called at sign-in and at boot if missing.
+  async function ensureWriteKey() {
+    if(!isGoogleAccount()) return '';
+    const have = getWriteKey();
+    if(have) return have;
+    const base    = workerBase();
+    const idToken = store.get(C.storageAuthKey);
+    if(!base || !idToken) return '';
+    try {
+      const res = await fetch(`${base}/auth/writekey`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ idToken }),
+      });
+      const data = await res.json();
+      if(res.ok && data.writeKey) { setWriteKey(data.writeKey); return data.writeKey; }
+    } catch(e) { console.warn('[Auth] write key fetch failed:', e); }
+    return '';
+  }
+
+  // Revoke on every device. Also clears this one, so the next write re-mints.
+  async function revokeWriteKeys() {
+    const base    = workerBase();
+    const idToken = store.get(C.storageAuthKey);
+    if(!base || !idToken) return false;
+    try {
+      const res = await fetch(`${base}/auth/revokekeys`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ idToken }),
+      });
+      setWriteKey('');
+      return res.ok;
+    } catch { return false; }
+  }
+
   // _authHeaders(method, token, body) — returns the correct auth headers
   // for a worker request based on current account type.
-  //   Google → Authorization: Bearer <idToken>
-  //   Token  → X-Timestamp + X-Signature (HMAC)
+  //   Google → HMAC signed with the write key, or Bearer if none yet
+  //   Token  → HMAC signed with the account token
   async function _authHeaders(method, token, body) {
     if(isGoogleAccount()) {
+      const wkey = getWriteKey();
+      if(wkey) {
+        try { return await _signRequest(method, token, body, wkey); } catch { /* fall through */ }
+      }
+      // No key yet (first run after upgrade, or just revoked). Bearer still
+      // works and the boot path will mint a key shortly.
       const idToken = store.get(C.storageAuthKey);
       return idToken ? { 'Authorization': `Bearer ${idToken}` } : {};
     }
@@ -323,6 +386,9 @@ const Auth = (() => {
       C.onSignedIn(d, true);
     }
 
+    // A fresh sign-in supersedes any key this device held: mint on next use.
+    setWriteKey('');
+
     // Store ID token for session verification at next boot
     store.set(C.storageAuthKey, idToken);
 
@@ -406,6 +472,7 @@ const Auth = (() => {
     }
     store.remove(C.storageAuthKey);
     d.linkedGoogle = null;
+    setWriteKey('');
     // Keep authMethod as 'google' — don't silently downgrade.
     // User must go through account setup to change auth method.
     C.setData(d);
@@ -1595,6 +1662,9 @@ const Auth = (() => {
     startSessionWatch,      // poll the token's exp claim and warn before it lapses
     stopSessionWatch,
     tokenSecondsLeft,
+    ensureWriteKey,         // mint/fetch the request-signing key (Google accounts)
+    getWriteKey,
+    revokeWriteKeys,        // sign out everywhere
     showGuestSwitchConfirm, // guest switch/reset (call from Settings)
     showTokenUpgradePrompt, // legacy token upgrade prompt (call from boot)
 

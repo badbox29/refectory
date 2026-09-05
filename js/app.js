@@ -569,6 +569,7 @@ function handleAuthFailure(source) {
     onDone: async (ok) => {
       App.authPromptOpen = false;
       if (!ok) return;   // dismissed — banner stays up, watcher re-prompts
+      await Auth.ensureWriteKey();
       // Credential restored. Push immediately rather than waiting up to a
       // minute for the next tick. Deliberately no pull: re-auth restores a
       // credential, it has no business reading and merging remote data.
@@ -2118,6 +2119,18 @@ function openRecipeEditor(id = null, prefill = null) {
   form.querySelector('#editor-source-url').value  = recipe.sourceUrl   || '';
   form.querySelector('#editor-image-url').value   = recipe.imageUrl || recipe.image || '';
 
+  // Show whatever this device currently has: local bytes win over a remote
+  // link, matching resolveImage()'s ordering everywhere else.
+  _editorImageDraft = null;
+  renderEditorImage(null);
+  const imgHint = document.getElementById('editor-image-hint');
+  if (imgHint) {
+    imgHint.style.color = '';
+    imgHint.textContent = 'Photos you add here stay on this device \u2014 they won\u2019t sync to your other devices or appear on shared meal plan links.';
+  }
+  if (id) resolveImage(id).then(url => { if (View.editingId === id && _editorImageDraft === null) renderEditorImage(url); });
+  else if (recipe.image?.startsWith('data:')) { _editorImageDraft = recipe.image; renderEditorImage(recipe.image); }
+
   // Ingredients
   renderEditorIngredients(recipe.ingredients || [{ name: '', amount: '', unit: '' }]);
   // Steps
@@ -2141,6 +2154,89 @@ function openRecipeEditor(id = null, prefill = null) {
   titleInput.oninput = () => renderDuplicateWarning(titleInput.value, id);
 
   openModal('modal-recipe-editor');
+}
+
+// ─── Recipe photo (device-local) ─────────────────────────────────
+// Bytes chosen here go to IndexedDB, never to localStorage or the worker —
+// the same place Mealie-imported images land. That makes them per-device by
+// nature: a photo added on the laptop can't appear on her phone and can't
+// render on a share page, because Cloudflare has no way to reach it. The URL
+// field below the picker is the syncing alternative, and the hint under the
+// control says so rather than letting her find out later.
+
+const EDITOR_IMAGE_MAX_DIM   = 1200;
+const EDITOR_IMAGE_QUALITY   = 0.8;
+const EDITOR_IMAGE_MAX_INPUT = 25 * 1024 * 1024;   // reject before decoding
+const EDITOR_IMAGE_MAX_OUT   = 1.5 * 1024 * 1024;  // one photo shouldn't bloat the store
+
+// Draft state: null = untouched, '' = explicitly removed, string = new bytes.
+// Nothing is written until Save, so cancelling the editor leaves the stored
+// image exactly as it was.
+let _editorImageDraft = null;
+
+// Re-encode to WebP at a capped long edge. Same output shape the Mealie
+// importer produces (`data:image/webp;base64,…`), so the backup zip and its
+// re-import path keep working with no change.
+async function resizeImageFile(file, maxDim = EDITOR_IMAGE_MAX_DIM) {
+  if (!file || !file.type?.startsWith('image/')) throw new Error('That file isn\u2019t an image.');
+  if (file.size > EDITOR_IMAGE_MAX_INPUT) throw new Error('That image is too large — try one under 25 MB.');
+
+  const bitmap = await createImageBitmap(file);
+  try {
+    const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+    const w = Math.max(1, Math.round(bitmap.width  * scale));
+    const h = Math.max(1, Math.round(bitmap.height * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, w, h);
+
+    let out = canvas.toDataURL('image/webp', EDITOR_IMAGE_QUALITY);
+    // Safari has historically ignored the webp request and handed back a PNG,
+    // which is far bigger. Fall back to JPEG rather than storing that.
+    if (!out.startsWith('data:image/webp')) out = canvas.toDataURL('image/jpeg', EDITOR_IMAGE_QUALITY);
+    if (out.length > EDITOR_IMAGE_MAX_OUT && maxDim > 600) return resizeImageFile(file, 800);
+    return out;
+  } finally {
+    bitmap.close?.();
+  }
+}
+
+function renderEditorImage(dataUrl) {
+  const thumb  = document.getElementById('editor-image-thumb');
+  const empty  = document.getElementById('editor-image-empty');
+  const remove = document.getElementById('editor-image-remove');
+  if (!thumb) return;
+  if (dataUrl) {
+    thumb.src = dataUrl;
+    thumb.style.display = '';
+    if (empty)  empty.style.display  = 'none';
+    if (remove) remove.style.display = '';
+  } else {
+    thumb.removeAttribute('src');
+    thumb.style.display = 'none';
+    if (empty)  empty.style.display  = '';
+    if (remove) remove.style.display = 'none';
+  }
+}
+
+async function setEditorImageFromFile(file) {
+  const hint = document.getElementById('editor-image-hint');
+  const say  = (msg, warn) => { if (hint) { hint.textContent = msg; hint.style.color = warn ? 'var(--saffron)' : ''; } };
+  try {
+    say('Processing photo\u2026');
+    const dataUrl = await resizeImageFile(file);
+    _editorImageDraft = dataUrl;
+    renderEditorImage(dataUrl);
+    say(`Photo ready (${Math.round(dataUrl.length / 1024)} KB). It stays on this device — it won\u2019t sync or appear on shared links.`);
+  } catch (e) {
+    say(e.message || 'That photo could not be read.', true);
+  }
+}
+
+function clearEditorImage() {
+  _editorImageDraft = '';
+  renderEditorImage(null);
 }
 
 function renderEditorIngredients(ingredients) {
@@ -2236,6 +2332,15 @@ function saveEditorRecipe() {
     ImageStore.set(id, data.imageUrl);
     data.imageUrl = '';
   }
+
+  // Photo picker: null means untouched, '' means she removed it, anything
+  // else is new bytes. Only an explicit removal deletes — closing the editor
+  // without touching the picker must never drop a stored photo.
+  if (_editorImageDraft !== null) {
+    if (_editorImageDraft) ImageStore.set(id, _editorImageDraft);
+    else                   ImageStore.delete(id);
+  }
+  _editorImageDraft = null;
   saveRecipe({ ...existing, ...data, id });
   View.editingId = null;
   if (btn) btn.disabled = false;
@@ -7158,6 +7263,11 @@ async function boot() {
   // 1. Establish auth before reading anything. A dead session means whatever
   //    the worker would return is stale by definition.
   const authOk = await Auth.bootCheck(tokenBeforePull);
+
+  // Make sure this device holds a write key before any push happens. Writes
+  // signed with it survive the Google token expiring mid-session, which is
+  // the failure that cost an evening of planning.
+  if (authOk) await Auth.ensureWriteKey();
   if (!authOk) {
     // Re-auth is being shown. Local data stands untouched and the app stays
     // usable behind it; nothing is pulled, nothing is merged, nothing is
@@ -7411,6 +7521,39 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   document.getElementById('btn-save-recipe').onclick = saveEditorRecipe;
+
+  // Recipe photo picker: click, drop, or paste.
+  const imgFile = document.getElementById('editor-image-file');
+  document.getElementById('editor-image-pick')?.addEventListener('click', () => imgFile?.click());
+  imgFile?.addEventListener('change', () => {
+    if (imgFile.files?.[0]) setEditorImageFromFile(imgFile.files[0]);
+    imgFile.value = '';   // so picking the same file twice still fires
+  });
+  document.getElementById('editor-image-remove')?.addEventListener('click', clearEditorImage);
+
+  const drop = document.getElementById('editor-image-drop');
+  if (drop) {
+    ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => {
+      e.preventDefault(); drop.classList.add('dragging');
+    }));
+    ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => {
+      e.preventDefault(); drop.classList.remove('dragging');
+    }));
+    drop.addEventListener('drop', e => {
+      const f = e.dataTransfer?.files?.[0];
+      if (f) setEditorImageFromFile(f);
+    });
+  }
+
+  // Paste an image straight into the open editor.
+  document.addEventListener('paste', e => {
+    const modal = document.getElementById('modal-recipe-editor');
+    if (!modal?.classList.contains('open')) return;
+    const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
+    if (!item) return;
+    const f = item.getAsFile();
+    if (f) { e.preventDefault(); setEditorImageFromFile(f); }
+  });
 
   // Planner nav
   document.getElementById('planner-prev')?.addEventListener('click', () => {
