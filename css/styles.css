@@ -3188,9 +3188,9 @@ body.modal-open { overflow: hidden; }
    server" doesn't read as "not saving at all" — the two failures have very
    different stakes and very different fixes. */
 .sync-banner {
-  background: var(--saffron-wash, rgba(212,160,60,.12));
-  border-color: var(--saffron, #d4a03c);
-  color: var(--ink, inherit);
+  background: rgba(212,152,42,.14);
+  border-color: var(--saffron);
+  color: var(--ink);
 }
 
 /* ── Share modal: meal type filter ────────────────────────────── */
@@ -3228,9 +3228,9 @@ body.modal-open { overflow: hidden; }
   width: 120px;
   height: 90px;
   flex-shrink: 0;
-  border: 1px solid var(--line, rgba(0,0,0,.12));
-  border-radius: var(--r-md, 8px);
-  background: var(--cream, #f6f3ec);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--cream-dark);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3251,8 +3251,8 @@ body.modal-open { overflow: hidden; }
   min-width: 200px;
 }
 .editor-image-drop {
-  border: 1px dashed var(--line, rgba(0,0,0,.2));
-  border-radius: var(--r-md, 8px);
+  border: 1px dashed var(--border);
+  border-radius: var(--r-md);
   padding: .6rem .7rem;
   font-size: .82rem;
   color: var(--muted);
@@ -3260,7 +3260,7 @@ body.modal-open { overflow: hidden; }
 }
 .editor-image-drop.dragging {
   border-color: var(--green-deep);
-  background: rgba(0,0,0,.03);
+  background: var(--field-tan);
 }
 .editor-image-controls .btn { margin-top: .35rem; }
 
@@ -3284,8 +3284,8 @@ body.modal-open { overflow: hidden; }
   gap: .3rem;
   padding: .22rem .5rem;
   border-radius: 999px;
-  background: var(--cream, #f6f3ec);
-  border: 1px solid var(--line, rgba(0,0,0,.12));
+  background: var(--cream-dark);
+  border: 1px solid var(--border);
   font-size: .82rem;
 }
 .pantry-chip-x {
@@ -3297,11 +3297,11 @@ body.modal-open { overflow: hidden; }
   padding: 0;
   color: var(--muted);
 }
-.pantry-chip-x:hover { color: var(--red, #c07070); }
+.pantry-chip-x:hover { color: var(--red); }
 
 .pantry-result {
-  border: 1px solid var(--line, rgba(0,0,0,.12));
-  border-radius: var(--r-md, 8px);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
   padding: .6rem .75rem;
   margin-bottom: .5rem;
 }
@@ -3331,9 +3331,9 @@ body.modal-open { overflow: hidden; }
   padding: .16rem .45rem;
   border-radius: 999px;
 }
-.pantry-badge.band-ready  { background: var(--green-deep, #5a6b3f); color: #fff; }
-.pantry-badge.band-almost { background: var(--saffron, #d4982a); color: #fff; }
-.pantry-badge.band-short  { background: rgba(0,0,0,.1); color: var(--muted); }
+.pantry-badge.band-ready  { background: var(--green-deep); color: #fff; }
+.pantry-badge.band-almost { background: var(--saffron); color: #fff; }
+.pantry-badge.band-short  { background: var(--field-tan); color: var(--ink-mid); }
 /* Staples row: named, not counted, and on its own line above the actions.
    Quieter than the missing-items line because it flags uncertainty rather
    than absence — she knows whether there's salt in the cupboard. */
@@ -3341,17 +3341,19 @@ body.modal-open { overflow: hidden; }
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: .3rem;
+  gap: .25rem;
   margin-top: .35rem;
   color: var(--muted);
 }
-.pantry-staple-label { margin-right: .1rem; }
+.pantry-staple-label { margin-right: .15rem; }
 .pantry-staple-pill {
   display: inline-block;
-  padding: .1rem .4rem;
+  padding: .05rem .4rem;
   border-radius: 999px;
-  border: 1px dashed var(--line, rgba(0,0,0,.25));
-  font-size: .76rem;
-  line-height: 1.5;
-  color: var(--muted);
+  border: 1px dashed var(--border);
+  background: var(--cream-dark);
+  font-size: .74rem;
+  line-height: 1.45;
+  color: var(--ink-mid);
+  white-space: nowrap;
 }
