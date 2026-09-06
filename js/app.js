@@ -3730,9 +3730,13 @@ function mergeShoppingIngredients(entries) {
 // the same thing — a pantry that disagreed with the shopping list about
 // whether "tomatoes" and "diced tomatoes" match would be worse than useless.
 
+// Only things that are genuinely "don't bother listing it". Deliberately no
+// bare 'pepper', and no 'garlic' or 'onion': those are real ingredients you
+// can be out of, and because a single-word staple also matches by head noun,
+// a bare 'pepper' would quietly swallow 'green pepper' and 'red pepper' too.
 const PANTRY_DEFAULT_STAPLES = [
-  'salt', 'pepper', 'black pepper', 'olive oil', 'vegetable oil', 'butter',
-  'flour', 'plain flour', 'sugar', 'water', 'garlic', 'onion',
+  'salt', 'black pepper', 'olive oil', 'vegetable oil', 'butter',
+  'flour', 'sugar', 'water',
   'baking powder', 'baking soda', 'vinegar', 'soy sauce',
 ];
 
@@ -3750,6 +3754,12 @@ function pantryKey(text) {
   // takes the 3 and the rest of the range stays glued to the front. Drop any
   // leading non-letters, which also clears stray fractions and punctuation.
   name = name.replace(/^[^a-z]+/i, '').trim();
+
+  // Parentheticals are asides — "(optional)", "(about 2 cups)" — never part of
+  // the ingredient's identity. Stripped whole, including an unclosed bracket,
+  // which otherwise leaves a stray "(" welded to the name.
+  name = name.replace(/\([^)]*\)?/g, ' ').replace(/[()]/g, ' ')
+             .replace(/\s+/g, ' ').trim();
 
   // Trailing purpose phrases describe how an ingredient is used, not what it
   // is — "oil for frying" is oil.
