@@ -191,7 +191,29 @@ function mergePlanStamped(localPlan, localStamps, remotePlan, remoteStamps) {
 
     for (const d of days) {
       const lTs = lSt[d] || 0, rTs = rSt[d] || 0;
-      const takeLocal = lTs || rTs ? lTs >= rTs : true;
+      const lHas = !!(lWeek[d] && Object.keys(lWeek[d]).length);
+      const rHas = !!(rWeek[d] && Object.keys(rWeek[d]).length);
+
+      let takeLocal;
+      if (lTs || rTs) {
+        // At least one side stamped: later wins, local breaks a tie. An
+        // unstamped side with no data loses; an unstamped side that HAS data
+        // is pre-v1.7 content and must not be thrown away by a stamp alone
+        // unless the stamped side genuinely knows better.
+        takeLocal = lTs >= rTs;
+      } else if (lHas !== rHas) {
+        // Neither stamped and only one side has anything. Take whichever
+        // side actually holds data: "local wins" was never meant to mean
+        // "discard the other device's work because this one has none", and
+        // reading it that way is what stopped a plan built on one device
+        // from ever reaching another.
+        takeLocal = lHas;
+      } else {
+        // Neither stamped, both hold something (or neither does) — genuinely
+        // ambiguous, so prefer local as agreed.
+        takeLocal = true;
+      }
+
       const day = takeLocal ? lWeek[d] : rWeek[d];
       const ts  = Math.max(lTs, rTs);
 
