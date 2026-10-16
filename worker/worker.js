@@ -8,6 +8,12 @@
  * KV Namespace binding:
  *   REFECTORY_KV       — KV namespace for user data
  *
+ * R2 bucket binding (optional):
+ *   IMAGES             — Recipe photo sync. Bind a private bucket under this
+ *                        name to turn photo sync on; leave it unbound and every
+ *                        /images route reports "not configured" and the app
+ *                        behaves exactly as before (photos stay per-device).
+ *
  * Routes:
  *   GET    /                    — Health check (open CORS)
  *   GET    /ping                — Health check (open CORS)
@@ -24,6 +30,11 @@
  *   PUT    /storage/:token/:key — Write KV value (HMAC signed)
  *   DELETE /storage/:token/:key — Delete KV value
  *   GET    /storage/:token      — List all keys for token
+ *   PUT    /images/:token/:key  — Upload a recipe photo (HMAC signed, raw bytes)
+ *   GET    /images/:token/:key  — Download a recipe photo (HMAC signed)
+ *   DELETE /images/:token/:key  — Delete a recipe photo (HMAC signed)
+ *   GET    /share/{id}/img/{key} — Photo for a share page (no auth; the key must
+ *                                  belong to a meal inside the share's range)
  */
 
 const KV_BINDING          = 'REFECTORY_KV';
@@ -36,6 +47,14 @@ const RATE_LIMIT          = 120;
 const RATE_LIMIT_WINDOW   = 60;
 const SCRAPE_RATE_LIMIT   = 60;   // scrapes per window, per IP
 const SCRAPE_RATE_WINDOW  = 60;   // seconds
+const IMAGES_BINDING      = 'IMAGES';
+const IMAGE_MAX_BYTES     = 2 * 1024 * 1024;  // client caps at 960px WebP; this is a backstop
+const IMAGE_RATE_LIMIT    = 300;  // per token per window — a fresh device loads a whole library
+const IMAGE_RATE_WINDOW   = 60;   // seconds
+// Content-addressed: the name IS the SHA-256 of the bytes, so a given name
+// can only ever hold one image and can be cached forever.
+const IMAGE_KEY_RE        = /^[a-f0-9]{64}\.(webp|jpg)$/;
+const IMAGE_TYPES         = { webp: 'image/webp', jpg: 'image/jpeg' };
 
 // ── Response helpers ───────────────────────────────────────────────────────
 
@@ -108,8 +127,11 @@ async function verifyHmac(request, secret, body, msgToken) {
     return { ok: false, reason: 'Timestamp expired' };
 
   const enc      = new TextEncoder();
+  // Text bodies are hashed as UTF-8; binary bodies (photo uploads) as-is.
+  const bodyBytes = (body instanceof ArrayBuffer || ArrayBuffer.isView(body))
+    ? body : enc.encode(body || '');
   const bodyHash = Array.from(
-    new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(body || '')))
+    new Uint8Array(await crypto.subtle.digest('SHA-256', bodyBytes))
   ).map(b => b.toString(16).padStart(2, '0')).join('');
 
   const message  = `${request.method.toUpperCase()}:${token}:${timestamp}:${bodyHash}`;
@@ -238,6 +260,8 @@ async function handleAuth(url, method, request, env, cors, ip) {
   if (url.pathname === '/auth/config' && method === 'GET') {
     return respond(JSON.stringify({
       googleClientId: env.GOOGLE_CLIENT_ID || '',
+      // The app reads this at boot; the binding's presence is the on/off switch.
+      imageSync: !!env[IMAGES_BINDING],
     }), 200, cors);
   }
 
@@ -347,6 +371,10 @@ async function handleAuth(url, method, request, env, cors, ip) {
       cursor = listed.list_complete ? undefined : listed.cursor;
     } while (cursor);
 
+    // Photos are stored per account, so they have to follow the account too —
+    // otherwise every imageKey in the copied profile points at nothing.
+    await copyAccountImages(env, oldToken, kvKey);
+
     return respond(JSON.stringify({ ok: true, kvKey, profile: p }), 200, cors);
   }
 
@@ -430,6 +458,112 @@ async function listKeys(token, env, cors) {
   }), 200, cors);
 }
 
+// ── Recipe photos (R2) ─────────────────────────────────────────────────────
+// Optional. Photos are addressed by the SHA-256 of their bytes, which does
+// three jobs at once: a name can never hold two different images (so caching
+// is safe forever), re-uploading the same photo is a no-op, and a replayed
+// upload signature is harmless — the HMAC message doesn't cover the path, but
+// the bytes have to hash to the name in it, so a captured upload can only ever
+// write the object it was already writing.
+
+function imageObjectKey(token, key) { return `img/${token}/${key}`; }
+
+async function handleImages(request, env, pathname, cors) {
+  const bucket = env[IMAGES_BINDING];
+  if (!bucket) return respond(JSON.stringify({ error: 'Image sync not configured' }), 404, cors);
+
+  const parts = pathname.split('/').filter(Boolean);       // images, token, key
+  if (parts.length !== 3) return respond(JSON.stringify({ error: 'Expected /images/:token/:key' }), 400, cors);
+
+  const token = decodeURIComponent(parts[1]);
+  const key   = parts[2];
+  if (!isValidToken(token)) return respond(JSON.stringify({ error: 'Invalid token format' }), 400, cors);
+  if (!IMAGE_KEY_RE.test(key)) return respond(JSON.stringify({ error: 'Invalid image key' }), 400, cors);
+
+  const rl = await imageRateLimit(token, env);
+  if (rl) {
+    return respond(JSON.stringify({ error: 'Rate limit exceeded — please wait', retryAfter: rl.retryAfter }),
+      429, { ...cors, 'Retry-After': String(rl.retryAfter) });
+  }
+
+  const objKey = imageObjectKey(token, key);
+  const method = request.method.toUpperCase();
+
+  if (method === 'GET') {
+    const auth = await checkAuth(request, token, cors, true, null, env);
+    if (!auth.ok) return auth.res;
+    const obj = await bucket.get(objKey);
+    if (!obj) return respond(JSON.stringify({ error: 'Not found' }), 404, cors);
+    return new Response(obj.body, {
+      status: 200,
+      headers: {
+        ...cors,
+        'Content-Type': IMAGE_TYPES[key.split('.').pop()],
+        // Overrides the no-store in cors: the name is the content hash, so
+        // this exact response can never change.
+        'Cache-Control': 'private, max-age=31536000, immutable',
+      },
+    });
+  }
+
+  if (method === 'PUT') {
+    const cl = parseInt(request.headers.get('Content-Length') || '0', 10);
+    if (cl > IMAGE_MAX_BYTES) return respond(JSON.stringify({ error: 'Image too large' }), 413, cors);
+    let bytes;
+    try { bytes = await request.arrayBuffer(); } catch { return respond(JSON.stringify({ error: 'Could not read body' }), 400, cors); }
+    if (!bytes.byteLength || bytes.byteLength > IMAGE_MAX_BYTES)
+      return respond(JSON.stringify({ error: 'Empty or oversized image' }), 413, cors);
+
+    const auth = await checkAuth(request, token, cors, true, bytes, env);
+    if (!auth.ok) return auth.res;
+
+    const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)))
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+    if (hash !== key.split('.')[0])
+      return respond(JSON.stringify({ error: 'Image does not match its key' }), 400, cors);
+
+    // Same name means same bytes, so an existing object is already correct.
+    if (!(await bucket.head(objKey))) {
+      await bucket.put(objKey, bytes, { httpMetadata: { contentType: IMAGE_TYPES[key.split('.').pop()] } });
+    }
+    return respond(JSON.stringify({ ok: true, key }), 200, cors);
+  }
+
+  if (method === 'DELETE') {
+    const auth = await checkAuth(request, token, cors, true, null, env);
+    if (!auth.ok) return auth.res;
+    await bucket.delete(objKey);
+    return respond(JSON.stringify({ ok: true }), 200, cors);
+  }
+
+  return respond(JSON.stringify({ error: 'Method not allowed' }), 405, cors);
+}
+
+// Copy every photo from one account prefix to another. Used when an account
+// moves (token → Google, legacy token → new token). Household scale, so a
+// straight list-and-copy is fine. Never throws: a failed copy leaves photos
+// on their original device to be re-uploaded, which is the pre-R2 status quo.
+async function copyAccountImages(env, fromToken, toToken) {
+  const bucket = env[IMAGES_BINDING];
+  if (!bucket || !fromToken || !toToken || fromToken === toToken) return;
+  try {
+    const fromPfx = `img/${fromToken}/`;
+    let cursor;
+    do {
+      const listed = await bucket.list({ prefix: fromPfx, cursor });
+      for (const o of listed.objects) {
+        const dest = `img/${toToken}/${o.key.slice(fromPfx.length)}`;
+        if (await bucket.head(dest)) continue;
+        const src = await bucket.get(o.key);
+        if (src) await bucket.put(dest, await src.arrayBuffer(), { httpMetadata: src.httpMetadata });
+      }
+      cursor = listed.truncated ? listed.cursor : undefined;
+    } while (cursor);
+  } catch (err) {
+    console.error('copyAccountImages failed:', err);
+  }
+}
+
 // ── Migration helpers ──────────────────────────────────────────────────────
 
 async function checkMigrationTombstone(token, env, cors, remaining) {
@@ -454,6 +588,9 @@ async function writeLegacyPointer(parsed, newToken, env) {
   const legacy = parsed._legacyToken;
   if (legacy && typeof legacy === 'string' && isValidToken(legacy) && legacy !== newToken) {
     delete parsed._legacyToken;
+    // First time this pointer is written, carry the old account's photos over.
+    const had = await env[KV_BINDING].get(`legacy:${legacy}`, { type: 'text' });
+    if (!had) await copyAccountImages(env, legacy, newToken);
     await env[KV_BINDING].put(`legacy:${legacy}`, newToken, { expirationTtl: 60 * 60 * 24 * 90 });
   } else {
     delete parsed._legacyToken;
@@ -626,7 +763,11 @@ function shortDesc(text, max = 180) {
 // are home all day, a different link from the one she sends someone who's
 // only home for dinner. Applied here at render time rather than baked in at
 // creation, so a filtered link stays live like any other.
-function buildShareDays(profile, fromStr, toStr, slots) {
+//
+// `imageBase` is the share's own photo route ("/share/{id}/img/") when photo
+// sync is on, or '' when it isn't. With it, a synced photo always wins over a
+// remote link — it's her photo, and it can't break the way a hotlink can.
+function buildShareDays(profile, fromStr, toStr, slots, imageBase = '') {
   const useSlots = normaliseShareSlots(slots);
   const recipes = profile?.recipes || {};
   const plan    = profile?.mealplan || {};
@@ -649,13 +790,17 @@ function buildShareDays(profile, fromStr, toStr, slots) {
         const id = leftover ? entry.slice(LEFTOVERS_PFX.length) : entry;
         const r  = recipes[id];
         if (!r) continue;
+        const synced = imageBase && typeof r.imageKey === 'string' && IMAGE_KEY_RE.test(r.imageKey);
         meals.push({
           slot,
           leftover,
           title: r.title || 'Untitled',
-          // Only remote links can render here — IndexedDB bytes are on her
+          // Synced photos come from R2 through the share's own route. Past
+          // that, only remote links can render — IndexedDB bytes are on her
           // device and unreachable from the Worker.
-          image: /^https?:\/\//i.test(r.imageUrl || '') ? r.imageUrl : '',
+          imageKey: synced ? r.imageKey : '',
+          image: synced ? `${imageBase}${r.imageKey}`
+               : /^https?:\/\//i.test(r.imageUrl || '') ? r.imageUrl : '',
           desc:  shortDesc(r.description),
         });
       }
@@ -750,6 +895,65 @@ function sharePage({ title, subtitle, slotsLabel, days, expired }) {
 </body></html>`;
 }
 
+// Load a live share: the record and the owner's current profile. Returns
+// { rec, profile } or { status } when the link is missing, bad or expired.
+async function loadShare(id, env) {
+  if (!/^[a-f0-9]{24,64}$/.test(id || '')) return { status: 404 };
+
+  const raw = await env[KV_BINDING].get(`share:${id}`, { type: 'text' });
+  if (!raw) return { status: 404 };
+
+  let rec;
+  try { rec = JSON.parse(raw); } catch { return { status: 404 }; }
+
+  // KV expiry is eventually consistent, so a link could outlive its TTL by a
+  // while. Check the stored timestamp too.
+  if (!rec.expiresAt || Date.now() > rec.expiresAt) return { status: 410 };
+
+  const profileRaw = await env[KV_BINDING].get(`user:${rec.token}:profile`, { type: 'text' });
+  if (!profileRaw) return { status: 404 };
+
+  let profile;
+  try { profile = JSON.parse(profileRaw); } catch { return { status: 500 }; }
+  return { rec, profile };
+}
+
+function shareImageBase(id, env) {
+  return env[IMAGES_BINDING] ? `/share/${id}/img/` : '';
+}
+
+// GET /share/{id}/img/{key} — a photo on a share page. No auth, same as the
+// page: the id is the credential. Scoped to the share, not the account: the
+// key must belong to a meal the page itself would show right now, so a share
+// link can't be used to pull any other photo out of the bucket, and it stops
+// working the moment the link expires or the meal leaves the plan.
+async function handleShareImage(id, key, env) {
+  const notFound = () => new Response('Not found', { status: 404, headers: { 'Cache-Control': 'no-store' } });
+  const bucket = env[IMAGES_BINDING];
+  if (!bucket || !IMAGE_KEY_RE.test(key || '')) return notFound();
+
+  const share = await loadShare(id, env);
+  if (!share.rec) return notFound();
+
+  const { rec, profile } = share;
+  const days = buildShareDays(profile, rec.from, rec.to, rec.slots, shareImageBase(id, env));
+  const listed = days.some(d => d.meals.some(m => m.imageKey === key));
+  if (!listed) return notFound();
+
+  const obj = await bucket.get(imageObjectKey(rec.token, key));
+  if (!obj) return notFound();
+  return new Response(obj.body, {
+    status: 200,
+    headers: {
+      'Content-Type': IMAGE_TYPES[key.split('.').pop()],
+      // A day, not forever: the bytes behind a name never change, but the
+      // share can expire or drop the meal, and that should take effect.
+      'Cache-Control': 'private, max-age=86400',
+      'X-Robots-Tag': 'noindex, nofollow',
+    },
+  });
+}
+
 async function handleSharePage(id, env) {
   const html = (b, status) => new Response(b, {
     status,
@@ -758,27 +962,11 @@ async function handleSharePage(id, env) {
                'X-Robots-Tag': 'noindex, nofollow' },
   });
 
-  if (!/^[a-f0-9]{24,64}$/.test(id || '')) return html(sharePage({ expired: true }), 404);
+  const share = await loadShare(id, env);
+  if (!share.rec) return html(sharePage({ expired: true }), share.status);
 
-  const raw = await env[KV_BINDING].get(`share:${id}`, { type: 'text' });
-  if (!raw) return html(sharePage({ expired: true }), 404);
-
-  let rec;
-  try { rec = JSON.parse(raw); } catch { return html(sharePage({ expired: true }), 404); }
-
-  // KV expiry is eventually consistent, so a link could outlive its TTL by a
-  // while. Check the stored timestamp too.
-  if (!rec.expiresAt || Date.now() > rec.expiresAt) {
-    return html(sharePage({ expired: true }), 410);
-  }
-
-  const profileRaw = await env[KV_BINDING].get(`user:${rec.token}:profile`, { type: 'text' });
-  if (!profileRaw) return html(sharePage({ expired: true }), 404);
-
-  let profile;
-  try { profile = JSON.parse(profileRaw); } catch { return html(sharePage({ expired: true }), 500); }
-
-  const days = buildShareDays(profile, rec.from, rec.to, rec.slots);
+  const { rec, profile } = share;
+  const days = buildShareDays(profile, rec.from, rec.to, rec.slots, shareImageBase(id, env));
   return html(sharePage({
     title: rec.title || 'Meal Plan',
     subtitle: rec.subtitle || `${rec.from} – ${rec.to}`,
@@ -896,6 +1084,24 @@ async function checkStorageRateLimit(token, env, cors) {
   return null;
 }
 
+// Photos get their own budget. Opening the library on a fresh device fetches
+// every visible photo at once, and sharing the storage budget would make
+// that lock out the sync push behind it.
+async function imageRateLimit(token, env) {
+  const rlKey  = `ratelimit:img:${token}`;
+  const now    = Math.floor(Date.now() / 1000);
+  const win    = now - IMAGE_RATE_WINDOW;
+  let ts       = [];
+  const stored = await env[KV_BINDING].get(rlKey, { type: 'text' });
+  if (stored) { try { ts = JSON.parse(stored).filter(t => t > win); } catch {} }
+  if (ts.length >= IMAGE_RATE_LIMIT) {
+    return { retryAfter: Math.max(1, ts[0] + IMAGE_RATE_WINDOW - now) };
+  }
+  ts.push(now);
+  await env[KV_BINDING].put(rlKey, JSON.stringify(ts), { expirationTtl: IMAGE_RATE_WINDOW * 2 });
+  return null;
+}
+
 async function rateLimitCount(token, env) {
   const rlKey  = `ratelimit:${token}`;
   const now    = Math.floor(Date.now() / 1000);
@@ -939,6 +1145,16 @@ export default {
     // every recipient. Safe because the handler takes no input beyond an
     // unguessable id and returns only rendered HTML.
     if (method === 'GET' && url.pathname.startsWith('/share/')) {
+      // /share/{id}/img/{key} — a photo on that page. Same reasoning: loaded
+      // by an <img> on the share page, unguessable id, scoped to the share.
+      const imgMatch = url.pathname.match(/^\/share\/([^/]+)\/img\/([^/]+)$/);
+      if (imgMatch) {
+        try { return await handleShareImage(imgMatch[1], imgMatch[2], env); }
+        catch (err) {
+          console.error('Share image error:', err);
+          return new Response('Error', { status: 500, headers: { 'Cache-Control': 'no-store' } });
+        }
+      }
       try {
         return await handleSharePage(url.pathname.slice('/share/'.length), env);
       } catch (err) {
@@ -969,6 +1185,10 @@ export default {
 
       if (url.pathname.startsWith('/storage')) {
         return await handleStorage(request, env, url.pathname.replace(/\/$/, ''), cors);
+      }
+
+      if (url.pathname.startsWith('/images/')) {
+        return await handleImages(request, env, url.pathname.replace(/\/$/, ''), cors);
       }
 
       // GET /scrape?url=... — server-side fetch to bypass CORS for recipe scraping
