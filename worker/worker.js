@@ -35,6 +35,17 @@
  *   DELETE /images/:token/:key  — Delete a recipe photo (HMAC signed)
  *   GET    /share/{id}/img/{key} — Photo for a share page (no auth; the key must
  *                                  belong to a meal inside the share's range)
+ *
+ * Collection sharing (all HMAC signed by the account in the path):
+ *   POST   /collab/:token/invite                — Create an invite code
+ *   GET    /collab/:token/invite/:code          — Peek at an invite before accepting
+ *   POST   /collab/:token/accept                — Accept an invite
+ *   GET    /collab/:token                       — Who I share with / who shares with me
+ *   PUT    /collab/:token/readers/:reader       — Change what a reader can see
+ *   DELETE /collab/:token/readers/:reader       — Remove a reader
+ *   DELETE /collab/:token/reading/:owner        — Leave a collection shared with me
+ *   GET    /shared/:token/:owner/recipes        — Read-only recipes from a collection
+ *   GET    /shared/:token/:owner/img/:key       — A photo from that collection
  */
 
 const KV_BINDING          = 'REFECTORY_KV';
@@ -56,6 +67,8 @@ const IMAGE_RATE_WINDOW   = 60;   // seconds
 // can only ever hold one image and can be cached forever.
 const IMAGE_KEY_RE        = /^[a-f0-9]{64}\.(webp|jpg)$/;
 const IMAGE_TYPES         = { webp: 'image/webp', jpg: 'image/jpeg' };
+const INVITE_TTL          = 7 * 24 * 60 * 60;  // seconds an unaccepted invite lives
+const COLLAB_MAX          = 25;                // readers per collection / collections per reader
 
 // ── Response helpers ───────────────────────────────────────────────────────
 
@@ -413,6 +426,8 @@ async function handleAuth(url, method, request, env, cors, ip) {
     // Photos are stored per account, so they have to follow the account too —
     // otherwise every imageKey in the copied profile points at nothing.
     await copyAccountImages(env, oldToken, kvKey);
+    // Sharing relationships follow the account the same way.
+    await moveCollab(env, oldToken, kvKey);
 
     return respond(JSON.stringify({ ok: true, kvKey, profile: p }), 200, cors);
   }
@@ -603,6 +618,290 @@ async function copyAccountImages(env, fromToken, toToken) {
   }
 }
 
+// ── Collection sharing ─────────────────────────────────────────────────────
+// One person (the owner) lets another (a reader) see their recipes, read-only.
+// Nothing new to authenticate with: every request is signed by the account
+// named in the path with its existing key, and the worker then checks the
+// relationship. Three record types:
+//
+//   invite:{code}       { owner, ownerName, opts, createdAt, expiresAt }
+//                       single use, gone after INVITE_TTL if never accepted
+//   readers:{owner}     [{ token, name, opts, addedAt }]   who can see mine
+//   reading:{reader}    [{ owner, name, addedAt }]          what I can see
+//
+// opts = { ratings, notes } — what the owner chose to include. Stored on the
+// reader entry and applied on every read, so changing it takes effect the
+// next time the reader opens the collection.
+//
+// The reader never receives the owner's profile. sharedRecipe() builds each
+// recipe from an allowlist of fields, so the meal plan, pantry, shopping
+// list, settings and account details can't leak — and a field added to
+// recipes later stays private until it's added here on purpose.
+//
+// Google accounts only. The lists hand each side the other's account id, and
+// for an old token account the id *is* the secret — sharing would give the
+// other person the keys to it. A `google:{sub}` id is only an identifier;
+// signing uses the separate write key.
+
+const SHARED_RECIPE_FIELDS = [
+  'id', 'title', 'description', 'ingredients', 'steps', 'servings',
+  'prepTime', 'cookTime', 'totalTime', 'tags', 'mealType',
+  'source', 'sourceUrl', 'imageUrl', 'imageKey', 'nutrition',
+  'createdAt', 'updatedAt',
+];
+
+function sharedRecipe(r, opts) {
+  const out = {};
+  for (const f of SHARED_RECIPE_FIELDS) if (r[f] !== undefined) out[f] = r[f];
+  if (opts?.ratings) {
+    if (r.rating)   out.rating   = r.rating;
+    if (r.favorite) out.favorite = true;
+  }
+  if (opts?.notes && r.notes) out.notes = r.notes;
+  return out;
+}
+
+function normaliseOpts(o) {
+  return { ratings: !!o?.ratings, notes: !!o?.notes };
+}
+
+function randomHex(bytes) {
+  const b = new Uint8Array(bytes);
+  crypto.getRandomValues(b);
+  return [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+
+async function kvJson(env, key, fallback) {
+  const raw = await env[KV_BINDING].get(key, { type: 'text' });
+  if (!raw) return fallback;
+  try { return JSON.parse(raw); } catch { return fallback; }
+}
+
+async function kvPutList(env, key, list) {
+  if (list.length) await env[KV_BINDING].put(key, JSON.stringify(list));
+  else             await env[KV_BINDING].delete(key);
+}
+
+// The name another person sees, taken from the account's own stored Google
+// profile rather than anything the client sends — so nobody can send an
+// invite that claims to be from someone else.
+async function accountName(env, token) {
+  const p = await kvJson(env, `user:${token}:profile`, null);
+  return String(p?.linkedGoogle?.name || p?.linkedGoogle?.email?.split('@')[0] || '').slice(0, 80);
+}
+
+async function removeRelationship(env, owner, reader) {
+  const readers = await kvJson(env, `readers:${owner}`, []);
+  await kvPutList(env, `readers:${owner}`, readers.filter(x => x.token !== reader));
+  const reading = await kvJson(env, `reading:${reader}`, []);
+  await kvPutList(env, `reading:${reader}`, reading.filter(x => x.owner !== owner));
+}
+
+async function handleCollab(request, env, pathname, cors) {
+  const json = (o, status = 200) => respond(JSON.stringify(o), status, cors);
+  const parts = pathname.split('/').filter(Boolean).map(decodeURIComponent);  // collab, token, ...
+  const token = parts[1] || '';
+  if (!isValidToken(token)) return json({ error: 'Invalid token format' }, 400);
+  if (!token.startsWith('google:')) return json({ error: 'Sharing needs a Google account' }, 403);
+
+  const rlErr = await checkStorageRateLimit(token, env, cors);
+  if (rlErr) return rlErr;
+
+  const method = request.method.toUpperCase();
+  const action = parts[2] || '';
+  const arg    = parts[3] || '';
+
+  // Bodies are only on POST/PUT; GET/DELETE are signed over an empty body.
+  let bodyText = null, body = {};
+  if (method === 'POST' || method === 'PUT') {
+    bodyText = await readBodyText(request);
+    if (bodyText === null) return json({ error: 'Invalid or oversized body' }, 400);
+    try { body = bodyText ? JSON.parse(bodyText) : {}; } catch { return json({ error: 'Invalid JSON' }, 400); }
+  }
+  const auth = await checkAuth(request, token, cors, true, bodyText, env);
+  if (!auth.ok) return auth.res;
+
+  // GET /collab/:token — both lists
+  if (method === 'GET' && !action) {
+    const readers = await kvJson(env, `readers:${token}`, []);
+    const reading = await kvJson(env, `reading:${token}`, []);
+    return json({ ok: true, readers, reading });
+  }
+
+  // POST /collab/:token/invite
+  if (method === 'POST' && action === 'invite' && !arg) {
+    const readers = await kvJson(env, `readers:${token}`, []);
+    if (readers.length >= COLLAB_MAX) return json({ error: 'You are already sharing with the maximum number of people' }, 400);
+    const code      = randomHex(16);
+    const expiresAt = Date.now() + INVITE_TTL * 1000;
+    await env[KV_BINDING].put(`invite:${code}`, JSON.stringify({
+      owner:     token,
+      ownerName: await accountName(env, token),
+      opts:      normaliseOpts(body.opts),
+      createdAt: Date.now(),
+      expiresAt,
+    }), { expirationTtl: INVITE_TTL });
+    return json({ ok: true, code, expiresAt });
+  }
+
+  // GET /collab/:token/invite/:code — what accepting would mean
+  if (method === 'GET' && action === 'invite' && /^[a-f0-9]{32}$/.test(arg)) {
+    const inv = await kvJson(env, `invite:${arg}`, null);
+    if (!inv || Date.now() > inv.expiresAt) return json({ error: 'This invite has expired or was already used' }, 404);
+    if (inv.owner === token) return json({ error: 'That invite is your own' }, 400);
+    const already = (await kvJson(env, `reading:${token}`, [])).some(x => x.owner === inv.owner);
+    return json({ ok: true, ownerName: inv.ownerName, expiresAt: inv.expiresAt, already });
+  }
+
+  // POST /collab/:token/accept { code }
+  if (method === 'POST' && action === 'accept' && !arg) {
+    const code = String(body.code || '');
+    if (!/^[a-f0-9]{32}$/.test(code)) return json({ error: 'Invalid invite code' }, 400);
+    const inv = await kvJson(env, `invite:${code}`, null);
+    if (!inv || Date.now() > inv.expiresAt) return json({ error: 'This invite has expired or was already used' }, 404);
+    if (inv.owner === token) return json({ error: 'That invite is your own' }, 400);
+
+    const now     = Date.now();
+    const readers = (await kvJson(env, `readers:${inv.owner}`, [])).filter(x => x.token !== token);
+    const reading = (await kvJson(env, `reading:${token}`, [])).filter(x => x.owner !== inv.owner);
+    if (readers.length >= COLLAB_MAX || reading.length >= COLLAB_MAX)
+      return json({ error: 'Sharing limit reached' }, 400);
+
+    // Single use: gone before the relationship is written, so a retried
+    // accept can't reuse it.
+    await env[KV_BINDING].delete(`invite:${code}`);
+
+    readers.push({ token, name: await accountName(env, token), opts: normaliseOpts(inv.opts), addedAt: now });
+    reading.push({ owner: inv.owner, name: inv.ownerName, addedAt: now });
+    await kvPutList(env, `readers:${inv.owner}`, readers);
+    await kvPutList(env, `reading:${token}`, reading);
+    return json({ ok: true, owner: inv.owner, name: inv.ownerName });
+  }
+
+  // PUT /collab/:token/readers/:reader { opts } — change what they see
+  if (method === 'PUT' && action === 'readers' && isValidToken(arg)) {
+    const readers = await kvJson(env, `readers:${token}`, []);
+    const entry   = readers.find(x => x.token === arg);
+    if (!entry) return json({ error: 'Not shared with that person' }, 404);
+    entry.opts = normaliseOpts(body.opts);
+    await kvPutList(env, `readers:${token}`, readers);
+    return json({ ok: true, opts: entry.opts });
+  }
+
+  // DELETE /collab/:token/readers/:reader — owner removes a reader
+  if (method === 'DELETE' && action === 'readers' && isValidToken(arg)) {
+    await removeRelationship(env, token, arg);
+    return json({ ok: true });
+  }
+
+  // DELETE /collab/:token/reading/:owner — reader leaves
+  if (method === 'DELETE' && action === 'reading' && isValidToken(arg)) {
+    await removeRelationship(env, arg, token);
+    return json({ ok: true });
+  }
+
+  return json({ error: 'Not found' }, 404);
+}
+
+// GET /shared/:reader/:owner/recipes and /shared/:reader/:owner/img/:key
+// Signed by the reader; allowed only while the owner lists them.
+async function handleShared(request, env, pathname, cors) {
+  const json  = (o, status = 200) => respond(JSON.stringify(o), status, cors);
+  if (request.method.toUpperCase() !== 'GET') return json({ error: 'Method not allowed' }, 405);
+
+  const parts  = pathname.split('/').filter(Boolean).map(decodeURIComponent);  // shared, reader, owner, kind, key?
+  const reader = parts[1] || '', owner = parts[2] || '', kind = parts[3] || '';
+  if (!isValidToken(reader) || !isValidToken(owner)) return json({ error: 'Invalid token format' }, 400);
+  if (!reader.startsWith('google:') || !owner.startsWith('google:'))
+    return json({ error: 'Sharing needs a Google account' }, 403);
+
+  const isImg = kind === 'img';
+  if (isImg) {
+    const rl = await imageRateLimit(reader, env);
+    if (rl) return json({ error: 'Rate limit exceeded — please wait', retryAfter: rl.retryAfter },
+      429, { ...cors, 'Retry-After': String(rl.retryAfter) });
+  } else {
+    const rlErr = await checkStorageRateLimit(reader, env, cors);
+    if (rlErr) return rlErr;
+  }
+
+  const auth = await checkAuth(request, reader, cors, true, null, env);
+  if (!auth.ok) return auth.res;
+
+  const entry = (await kvJson(env, `readers:${owner}`, [])).find(x => x.token === reader);
+  if (!entry) return json({ error: 'No longer shared with you', revoked: true }, 403);
+
+  if (kind === 'recipes' && parts.length === 4) {
+    const profile = await kvJson(env, `user:${owner}:profile`, null);
+    if (!profile) return json({ error: 'Collection not found' }, 404);
+    const opts    = normaliseOpts(entry.opts);
+    const recipes = {};
+    for (const [id, r] of Object.entries(profile.recipes || {})) {
+      if (r && typeof r === 'object') recipes[id] = sharedRecipe({ ...r, id: r.id || id }, opts);
+    }
+    const name = (await kvJson(env, `reading:${reader}`, [])).find(x => x.owner === owner)?.name || '';
+    return json({ ok: true, owner, name, opts, recipes, fetchedAt: Date.now() });
+  }
+
+  if (isImg && parts.length === 5) {
+    const key    = parts[4];
+    const bucket = env[IMAGES_BINDING];
+    if (!bucket) return json({ error: 'Image sync not configured' }, 404);
+    if (!IMAGE_KEY_RE.test(key)) return json({ error: 'Invalid image key' }, 400);
+    // Membership is the check here, not "is this key on one of her recipes":
+    // that would mean parsing her whole profile once per photo. The reader is
+    // already allowed to see her collection, and names are content hashes
+    // nobody can guess.
+    const obj = await bucket.get(imageObjectKey(owner, key));
+    if (!obj) return json({ error: 'Not found' }, 404);
+    return new Response(obj.body, {
+      status: 200,
+      headers: {
+        ...cors,
+        'Content-Type': IMAGE_TYPES[key.split('.').pop()],
+        'Cache-Control': 'private, max-age=31536000, immutable',
+      },
+    });
+  }
+
+  return json({ error: 'Not found' }, 404);
+}
+
+// Rewrite every sharing record from one account id to another (account
+// migration). Updates the counterpart side too, so the other person's list
+// points at the new id.
+async function moveCollab(env, from, to) {
+  if (!from || !to || from === to) return;
+  try {
+    const readers = await kvJson(env, `readers:${from}`, []);
+    if (readers.length) {
+      const existing = await kvJson(env, `readers:${to}`, []);
+      const merged = [...existing, ...readers.filter(r => !existing.some(e => e.token === r.token))];
+      await kvPutList(env, `readers:${to}`, merged);
+      await env[KV_BINDING].delete(`readers:${from}`);
+      for (const r of readers) {
+        const list = await kvJson(env, `reading:${r.token}`, []);
+        list.forEach(x => { if (x.owner === from) x.owner = to; });
+        await kvPutList(env, `reading:${r.token}`, list);
+      }
+    }
+    const reading = await kvJson(env, `reading:${from}`, []);
+    if (reading.length) {
+      const existing = await kvJson(env, `reading:${to}`, []);
+      const merged = [...existing, ...reading.filter(r => !existing.some(e => e.owner === r.owner))];
+      await kvPutList(env, `reading:${to}`, merged);
+      await env[KV_BINDING].delete(`reading:${from}`);
+      for (const r of reading) {
+        const list = await kvJson(env, `readers:${r.owner}`, []);
+        list.forEach(x => { if (x.token === from) x.token = to; });
+        await kvPutList(env, `readers:${r.owner}`, list);
+      }
+    }
+  } catch (err) {
+    console.error('moveCollab failed:', err);
+  }
+}
+
 // ── Migration helpers ──────────────────────────────────────────────────────
 
 async function checkMigrationTombstone(token, env, cors, remaining) {
@@ -629,7 +928,10 @@ async function writeLegacyPointer(parsed, newToken, env) {
     delete parsed._legacyToken;
     // First time this pointer is written, carry the old account's photos over.
     const had = await env[KV_BINDING].get(`legacy:${legacy}`, { type: 'text' });
-    if (!had) await copyAccountImages(env, legacy, newToken);
+    if (!had) {
+      await copyAccountImages(env, legacy, newToken);
+      await moveCollab(env, legacy, newToken);
+    }
     await env[KV_BINDING].put(`legacy:${legacy}`, newToken, { expirationTtl: 60 * 60 * 24 * 90 });
   } else {
     delete parsed._legacyToken;
@@ -1228,6 +1530,14 @@ export default {
 
       if (url.pathname.startsWith('/images/')) {
         return await handleImages(request, env, url.pathname.replace(/\/$/, ''), cors);
+      }
+
+      if (url.pathname.startsWith('/collab/')) {
+        return await handleCollab(request, env, url.pathname.replace(/\/$/, ''), cors);
+      }
+
+      if (url.pathname.startsWith('/shared/')) {
+        return await handleShared(request, env, url.pathname.replace(/\/$/, ''), cors);
       }
 
       // GET /scrape?url=... — server-side fetch to bypass CORS for recipe scraping
