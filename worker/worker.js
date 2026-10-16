@@ -41,8 +41,9 @@ const KV_BINDING          = 'REFECTORY_KV';
 const KV_TTL              = 60 * 60 * 24 * 1825; // 5 years, resets on every write
 const HMAC_SALT           = 'refectory-hmac-v1'; // must never change after deployment
 const MAX_BODY_SIZE       = 5 * 1024 * 1024;      // 5 MB — recipe collections can be large
-const AUTH_RATE_LIMIT     = 20;
-const AUTH_RATE_LIMIT_WIN = 3600;
+const AUTH_RATE_LIMIT     = 30;   // sign-in, write key, migrate, revoke — per IP per window
+const VERIFY_RATE_LIMIT   = 120;  // boot-time /auth/verify — per IP per window
+const AUTH_RATE_LIMIT_WIN = 3600; // seconds
 const RATE_LIMIT          = 120;
 const RATE_LIMIT_WINDOW   = 60;
 const SCRAPE_RATE_LIMIT   = 60;   // scrapes per window, per IP
@@ -89,15 +90,42 @@ function isValidToken(token) {
 }
 
 // ── IP rate limiting (auth routes) ─────────────────────────────────────────
+// Keyed by IP, so every device in the house shares these budgets — which is
+// why they're split. The old single counter covered sign-in and every boot's
+// verify call together, and re-put itself with a fresh TTL on each request,
+// so the expiry slid forward and the count only cleared after two hours of
+// complete silence. A run of app restarts could lock her out of signing in.
+//
+// Now: a timestamp window (same scheme as the scrape and storage limiters),
+// so capacity frees up as old entries age out, and two buckets so boot-time
+// verifies can never starve an actual sign-in. New key names on purpose —
+// any `rl:ip:` counter left over from the old scheme is simply ignored and
+// expires on its own.
+//
+// Returns null when allowed, or { retryAfter } in seconds.
+async function authRateLimit(env, ip, bucket, limit) {
+  const kv   = env[KV_BINDING];
+  const key  = `rl:${bucket}:${ip}`;
+  const now  = Math.floor(Date.now() / 1000);
+  const win  = now - AUTH_RATE_LIMIT_WIN;
 
-async function checkIpRateLimit(env, ip) {
-  const kv    = env[KV_BINDING];
-  const key   = `rl:ip:${ip}`;
-  const raw   = await kv.get(key, { type: 'text' });
-  const count = raw ? parseInt(raw, 10) : 0;
-  if (count >= AUTH_RATE_LIMIT) return false;
-  await kv.put(key, String(count + 1), { expirationTtl: AUTH_RATE_LIMIT_WIN * 2 });
-  return true;
+  let ts = [];
+  const stored = await kv.get(key, { type: 'text' });
+  if (stored) {
+    try {
+      const parsed = JSON.parse(stored);
+      if (Array.isArray(parsed)) ts = parsed.filter(t => t > win);
+    } catch { /* unreadable — start fresh */ }
+  }
+
+  if (ts.length >= limit) {
+    // The oldest entry ages out first; that's when a slot frees up.
+    return { retryAfter: Math.max(1, ts[0] + AUTH_RATE_LIMIT_WIN - now) };
+  }
+
+  ts.push(now);
+  await kv.put(key, JSON.stringify(ts), { expirationTtl: AUTH_RATE_LIMIT_WIN + 60 });
+  return null;
 }
 
 // ── HMAC signing (mirrors auth.js exactly) ─────────────────────────────────
@@ -265,9 +293,20 @@ async function handleAuth(url, method, request, env, cors, ip) {
     }), 200, cors);
   }
 
-  // All /auth/* routes are IP rate-limited
-  if (!(await checkIpRateLimit(env, ip))) {
-    return respond(JSON.stringify({ error: 'Too many requests — try again later' }), 429, cors);
+  // All /auth/* routes below are IP rate-limited. Boot-time verifies draw on
+  // their own, larger budget; everything else shares the sign-in budget.
+  const isVerify = url.pathname === '/auth/verify';
+  const rl = await authRateLimit(env, ip,
+    isVerify ? 'verify' : 'auth',
+    isVerify ? VERIFY_RATE_LIMIT : AUTH_RATE_LIMIT);
+  if (rl) {
+    // Retry-After is already in Access-Control-Expose-Headers, and auth.js
+    // turns it into "try again in about N minutes".
+    return respond(
+      JSON.stringify({ error: 'Too many requests — try again later', retryAfter: rl.retryAfter }),
+      429,
+      { ...cors, 'Retry-After': String(rl.retryAfter) }
+    );
   }
 
   // POST /auth/google
