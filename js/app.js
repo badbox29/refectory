@@ -24,6 +24,12 @@ function stepText(s) {
 const STORAGE_KEY        = 'ref_appdata';
 const STORAGE_AUTH_KEY   = 'ref_google_id_token';
 const STORAGE_DISMISS_KEY= 'ref_token_upgrade_dismissed';
+// Bump on every deploy. Shown in Settings → Diagnostics so you can tell at a
+// glance whether a device is actually running the build you think it is —
+// mobile browsers cache JS hard, and a phone silently running last week's
+// app.js looks exactly like a sync bug.
+const APP_BUILD = '1.7.2';
+
 const SYNC_INTERVAL_MS   = 60_000; // 1 minute
 
 // Local-is-ahead-of-remote, kept in its own localStorage key rather than
@@ -76,6 +82,9 @@ const App = {
   syncFailures: 0,
   authPromptOpen: false,
   sessionWatchTimer: null,
+  // Diagnostics — last observed outcome of each direction.
+  lastPullAt: 0, lastPullResult: 'not attempted',
+  lastPushAt: 0, lastPushResult: 'not attempted',
 };
 
 // Default data shape
@@ -663,6 +672,8 @@ async function pushToWorker() {
       headers: { 'Content-Type': 'application/json', ...headers },
       body,
     });
+    App.lastPushAt = Date.now();
+    App.lastPushResult = res.ok ? 'ok' : `HTTP ${res.status}`;
     if (!res.ok) {
       const errText = await res.text().catch(() => String(res.status));
       console.error(`[Refectory] pushToWorker failed (${res.status}):`, errText);
@@ -673,6 +684,8 @@ async function pushToWorker() {
     return { ok: res.ok, status: res.status };
   } catch(e) {
     console.error('[Refectory] pushToWorker network error:', e);
+    App.lastPushAt = Date.now();
+    App.lastPushResult = 'network error';
     return { ok: false, status: 0 };
   }
 }
@@ -701,13 +714,23 @@ async function pullFromWorker() {
       return App.data;
     }
 
+    App.lastPullAt = Date.now();
     if (!res.ok) {
+      App.lastPullResult = `HTTP ${res.status}`;
       if (res.status === 401 || res.status === 403) handleAuthFailure('pull');
       return null;
     }
     const j = await res.json();
-    return j.value ?? j;
-  } catch { return null; }
+    const val = j.value ?? j;
+    const days = Object.values(val?.mealplan || {})
+      .reduce((n, wk) => n + Object.keys(wk || {}).length, 0);
+    App.lastPullResult = `ok — ${Object.keys(val?.recipes || {}).length} recipes, ${days} planned days`;
+    return val;
+  } catch (e) {
+    App.lastPullAt = Date.now();
+    App.lastPullResult = 'network error';
+    return null;
+  }
 }
 
 // Push if there is anything to push. `force` bypasses the in-memory fast path
@@ -7450,12 +7473,54 @@ function openSettings() {
     if (DEFAULT_WORKER_URL) workerEl.placeholder = `${DEFAULT_WORKER_URL} (default)`;
   }
   renderSnapshotList();
+  renderDiagnostics();
   openModal('modal-settings');
 }
 
 // Rollback copies, newest first. Counts rather than raw sizes, because
 // "412 recipes, 23 planned meals" tells you whether it's the copy you want
 // and "1.8 MB" doesn't.
+// Diagnostics. Exists because a sync problem was debugged three times by
+// correspondence, and the single fact that would have settled it immediately —
+// which build each device is actually running — wasn't visible anywhere.
+function renderDiagnostics() {
+  const el = document.getElementById('settings-diagnostics');
+  if (!el) return;
+  const d = App.data || {};
+
+  const when = ts => ts ? `${relativeDayLabel(ts)}, ${new Date(ts).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` : 'never';
+  const days = Object.values(d.mealplan || {})
+    .reduce((n, wk) => n + Object.keys(wk || {}).length, 0);
+  const stamps = Object.values(d.planStamps || {})
+    .reduce((n, wk) => n + Object.keys(wk || {}).length, 0);
+
+  const rows = [
+    ['Build',          APP_BUILD],
+    ['Account',        d.authMethod === 'google' ? `Google — ${d.linkedGoogle?.email || 'linked'}` : (d.authMethod || 'guest')],
+    ['Account key',    d.userToken || '(none)'],
+    ['Worker URL',     getWorkerUrl() || '(not set)'],
+    ['Signing key',    Auth.isGoogleAccount() ? (Auth.getWriteKey() ? 'present' : 'none — using Bearer') : 'n/a (token account)'],
+    ['Unsynced work',  isDirty() ? `yes — since ${when(dirtySince())}` : 'no'],
+    ['Last push',      `${App.lastPushResult} · ${when(App.lastPushAt)}`],
+    ['Last pull',      `${App.lastPullResult} · ${when(App.lastPullAt)}`],
+    ['This device',    `${Object.keys(d.recipes || {}).length} recipes, ${days} planned days, ${stamps} day stamps`],
+    ['Backups',        `${listSnapshots().length} stored`],
+  ];
+
+  el.innerHTML = `<div class="diag-grid">` + rows.map(([k, v]) =>
+    `<div class="diag-k">${esc(k)}</div><div class="diag-v">${esc(String(v))}</div>`).join('') + `</div>`;
+}
+
+function copyDiagnostics() {
+  const el = document.getElementById('settings-diagnostics');
+  if (!el) return;
+  const text = [...el.querySelectorAll('.diag-k')]
+    .map(k => `${k.textContent}: ${k.nextElementSibling?.textContent || ''}`).join('\n');
+  navigator.clipboard?.writeText(text)
+    .then(() => showToast('Diagnostics copied ✓'))
+    .catch(() => showToast('Could not copy — select the text instead.'));
+}
+
 function renderSnapshotList() {
   const el = document.getElementById('settings-snapshots');
   if (!el) return;
@@ -7976,6 +8041,8 @@ document.addEventListener('DOMContentLoaded', () => {
     renderStapleChips();
     if (View.activeSection === 'pantry') renderPantryResults();
   });
+
+  document.getElementById('diag-copy-btn')?.addEventListener('click', copyDiagnostics);
 
   document.getElementById('btn-save-recipe').onclick = saveEditorRecipe;
 
