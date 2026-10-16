@@ -16,7 +16,7 @@
   <script src="https://accounts.google.com/gsi/client" async
           onload="window.gisReady=true;window.dispatchEvent(new Event('gis-ready'))"></script>
 
-  <link rel="stylesheet" href="css/styles.css"/>
+  <link rel="stylesheet" href="css/styles.css?v=1.7.2"/>
 
   <!-- Google Client ID is served by the Cloudflare Worker (/auth/config) —
        no frontend configuration needed. -->
@@ -741,6 +741,19 @@
         </div>
       </div>
 
+      <!-- Diagnostics -->
+      <div class="settings-section">
+        <div class="settings-section-header">Diagnostics</div>
+        <div class="settings-section-body">
+          <div class="settings-row-sub" style="margin-bottom:.5rem;">
+            What this device thinks is going on. Useful when something isn't syncing —
+            check that every device shows the same build and account key.
+          </div>
+          <div id="settings-diagnostics"></div>
+          <button class="btn btn-outline btn-sm" id="diag-copy-btn" style="margin-top:.6rem;">Copy</button>
+        </div>
+      </div>
+
       <!-- Backups -->
       <div class="settings-section">
         <div class="settings-section-header">Backups</div>
@@ -1281,8 +1294,8 @@
 </svg>
 
 <script src="js/imageStore.js"></script>
-<script src="js/auth.js"></script>
-<script src="js/app.js"></script>
+<script src="js/auth.js?v=1.7.2"></script>
+<script src="js/app.js?v=1.7.2"></script>
 
 
 <!-- ── Print area (only visible during window.print()) ─────── -->
