@@ -3357,3 +3357,24 @@ body.modal-open { overflow: hidden; }
   color: var(--ink-mid);
   white-space: nowrap;
 }
+
+
+/* ── Settings diagnostics ────────────────────────────────────── */
+.diag-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: .25rem .75rem;
+  font-size: .8rem;
+  line-height: 1.5;
+}
+.diag-k { color: var(--muted); white-space: nowrap; }
+.diag-v {
+  font-family: var(--font-mono);
+  font-size: .76rem;
+  word-break: break-word;
+  color: var(--ink-mid);
+}
+@media (max-width: 520px) {
+  .diag-grid { grid-template-columns: 1fr; gap: 0 0; }
+  .diag-k { margin-top: .4rem; }
+}
