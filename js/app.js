@@ -28,7 +28,12 @@ const STORAGE_DISMISS_KEY= 'ref_token_upgrade_dismissed';
 // glance whether a device is actually running the build you think it is —
 // mobile browsers cache JS hard, and a phone silently running last week's
 // app.js looks exactly like a sync bug.
-const APP_BUILD = '1.8.1';
+//
+// When you bump this, also bump the three ?v= tags in index.html (styles.css,
+// auth.js, app.js). They can't be set from here — they're what loads this
+// file — and they're the only signal a browser gets that a file changed.
+// The header version is filled from APP_BUILD at boot.
+const APP_BUILD = '1.9.0';
 
 const SYNC_INTERVAL_MS   = 60_000; // 1 minute
 
@@ -1119,8 +1124,14 @@ function showSection(name) {
 
 // ─── Recipe CRUD ──────────────────────────────────────────────────
 
-function getRecipes() {
-  const recipes = Object.values(App.data.recipes || {});
+// `src` is a recipes map — your own by default, or a shared collection's.
+// A shared collection has no cook history, so "Recently cooked" falls back
+// to recently updated there instead of showing nothing.
+function getRecipes(src = App.data.recipes) {
+  const recipes = Object.values(src || {});
+  const shared  = src !== App.data.recipes;
+  if (shared && View.recipeSort === 'lastCooked')
+    return recipes.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   if (View.recipeSort === 'alpha')      return recipes.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
   if (View.recipeSort === 'rating')     return recipes.sort((a, b) => (b.rating || 0) - (a.rating || 0));
   // Favorites first, then most recently updated within each group
@@ -1507,6 +1518,441 @@ const ImgSync = (() => {
   };
 })();
 
+// ─── Collection sharing ───────────────────────────────────────────
+// Two people, each with their own collection, letting each other look.
+// Read-only: the reader browses, cooks from and copies the owner's recipes,
+// and can never change them. The worker does the guarding (handleCollab /
+// handleShared): it returns only recipe fields, applies the owner's choices
+// about ratings and notes on every read, and refuses the moment the owner
+// removes someone.
+//
+// Nothing shared touches App.data. The collection being viewed lives in
+// memory here, fetched fresh each time it's opened, so it never syncs,
+// never merges, and can't end up in your backups. Copying is the only way
+// anything crosses over, and a copy is a new recipe of your own.
+//
+// Google accounts only: the lists give each side the other's account id,
+// which for an old token account would be its secret.
+
+const PENDING_INVITE_KEY = 'refectory-pending-invite';
+const SHARED_IMG_CONCURRENCY = 4;
+
+const Shared = (() => {
+  let lists   = { readers: [], reading: [] };
+  let current = null;            // { owner, name, opts, recipes, fetchedAt }
+  const photos = new Map();      // `${owner}/${key}` → { url, blob }
+  const pending = new Map();     // same key → Promise
+
+  function available() {
+    return !Auth.isGuest() && Auth.isGoogleAccount() && !!getWorkerUrl() && !!App.data?.userToken;
+  }
+  const base = () => getWorkerUrl().replace(/\/+$/, '');
+  const me   = () => App.data.userToken;
+  const enc  = encodeURIComponent;
+
+  function firstName(n) { return String(n || '').trim().split(/\s+/)[0] || 'They'; }
+  // "Jane’s" — or "Their" when the account has no name to show.
+  function possessive(n) { const f = String(n || '').trim().split(/\s+/)[0]; return f ? `${f}\u2019s` : 'Their'; }
+  function nameFor(owner) { return lists.reading.find(x => x.owner === owner)?.name || ''; }
+
+  async function call(method, path, bodyObj) {
+    const body    = bodyObj === undefined ? '' : JSON.stringify(bodyObj);
+    const headers = await Auth._authHeaders(method, me(), body);
+    let res;
+    try {
+      res = await fetch(`${base()}${path}`, {
+        method,
+        headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers },
+        body: body || undefined,
+      });
+    } catch { throw new Error('Could not reach the worker'); }
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401) handleAuthFailure('share');
+    if (!res.ok) {
+      const e = new Error(data.error || `HTTP ${res.status}`);
+      e.status = res.status; e.data = data;
+      throw e;
+    }
+    return data;
+  }
+
+  async function refreshLists() {
+    if (!available()) { lists = { readers: [], reading: [] }; current = null; return lists; }
+    const d = await call('GET', `/collab/${enc(me())}`);
+    lists = { readers: d.readers || [], reading: d.reading || [] };
+    if (current && !lists.reading.some(x => x.owner === current.owner)) current = null;
+    return lists;
+  }
+
+  async function createInvite(opts) {
+    const d   = await call('POST', `/collab/${enc(me())}/invite`, { opts });
+    const url = `${location.origin}${location.pathname}#invite=${d.code}`;
+    return { url, expiresAt: d.expiresAt };
+  }
+  const peekInvite   = code => call('GET', `/collab/${enc(me())}/invite/${code}`);
+  async function acceptInvite(code) {
+    const d = await call('POST', `/collab/${enc(me())}/accept`, { code });
+    await refreshLists();
+    return d;
+  }
+  async function setReaderOpts(reader, opts) {
+    await call('PUT', `/collab/${enc(me())}/readers/${enc(reader)}`, { opts });
+    await refreshLists();
+  }
+  async function removeReader(reader) {
+    await call('DELETE', `/collab/${enc(me())}/readers/${enc(reader)}`);
+    await refreshLists();
+  }
+  async function leave(owner) {
+    await call('DELETE', `/collab/${enc(me())}/reading/${enc(owner)}`);
+    if (current?.owner === owner) current = null;
+    await refreshLists();
+  }
+
+  // Fetch a collection fresh and make it the one being viewed.
+  async function open(owner) {
+    try {
+      const d = await call('GET', `/shared/${enc(me())}/${enc(owner)}/recipes`);
+      current = {
+        owner,
+        name:      d.name || nameFor(owner),
+        opts:      d.opts || {},
+        recipes:   d.recipes || {},
+        fetchedAt: d.fetchedAt || Date.now(),
+      };
+      return current;
+    } catch (e) {
+      if (e.data?.revoked) { current = null; await refreshLists().catch(() => {}); }
+      throw e;
+    }
+  }
+  function close()  { current = null; }
+  function active() { return current; }
+
+  // ── Photos ──
+  const gate = (() => {
+    let n = 0; const q = [];
+    return async fn => {
+      if (n >= SHARED_IMG_CONCURRENCY) await new Promise(r => q.push(r));
+      n++;
+      try { return await fn(); } finally { n--; q.shift()?.(); }
+    };
+  })();
+
+  // Her synced photo as a Blob, fetched once per session.
+  function photoBlob(r, owner) {
+    const k = `${owner}/${r.imageKey}`;
+    if (photos.has(k)) return Promise.resolve(photos.get(k).blob);
+    if (pending.has(k)) return pending.get(k);
+    const p = gate(async () => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const headers = await Auth._authHeaders('GET', me(), '');
+        const res = await fetch(`${base()}/shared/${enc(me())}/${enc(owner)}/img/${r.imageKey}`, { headers });
+        if (res.status === 429) {
+          const wait = Math.min(15, parseInt(res.headers.get('Retry-After') || '2', 10)) * 1000;
+          await new Promise(ok => setTimeout(ok, wait));
+          continue;
+        }
+        if (!res.ok) return null;
+        const blob = await res.blob();
+        photos.set(k, { url: URL.createObjectURL(blob), blob });
+        return blob;
+      }
+      return null;
+    }).catch(() => null).finally(() => pending.delete(k));
+    pending.set(k, p);
+    return p;
+  }
+
+  // Something an <img> or background can show: her synced photo if there is
+  // one, else her plain link, else nothing.
+  async function image(r, owner = current?.owner) {
+    if (!r) return null;
+    if (r.imageKey && App.imageSync && owner) {
+      const blob = await photoBlob(r, owner);
+      if (blob) return photos.get(`${owner}/${r.imageKey}`)?.url || null;
+    }
+    return /^https?:\/\//i.test(r.imageUrl || '') ? r.imageUrl : null;
+  }
+
+  // Her synced photo as a data URL, for copying into your own store.
+  async function imageBytes(r, owner) {
+    if (!r?.imageKey || !App.imageSync) return null;
+    const blob = await photoBlob(r, owner);
+    if (!blob) return null;
+    return new Promise((ok, fail) => {
+      const fr = new FileReader();
+      fr.onload = () => ok(fr.result);
+      fr.onerror = () => fail(fr.error);
+      fr.readAsDataURL(blob);
+    });
+  }
+
+  return {
+    available, firstName, possessive, nameFor, lists: () => lists,
+    refreshLists, createInvite, peekInvite, acceptInvite, setReaderOpts, removeReader, leave,
+    open, close, active, image, imageBytes,
+  };
+})();
+
+// Collection switcher above the recipe grid. Hidden entirely until someone
+// has shared with you, so it costs nothing for a single-collection household.
+function renderCollectionSwitch() {
+  const el = document.getElementById('collection-switch');
+  if (!el) return;
+  const reading = Shared.lists().reading;
+  const sh      = Shared.active();
+
+  // Hide the things that only make sense for your own collection.
+  ['btn-new-recipe', 'btn-select-mode'].forEach(id => {
+    const b = document.getElementById(id);
+    if (b) b.style.display = sh ? 'none' : '';
+  });
+
+  if (!reading.length && !sh) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = '';
+
+  const chip = (label, owner, active) =>
+    `<button class="collection-chip${active ? ' is-active' : ''}" data-owner="${esc(owner)}">${esc(label)}</button>`;
+  const updated = sh ? new Date(sh.fetchedAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '';
+
+  el.innerHTML = `
+    <div class="collection-chips">
+      ${chip('My recipes', '', !sh)}
+      ${reading.map(x => chip(`${Shared.possessive(x.name)} recipes`, x.owner, sh?.owner === x.owner)).join('')}
+    </div>
+    ${sh ? `<div class="collection-banner">
+      Viewing ${esc(Shared.possessive(sh.name))} recipes \u00b7 read-only \u00b7 updated ${esc(updated)}
+      <button class="btn btn-ghost btn-sm" id="collection-refresh" title="Fetch the latest">\u21bb Refresh</button>
+    </div>` : ''}`;
+
+  el.querySelectorAll('.collection-chip').forEach(b =>
+    b.addEventListener('click', () => switchCollection(b.dataset.owner)));
+  el.querySelector('#collection-refresh')?.addEventListener('click', () => switchCollection(sh.owner));
+}
+
+// '' means your own collection. Always fetches fresh, so switching (or
+// tapping Refresh) shows whatever she last synced.
+async function switchCollection(owner) {
+  View.recipeTags = [];
+  View.selectMode = false;
+  View.selectedRecipeIds.clear();
+  if (!owner) { Shared.close(); renderRecipes(); return; }
+
+  const grid = document.getElementById('recipe-grid');
+  const name = Shared.firstName(Shared.nameFor(owner));
+  if (grid) grid.innerHTML = `<div class="empty-state"><div class="empty-sub">Loading recipes\u2026</div></div>`;
+  document.getElementById('recipe-empty').style.display = 'none';
+  try {
+    await Shared.open(owner);
+  } catch (e) {
+    showToast(e.data?.revoked
+      ? `${name} is no longer sharing their recipes with you.`
+      : `Couldn\u2019t load those recipes \u2014 ${e.message}`);
+    Shared.close();
+  }
+  renderRecipes();
+}
+
+// ── Invites ──
+// An invite link is the app URL with #invite=CODE. The code is captured as
+// early as possible and the hash cleared, so it doesn't linger in the address
+// bar or get bookmarked. If you're not signed in yet, it waits until you are.
+function captureInviteFromUrl() {
+  const m = (location.hash || '').match(/invite=([a-f0-9]{32})/);
+  if (!m) return;
+  try { localStorage.setItem(PENDING_INVITE_KEY, m[1]); } catch {}
+  history.replaceState(null, '', location.pathname + location.search);
+}
+
+let _invitePrompting = false;
+async function processPendingInvite() {
+  let code = null;
+  try { code = localStorage.getItem(PENDING_INVITE_KEY); } catch {}
+  if (!code || _invitePrompting) return;
+  if (!Shared.available()) {
+    if (Auth.isGuest()) showToast('Sign in with Google to accept that recipe invite.');
+    return;   // keep it for after sign-in
+  }
+  _invitePrompting = true;
+  const drop = () => { try { localStorage.removeItem(PENDING_INVITE_KEY); } catch {} };
+  try {
+    const peek = await Shared.peekInvite(code);
+    const who  = peek.ownerName || 'Someone';
+    if (peek.already) {
+      drop();
+      showToast(`${Shared.firstName(who)} already shares their recipes with you.`);
+      return;
+    }
+    const ok = await appConfirm({
+      title: 'Recipe invite',
+      message: `${who} wants to share their recipes with you.\n\nYou\u2019ll be able to browse them and copy any you like into your own collection. They stay theirs \u2014 you can\u2019t change them.`,
+      confirmLabel: 'Accept', cancelLabel: 'Not now',
+    });
+    if (!ok) return;   // keep the code; they can accept later from Settings
+    await Shared.acceptInvite(code);
+    drop();
+    renderRecipes();
+    showToast(`${Shared.possessive(who)} recipes are now in your Recipes view \u2713`);
+  } catch (e) {
+    if (e.status === 404 || e.status === 400) drop();
+    showToast(`Couldn\u2019t accept that invite \u2014 ${e.message}`);
+  } finally {
+    _invitePrompting = false;
+  }
+}
+
+// Load sharing state after boot / sign-in. Never blocks anything.
+async function startSharing() {
+  if (!Shared.available()) return;
+  try { await Shared.refreshLists(); } catch { /* offline — switcher stays hidden */ }
+  renderCollectionSwitch();
+  processPendingInvite();
+}
+
+// ── Settings: Sharing ──
+function renderSharingSettings() {
+  const el = document.getElementById('settings-sharing');
+  if (!el) return;
+  if (!Shared.available()) {
+    el.innerHTML = `<div class="settings-row-sub">Sharing needs a Google account. Sign in with Google to share
+      your recipes or see someone else\u2019s.</div>`;
+    return;
+  }
+
+  const { readers, reading } = Shared.lists();
+  const optBoxes = (prefix, o = {}) => `
+    <label class="share-opt"><input type="checkbox" data-opt="ratings" id="${prefix}-ratings" ${o.ratings ? 'checked' : ''}/>
+      Include your ratings and favorites</label>
+    <label class="share-opt"><input type="checkbox" data-opt="notes" id="${prefix}-notes" ${o.notes ? 'checked' : ''}/>
+      Include your recipe notes</label>`;
+  let pendingCode = null;
+  try { pendingCode = localStorage.getItem(PENDING_INVITE_KEY); } catch {}
+
+  el.innerHTML = `
+    ${pendingCode ? `<div class="settings-row">
+      <div><div class="settings-row-label">You have a recipe invite waiting</div></div>
+      <button class="btn btn-sm btn-primary" id="share-pending-btn">Review</button>
+    </div>` : ''}
+
+    <div class="share-block">
+      <div class="settings-row-label">Invite someone to see your recipes</div>
+      <div class="settings-row-sub">They\u2019ll be able to browse and copy your recipes, never change them.
+        Your meal plan, pantry and shopping list are never shared.</div>
+      <div class="share-opts">${optBoxes('invite-opt')}</div>
+      <button class="btn btn-sm btn-outline" id="share-invite-btn">Create invite link</button>
+      <div id="share-invite-result" class="share-invite-result" style="display:none;">
+        <div class="share-url-row">
+          <input class="input" id="share-invite-url" readonly/>
+          <button class="btn btn-sm btn-outline" id="share-invite-copy">Copy</button>
+          ${navigator.share ? `<button class="btn btn-sm btn-outline" id="share-invite-send">Share\u2026</button>` : ''}
+        </div>
+        <div class="settings-row-sub" id="share-invite-expiry"></div>
+      </div>
+    </div>
+
+    <div class="share-block">
+      <div class="settings-row-label">People who can see your recipes</div>
+      ${readers.length ? readers.map(x => `
+        <div class="share-person" data-reader="${esc(x.token)}">
+          <div class="share-person-head">
+            <span>${esc(x.name || 'Someone')}</span>
+            <button class="btn btn-sm btn-ghost share-remove" style="color:var(--red)">Remove</button>
+          </div>
+          <div class="share-opts">${optBoxes(`reader-${esc(x.token)}`, x.opts)}</div>
+        </div>`).join('')
+        : `<div class="settings-row-sub">Nobody yet.</div>`}
+    </div>
+
+    <div class="share-block">
+      <div class="settings-row-label">Collections shared with you</div>
+      ${reading.length ? reading.map(x => `
+        <div class="share-person" data-owner="${esc(x.owner)}">
+          <div class="share-person-head">
+            <span>${esc(x.name || 'Someone')}</span>
+            <button class="btn btn-sm btn-ghost share-leave">Leave</button>
+          </div>
+        </div>`).join('')
+        : `<div class="settings-row-sub">None yet. When someone sends you an invite link, open it here.</div>`}
+    </div>`;
+
+  const readOpts = root => ({
+    ratings: !!root.querySelector('[data-opt="ratings"]')?.checked,
+    notes:   !!root.querySelector('[data-opt="notes"]')?.checked,
+  });
+
+  el.querySelector('#share-pending-btn')?.addEventListener('click', async () => {
+    closeModal('modal-settings');
+    await processPendingInvite();
+  });
+
+  el.querySelector('#share-invite-btn')?.addEventListener('click', async e => {
+    const btn = e.currentTarget;
+    btn.disabled = true; btn.textContent = 'Creating\u2026';
+    try {
+      const { url, expiresAt } = await Shared.createInvite(readOpts(el.querySelector('.share-block')));
+      el.querySelector('#share-invite-url').value = url;
+      el.querySelector('#share-invite-expiry').textContent =
+        `Works once. Expires ${new Date(expiresAt).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })} if it isn\u2019t used.`;
+      el.querySelector('#share-invite-result').style.display = '';
+    } catch (err) {
+      showToast(`Couldn\u2019t create an invite \u2014 ${err.message}`);
+    } finally {
+      btn.disabled = false; btn.textContent = 'Create invite link';
+    }
+  });
+  el.querySelector('#share-invite-copy')?.addEventListener('click', async () => {
+    const inp = el.querySelector('#share-invite-url');
+    try { await navigator.clipboard.writeText(inp.value); }
+    catch { inp.select(); document.execCommand('copy'); }
+    showToast('Invite link copied \u2713');
+  });
+  el.querySelector('#share-invite-send')?.addEventListener('click', () => {
+    const url = el.querySelector('#share-invite-url').value;
+    navigator.share({ title: 'Refectory recipes', text: 'I\u2019m sharing my recipes with you on Refectory.', url }).catch(() => {});
+  });
+
+  el.querySelectorAll('.share-person[data-reader]').forEach(row => {
+    const reader = row.dataset.reader;
+    row.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.addEventListener('change', async () => {
+      try {
+        await Shared.setReaderOpts(reader, readOpts(row));
+        showToast('Sharing updated \u2713');
+      } catch (err) {
+        cb.checked = !cb.checked;
+        showToast(`Couldn\u2019t update \u2014 ${err.message}`);
+      }
+    }));
+    row.querySelector('.share-remove')?.addEventListener('click', async () => {
+      const who = row.querySelector('.share-person-head span')?.textContent || 'them';
+      if (!await appConfirm({
+        title: 'Stop sharing?',
+        message: `${who} will no longer see your recipes. Anything they\u2019ve already copied stays in their collection.`,
+        confirmLabel: 'Stop sharing', danger: true,
+      })) return;
+      try { await Shared.removeReader(reader); renderSharingSettings(); showToast('Sharing stopped.'); }
+      catch (err) { showToast(`Couldn\u2019t remove \u2014 ${err.message}`); }
+    });
+  });
+
+  el.querySelectorAll('.share-person[data-owner]').forEach(row => {
+    row.querySelector('.share-leave')?.addEventListener('click', async () => {
+      const who = row.querySelector('.share-person-head span')?.textContent || 'them';
+      if (!await appConfirm({
+        title: 'Leave this collection?',
+        message: `You\u2019ll stop seeing ${who}\u2019s recipes. Anything you\u2019ve copied stays yours. They\u2019d need to invite you again.`,
+        confirmLabel: 'Leave', danger: true,
+      })) return;
+      try {
+        await Shared.leave(row.dataset.owner);
+        renderSharingSettings();
+        renderRecipes();
+        showToast('Left the collection.');
+      } catch (err) { showToast(`Couldn\u2019t leave \u2014 ${err.message}`); }
+    });
+  });
+}
+
 function saveRecipe(recipe) {
   recipe.updatedAt = Date.now();
   if (!recipe.createdAt) recipe.createdAt = recipe.updatedAt;
@@ -1753,7 +2199,12 @@ function renderRecipes() {
   const noRes  = document.getElementById('recipe-empty');
   if (!grid) return;
 
-  let recipes = getRecipes();
+  // Viewing someone else's collection: same grid, same search and tags,
+  // their recipes, read-only.
+  const sh = Shared.active();
+  renderCollectionSwitch();
+
+  let recipes = sh ? getRecipes(sh.recipes) : getRecipes();
   const q     = View.recipeSearch.trim().toLowerCase();
   const terms = q.split(/\s+/).filter(Boolean);
   const matchSources = {}; // recipeId -> Set of 'title'|'description'|'tags'|'ingredients'
@@ -1791,6 +2242,16 @@ function renderRecipes() {
   renderTagFilter();
 
   if (!recipes.length) {
+    if (sh) {
+      noRes.style.display = 'none';
+      grid.innerHTML = `<div class="empty-state"><div class="empty-icon">🌿</div>
+        <div class="empty-title">${q || View.recipeTags.length ? 'No matches' : 'Nothing here yet'}</div>
+        <div class="empty-sub">${q || View.recipeTags.length
+          ? 'No recipes in this collection match your search.'
+          : `${esc(Shared.firstName(sh.name))} hasn\u2019t added any recipes yet.`}</div></div>`;
+      document.getElementById('bulk-action-bar').style.display = 'none';
+      return;
+    }
     grid.innerHTML = '';
     noRes.style.display = '';
     return;
@@ -1799,8 +2260,8 @@ function renderRecipes() {
 
   // Collapse groups: every matching member folds into one tabbed card. In
   // select mode groups stay expanded, since selection operates on individual
-  // recipes and you can't tick a tab.
-  const gIdx  = View.selectMode ? {} : groupIndex();
+  // recipes and you can't tick a tab. Shared collections don't carry groups.
+  const gIdx  = (View.selectMode || sh) ? {} : groupIndex();
   const cards = [];
   const seenGroups = new Set();
   for (const r of recipes) {
@@ -1825,6 +2286,12 @@ function renderRecipes() {
     ? renderGroupCard(c.g, c.members, q, matchSources)
     : renderRecipeCard(c.r, q, matchSources)).join('');
 
+  if (sh) {
+    wireRecipeGrid(grid, sh);
+    document.getElementById('bulk-action-bar').style.display = 'none';
+    hydrateGridImages(grid, id => Shared.image(sh.recipes[id], sh.owner), true);
+    return;
+  }
   wireRecipeGrid(grid);
   renderBulkActionBar(recipes);
   hydrateGridImages(grid);
@@ -1886,7 +2353,15 @@ function renderGroupCard(g, members, q, matchSources) {
     </div>`;
 }
 
-function wireRecipeGrid(grid) {
+function wireRecipeGrid(grid, sh = null) {
+  if (sh) {
+    grid.querySelectorAll('.recipe-card').forEach(card =>
+      card.addEventListener('click', () => {
+        const r = sh.recipes[card.dataset.id];
+        if (r) openRecipeDetail(r.id, { shared: sh });
+      }));
+    return;
+  }
   grid.querySelectorAll('.recipe-card').forEach(card => {
     card.addEventListener('click', e => {
       if (e.target.closest('.group-tab') || e.target.closest('.group-edit')) return;
@@ -1930,19 +2405,32 @@ function wireRecipeGrid(grid) {
   });
 }
 
-function hydrateGridImages(root) {
-  root.querySelectorAll('[data-img-id]').forEach(async imgEl => {
-    const dataUrl = await resolveImage(imgEl.dataset.imgId);
-    if (dataUrl) {
+// `lazy` loads each card's photo only as it scrolls into view. Used for
+// shared collections, whose photos all come over the network — a 500-card
+// grid would otherwise request every photo at once.
+function hydrateGridImages(root, resolver = resolveImage, lazy = false) {
+  const load = async imgEl => {
+    const dataUrl = await resolver(imgEl.dataset.imgId);
+    if (dataUrl && imgEl.isConnected) {
       imgEl.style.backgroundImage = `url('${dataUrl}')`;
       imgEl.querySelector('.recipe-card-placeholder')?.remove();
     }
-  });
+  };
+  const els = root.querySelectorAll('[data-img-id]');
+  if (!lazy || typeof IntersectionObserver === 'undefined') { els.forEach(load); return; }
+  const io = new IntersectionObserver(entries => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      io.unobserve(e.target);
+      load(e.target);
+    }
+  }, { rootMargin: '300px' });
+  els.forEach(el => io.observe(el));
 }
 
-function getAllTags() {
+function getAllTags(src = App.data.recipes) {
   const tags = new Set();
-  for (const r of Object.values(App.data.recipes || {})) {
+  for (const r of Object.values(src || {})) {
     (r.tags || []).forEach(t => tags.add(t));
   }
   return [...tags].sort();
@@ -2095,7 +2583,7 @@ function mergeTags(oldTags, newName) {
 function renderTagFilter() {
   const bar = document.getElementById('tag-filter-bar');
   if (!bar) return;
-  const allTags = getAllTags();
+  const allTags = getAllTags(Shared.active()?.recipes);
   if (!allTags.length) { bar.innerHTML = ''; return; }
 
   const active  = View.recipeTags;
@@ -2183,14 +2671,24 @@ function renderTagFilter() {
 
 // ─── Recipe detail modal ──────────────────────────────────────────
 
-function openRecipeDetail(id) {
-  const r = getRecipe(id);
+// The recipe currently shown in the detail modal. Scaling reads it from
+// here — it used to look the recipe up by title, which picked the wrong one
+// whenever two recipes shared a name, and can't see shared recipes at all.
+let _detailRecipe = null;
+
+// opts.shared — a shared collection (from Shared.active()): the recipe comes
+// from there and the modal is read-only, with Copy instead of Edit/Delete.
+function openRecipeDetail(id, opts = {}) {
+  const sh = opts.shared || null;
+  const r  = sh ? sh.recipes?.[id] : getRecipe(id);
   if (!r) return;
+  _detailRecipe = r;
+  applyDetailMode(r, sh);
 
   // If this recipe belongs to a group, put its siblings across the top so you
   // can compare variants without closing and reopening.
   const gTabs = document.getElementById('detail-group-tabs');
-  const g     = groupForRecipe(id);
+  const g     = sh ? null : groupForRecipe(id);
   if (gTabs) {
     if (!g) { gTabs.style.display = 'none'; gTabs.innerHTML = ''; }
     else {
@@ -2226,7 +2724,15 @@ function openRecipeDetail(id) {
     }
   }
   const favEl = document.getElementById('detail-favorite');
-  if (favEl) {
+  if (favEl && sh) {
+    // Shown only when she shares ratings and favorites, and never clickable.
+    favEl.className = 'detail-fav is-fav is-readonly';
+    favEl.textContent = '♥';
+    favEl.title = `${Shared.possessive(sh.name)} favorite`;
+    favEl.style.display = r.favorite ? '' : 'none';
+    favEl.onclick = null;
+  } else if (favEl) {
+    favEl.style.display = '';
     favEl.className = 'detail-fav' + (r.favorite ? ' is-fav' : '');
     favEl.title     = r.favorite ? 'Family Favorite — click to unset' : 'Mark as Family Favorite';
     favEl.textContent = r.favorite ? '♥' : '♡';
@@ -2244,7 +2750,10 @@ function openRecipeDetail(id) {
   const ratingEl = document.getElementById('detail-rating');
   if (ratingEl) {
     const rating = r.rating || 0;
-    ratingEl.innerHTML = `<span class="detail-stars${rating ? '' : ' detail-stars-empty'}" title="${rating ? rating + ' out of 5' : 'Not yet rated — click Edit to rate'}">${starsDisplay(rating)}</span>`;
+    ratingEl.innerHTML = sh && !rating ? ''
+      : `<span class="detail-stars${rating ? '' : ' detail-stars-empty'}" title="${rating
+          ? `${sh ? `${Shared.firstName(sh.name)} rates it ` : ''}${rating} out of 5`
+          : 'Not yet rated — click Edit to rate'}">${starsDisplay(rating)}</span>`;
   }
 
   // Time chips — only shown when data present
@@ -2274,8 +2783,8 @@ function openRecipeDetail(id) {
   const imgEl = document.getElementById('detail-image');
   imgEl.style.display = 'none';
   imgEl.src = '';
-  resolveImage(id).then(dataUrl => {
-    if (dataUrl) { imgEl.src = dataUrl; imgEl.style.display = ''; }
+  (sh ? Shared.image(r, sh.owner) : resolveImage(id)).then(dataUrl => {
+    if (dataUrl && _detailRecipe === r) { imgEl.src = dataUrl; imgEl.style.display = ''; }
   });
 
   // Ingredients
@@ -2299,7 +2808,8 @@ function openRecipeDetail(id) {
   const servingsLabel = servingsRaw || String(servingsNum);
   document.getElementById('detail-scale-label').textContent = `Servings (base: ${servingsLabel})`;
 
-  document.getElementById('detail-print-btn').onclick = () => printRecipe(id);
+  document.getElementById('detail-print-btn').onclick = () => printRecipe(id, sh);
+  if (sh) document.getElementById('detail-copy-btn').onclick = () => copySharedRecipe(r, sh);
   document.getElementById('detail-edit-btn').onclick = () => { closeModal('modal-recipe-detail'); openRecipeEditor(id); };
   document.getElementById('detail-delete-btn').onclick = async () => {
     if (await appConfirm({
@@ -2326,8 +2836,12 @@ function openRecipeDetail(id) {
   if (panelRecipe) panelRecipe.style.display = '';
   if (panelNotes)  panelNotes.style.display  = 'none';
 
-  // Populate notes
-  if (notesArea) notesArea.value = r.notes || '';
+  // Populate notes. Read-only for a shared recipe — and the tab only appears
+  // at all when she shares her notes (applyDetailMode).
+  if (notesArea) {
+    notesArea.value    = r.notes || '';
+    notesArea.readOnly = !!sh;
+  }
 
   // Wire tab buttons
   tabs.forEach(tab => {
@@ -2337,7 +2851,7 @@ function openRecipeDetail(id) {
       if (panelRecipe) panelRecipe.style.display = isNotes ? 'none' : '';
       if (panelNotes)  panelNotes.style.display  = isNotes ? '' : 'none';
       if (isNotes) {
-        notesArea?.focus();
+        if (!sh) notesArea?.focus();
         if (notesArea) {
           notesArea.style.height = 'auto';
           notesArea.style.height = Math.max(420, notesArea.scrollHeight) + 'px';
@@ -2348,7 +2862,9 @@ function openRecipeDetail(id) {
 
   // Auto-save notes on input (debounced 600ms) + auto-expand textarea
   let _notesSaveTimer = null;
-  if (notesArea) {
+  if (notesArea && sh) {
+    notesArea.oninput = null;
+  } else if (notesArea) {
     const autoExpand = () => {
       notesArea.style.height = 'auto';
       notesArea.style.height = Math.max(420, notesArea.scrollHeight) + 'px';
@@ -2372,6 +2888,91 @@ function openRecipeDetail(id) {
   updateScaledIngredients();
 }
 
+// Everything in the detail modal that differs between your recipe and a
+// shared one. Set fully every time, so neither mode leaks into the other.
+function applyDetailMode(r, sh) {
+  const show = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; };
+  show('detail-plan-btn',   !sh);
+  show('detail-edit-btn',   !sh);
+  show('detail-delete-btn', !sh);
+  show('detail-copy-btn',   !!sh);
+
+  const copyBtn = document.getElementById('detail-copy-btn');
+  if (copyBtn) { copyBtn.disabled = false; copyBtn.textContent = '📋 Copy to my recipes'; }
+
+  // Notes tab: always yours; for a shared recipe only if she shares notes.
+  const notesTab = document.querySelector('.detail-tab[data-tab="notes"]');
+  if (notesTab) notesTab.style.display = (!sh || sh.opts?.notes) ? '' : 'none';
+  const notesArea = document.getElementById('detail-notes');
+  if (notesArea) notesArea.placeholder = sh
+    ? `${Shared.firstName(sh.name)} hasn\u2019t written notes for this one.`
+    : 'Add your notes here — family reactions, substitutions to try, tips for next time…';
+
+  // Banner across the top: whose recipe this is, or where your copy came from.
+  const banner = document.getElementById('detail-origin');
+  if (banner) {
+    if (sh) {
+      banner.textContent = `From ${Shared.possessive(sh.name).replace(/^Their$/, 'their')} collection \u00b7 read-only`;
+      banner.style.display = '';
+    } else if (r.copiedFrom) {
+      const when = r.copiedFrom.copiedAt
+        ? new Date(r.copiedFrom.copiedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+        : '';
+      banner.textContent = `Copied from ${Shared.possessive(r.copiedFrom.name).replace(/^Their$/, 'a shared')} collection${when ? ` on ${when}` : ''}`;
+      banner.style.display = '';
+    } else {
+      banner.style.display = 'none';
+    }
+    banner.classList.toggle('is-shared', !!sh);
+  }
+}
+
+// Copy a shared recipe into your own collection. The copy is yours from here
+// on: new id, nothing personal carried over (her rating, favorite, notes),
+// and the photo moved into your own storage rather than pointing at hers.
+async function copySharedRecipe(r, sh) {
+  const btn = document.getElementById('detail-copy-btn');
+  const prior = Object.values(App.data.recipes || {})
+    .find(x => x.copiedFrom?.owner === sh.owner && x.copiedFrom?.recipeId === r.id);
+  if (prior && !await appConfirm({
+    title: 'Copy again?',
+    message: `You already copied this as \u201c${prior.title}\u201d. Make another copy?`,
+    confirmLabel: 'Copy again',
+  })) return;
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Copying\u2026'; }
+  try {
+    const {
+      id: _id, rating: _r, favorite: _f, notes: _n, imageKey: _k,
+      createdAt: _c, updatedAt: _u, ...content
+    } = r;
+    const now = Date.now();
+    const id  = genId();
+    const rec = {
+      ...content,
+      id,
+      createdAt: now,
+      copiedFrom: { name: sh.name || '', owner: sh.owner, recipeId: r.id, copiedAt: now },
+    };
+
+    // Her synced photo comes over as bytes and is queued for your own photo
+    // storage. A plain link (imageUrl) just rides along on the record.
+    let photo = null;
+    if (r.imageKey) photo = await Shared.imageBytes(r, sh.owner);
+    if (photo) await ImageStore.set(id, photo);
+
+    saveRecipe(rec);
+    if (photo) ImgSync.enqueue(id);
+
+    if (btn) btn.textContent = 'Copied \u2713';
+    showToast(`\u201c${rec.title}\u201d copied to your recipes \u2713`);
+  } catch (e) {
+    console.error('[Refectory] copy failed:', e);
+    if (btn) { btn.disabled = false; btn.textContent = '📋 Copy to my recipes'; }
+    showToast('Could not copy that recipe \u2014 try again.');
+  }
+}
+
 function updateScaledIngredients() {
   const scaleInput = document.getElementById('detail-scale');
   const base       = parseFloat(scaleInput?.dataset.base) || 1;
@@ -2380,10 +2981,7 @@ function updateScaledIngredients() {
   const detailId   = document.querySelector('#modal-recipe-detail')?.dataset.recipeId;
   // re-render with scaling if recipe id available — look up from title
   // For now, update display via simple ratio recalculation
-  const items = document.querySelectorAll('#detail-ingredients li');
-  const recipe = Object.values(App.data.recipes || {}).find(r =>
-    r.title === document.getElementById('detail-title')?.textContent
-  );
+  const recipe = _detailRecipe;
   if (!recipe) return;
   document.getElementById('detail-ingredients').innerHTML =
     (recipe.ingredients || []).map(i => {
@@ -2392,7 +2990,7 @@ function updateScaledIngredients() {
         if (m && !isNaN(parseFloat(m[1]))) {
           const scaled = parseFloat(m[1]) * ratio;
           const num = Number.isInteger(scaled) ? scaled : scaled.toFixed(2).replace(/\.?0+$/, '');
-          return `<li>${esc((num + m[2]).trim())}</li>`;
+          return `<li>${esc(`${num} ${m[2].trim()}`.trim())}</li>`;
         }
         return `<li>${esc(i)}</li>`;
       }
@@ -7819,8 +8417,8 @@ async function importFromMealieApi(baseUrl, apiKey) {
 
 // ─── Print ───────────────────────────────────────────────────────
 
-async function printRecipe(id) {
-  const r = getRecipe(id);
+async function printRecipe(id, sh = null) {
+  const r = sh ? sh.recipes?.[id] : getRecipe(id);
   if (!r) return;
 
   // Title
@@ -7843,7 +8441,7 @@ async function printRecipe(id) {
 
   // Image
   const imgEl = document.getElementById('print-image');
-  const dataUrl = await resolveImage(id);
+  const dataUrl = sh ? await Shared.image(r, sh.owner) : await resolveImage(id);
   if (dataUrl) {
     imgEl.src = dataUrl;
     imgEl.style.display = '';
@@ -7917,6 +8515,9 @@ function openSettings() {
   renderSnapshotList();
   renderDiagnostics();
   renderPhotoSyncSettings();
+  renderSharingSettings();
+  // Refresh in the background — someone may have accepted an invite since.
+  if (Shared.available()) Shared.refreshLists().then(renderSharingSettings).catch(() => {});
   openModal('modal-settings');
 }
 
@@ -7945,6 +8546,8 @@ function renderDiagnostics() {
     ['Signing key',    Auth.isGoogleAccount() ? (Auth.getWriteKey() ? 'present' : 'none — using Bearer') : 'n/a (token account)'],
     ['Photo sync',     !App.imageSync ? 'off — not configured on worker'
                        : ImgSync.enabled() ? `on · ${ImgSync.pendingCount()} waiting to upload` : 'available — needs a signed-in account'],
+    ['Sharing',        !Shared.available() ? 'n/a (needs Google account)'
+                       : `${Shared.lists().readers.length} can see yours · you see ${Shared.lists().reading.length}`],
     ['Unsynced work',  isDirty() ? `yes — since ${when(dirtySince())}` : 'no'],
     ['Last push',      `${App.lastPushResult} · ${when(App.lastPushAt)}`],
     ['Last pull',      `${App.lastPullResult} · ${when(App.lastPullAt)}`],
@@ -8099,6 +8702,8 @@ function onSignedIn(data, isNew) {
   if (isNew) showToast(`Welcome to Refectory 🌿`);
   else showToast(`Welcome back! Syncing your recipes…`);
   syncToWorker();
+  // A pending invite (opened while signed out) can be accepted now.
+  setTimeout(startSharing, 1500);
 }
 
 function onGuestReady(data) {
@@ -8170,6 +8775,11 @@ async function fetchGoogleClientId() {
 async function boot() {
   // Apply saved/preferred theme immediately (before any render)
   initTheme();
+  // Header version comes from APP_BUILD, never hard-coded in the markup.
+  const verEl = document.getElementById('app-version');
+  if (verEl) verEl.textContent = `v${APP_BUILD}`;
+  // Before anything else touches the URL.
+  captureInviteFromUrl();
 
   // Load from localStorage first (instant)
   const stored = ls.get(STORAGE_KEY);
@@ -8285,6 +8895,8 @@ async function boot() {
     if (wasDirty || isDirty()) syncToWorker(true);
     // 5. Photos queued in an earlier session (offline, auth hiccup, closed tab).
     ImgSync.kick();
+    // 6. Who shares with whom, and any invite link this page was opened with.
+    startSharing();
   }
 }
 
