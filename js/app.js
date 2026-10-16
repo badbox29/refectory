@@ -28,7 +28,7 @@ const STORAGE_DISMISS_KEY= 'ref_token_upgrade_dismissed';
 // glance whether a device is actually running the build you think it is —
 // mobile browsers cache JS hard, and a phone silently running last week's
 // app.js looks exactly like a sync bug.
-const APP_BUILD = '1.7.2';
+const APP_BUILD = '1.8.0';
 
 const SYNC_INTERVAL_MS   = 60_000; // 1 minute
 
@@ -85,6 +85,9 @@ const App = {
   // Diagnostics — last observed outcome of each direction.
   lastPullAt: 0, lastPullResult: 'not attempted',
   lastPushAt: 0, lastPushResult: 'not attempted',
+  // Photo sync — set from /auth/config at boot. True only when the worker has
+  // an R2 bucket bound; the binding is the on/off switch.
+  imageSync: false,
 };
 
 // Default data shape
@@ -266,17 +269,23 @@ function mergeProfiles(local, remote) {
   // directions. An imageUrl the other side lacks is strictly new information,
   // never a stale value worth discarding, so a re-pull's results survive a
   // later edit and vice versa.
+  //
+  // imageKey grafts the same way, but only onto a record that has never had
+  // one (undefined). null is a deliberate removal and has to win, or a photo
+  // removed on one device would be resurrected by the next merge.
+  const graft = (winner, loser) => {
+    let r = winner;
+    if (!r.imageUrl && loser?.imageUrl) r = { ...r, imageUrl: loser.imageUrl };
+    if (r.imageKey === undefined && loser?.imageKey) r = { ...r, imageKey: loser.imageKey };
+    return r;
+  };
   const localRecipes = L.recipes || {}, remoteRecipes = R.recipes || {};
   const recipes = { ...remoteRecipes };
   for (const [id, localR] of Object.entries(localRecipes)) {
     const remoteR = remoteRecipes[id];
-    if (!remoteR || (localR.updatedAt || 0) >= (remoteR.updatedAt || 0)) {
-      recipes[id] = (!localR.imageUrl && remoteR?.imageUrl)
-        ? { ...localR, imageUrl: remoteR.imageUrl } : localR;
-    } else {
-      recipes[id] = (localR.imageUrl && !remoteR.imageUrl)
-        ? { ...remoteR, imageUrl: localR.imageUrl } : remoteR;
-    }
+    recipes[id] = (!remoteR || (localR.updatedAt || 0) >= (remoteR.updatedAt || 0))
+      ? graft(localR, remoteR)
+      : graft(remoteR, localR);
   }
   out.recipes = recipes;
 
@@ -748,6 +757,9 @@ async function syncToWorker(force = false) {
     App.syncFailures = 0;
     clearDirty();
     if (App.syncState === 'push-failed') setSyncState(null);
+    // A working push means a working connection — a good moment to retry any
+    // photo uploads a previous pass gave up on. No-op when the queue is empty.
+    ImgSync.kick();
     return true;
   }
 
@@ -1100,14 +1112,373 @@ function getRecipes() {
 
 function getRecipe(id) { return App.data.recipes?.[id] || null; }
 
-// Resolve a recipe's image for display. Locally cached bytes win (Mealie
-// imports, pasted data URLs); otherwise fall back to the remote link stored
-// on the recipe record, which syncs across devices.
+// Resolve a recipe's image for display.
+//
+// Without photo sync: locally cached bytes win (Mealie imports, pasted data
+// URLs, picker photos); otherwise the remote link on the recipe record.
+//
+// With photo sync, the recipe's imageKey says which photo is current, and the
+// local bytes are a cache of it. Local still wins whenever it's trustworthy,
+// so a device never downloads a photo it already holds:
+//   bytes that came from imageKey             → local
+//   bytes that never came from the cloud      → local, if they're waiting to
+//                                               upload or the recipe has no
+//                                               cloud photo; otherwise the
+//                                               cloud photo is newer
+//   bytes from a different key                → replaced elsewhere: fetch
+//   bytes from a key, recipe's key now null   → removed elsewhere: drop them
+// Any failure to fetch falls back to whatever this device has, then the link.
 async function resolveImage(id) {
-  const local = await ImageStore.get(id);
-  if (local) return local;
-  return getRecipe(id)?.imageUrl || null;
+  let local = null;
+  try { local = await ImageStore.get(id); } catch { /* treat as absent */ }
+  const rec = getRecipe(id);
+  if (!rec || !ImgSync.enabled() || (local && !local.startsWith('data:'))) {
+    return local || rec?.imageUrl || null;
+  }
+
+  const key = rec.imageKey;
+  if (local) {
+    const src = ImgSync.srcOf(id);
+    if (!src) {
+      if (key == null || ImgSync.isPending(id)) return local;
+    } else if (src === key || key === undefined) {
+      return local;
+    } else if (key === null) {
+      ImageStore.delete(id);
+      ImgSync.forget(id);
+      local = null;
+    }
+  }
+
+  if (key) {
+    const fresh = await ImgSync.fetchFor(id, key);
+    if (fresh) return fresh;
+  }
+  return local || rec.imageUrl || null;
 }
+
+// ─── Photo sync (R2) ──────────────────────────────────────────────
+// Optional cross-device photos. On when the worker has an R2 bucket bound
+// (App.imageSync, from /auth/config); off, every function here is a no-op
+// and photos behave exactly as they did before — per-device.
+//
+// Photos are named by the SHA-256 of their bytes plus extension. The name
+// goes on the recipe as `imageKey`, which syncs through KV like any field.
+// The key is set only after the upload succeeds, so no device is ever told
+// about a photo the bucket doesn't have yet.
+//
+// Two small durable records live in localStorage:
+//   IMG_SRC_KEY      recipeId → the imageKey this device's local bytes came
+//                    from. Absent means the bytes originated here.
+//   IMG_PENDING_KEY  recipeIds whose local photo still needs uploading.
+//                    Survives reloads, so a photo added offline or during an
+//                    auth hiccup still gets there.
+
+const IMG_SRC_KEY        = 'refectory-img-src';
+const IMG_PENDING_KEY    = 'refectory-img-pending';
+const IMG_DL_CONCURRENCY = 4;
+const IMG_UL_CONCURRENCY = 2;
+const IMG_MISSING_TTL_MS = 10 * 60 * 1000;   // don't re-ask for a 404 every render
+
+const ImgSync = (() => {
+  // ── Durable records ──
+  const srcMap   = () => ls.get(IMG_SRC_KEY) || {};
+  const pendList = () => { const v = ls.get(IMG_PENDING_KEY); return Array.isArray(v) ? v : []; };
+
+  function srcOf(id) { return srcMap()[id] || null; }
+  function setSrc(id, key) { const m = srcMap(); m[id] = key; ls.set(IMG_SRC_KEY, m); }
+  function delSrc(id) { const m = srcMap(); if (id in m) { delete m[id]; ls.set(IMG_SRC_KEY, m); } }
+
+  function isPending(id) { return pendList().includes(id); }
+  function addPending(id) { const l = pendList(); if (!l.includes(id)) { l.push(id); ls.set(IMG_PENDING_KEY, l); } }
+  function delPending(id) { const l = pendList(); const i = l.indexOf(id); if (i >= 0) { l.splice(i, 1); ls.set(IMG_PENDING_KEY, l); } }
+
+  // ── Plumbing ──
+  function enabled() {
+    return !!App.imageSync && !Auth.isGuest() && !!getWorkerUrl() && !!App.data?.userToken;
+  }
+  function urlFor(key) {
+    const base = getWorkerUrl().replace(/\/+$/, '');
+    return `${base}/images/${encodeURIComponent(App.data.userToken)}/${key}`;
+  }
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const retryAfterMs = res => Math.min(15, Math.max(1, parseInt(res.headers.get('Retry-After') || '2', 10))) * 1000;
+
+  // Tiny concurrency gate, so a 300-card grid doesn't fire 300 requests.
+  function gate(limit) {
+    let active = 0; const waiting = [];
+    return async fn => {
+      if (active >= limit) await new Promise(r => waiting.push(r));
+      active++;
+      try { return await fn(); }
+      finally { active--; waiting.shift()?.(); }
+    };
+  }
+  const dlGate = gate(IMG_DL_CONCURRENCY);
+
+  function dataUrlToBlob(dataUrl) {
+    const [head, b64] = dataUrl.split(',');
+    const mime = (head.match(/^data:([^;]+)/) || [])[1] || 'application/octet-stream';
+    const bin  = atob(b64 || '');
+    const out  = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return new Blob([out], { type: mime });
+  }
+  function blobToDataUrl(blob) {
+    return new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result);
+      r.onerror = () => rej(r.error);
+      r.readAsDataURL(blob);
+    });
+  }
+  // Trust the bytes, not the label: exported backups name everything .webp.
+  function sniff(bytes) {
+    const b = new Uint8Array(bytes, 0, Math.min(12, bytes.byteLength));
+    if (b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF) return 'jpg';
+    if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+        b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'webp';
+    return null;
+  }
+  async function longestEdge(blob) {
+    const bm = await createImageBitmap(blob);
+    try { return Math.max(bm.width, bm.height); } finally { bm.close?.(); }
+  }
+  async function sha256Hex(bytes) {
+    const d = await crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(d)).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // ── Download ──
+  const inflight = new Map();   // key → Promise<dataUrl|null>
+  const missing  = new Map();   // key → time of last 404
+
+  function fetchKey(key) {
+    if (inflight.has(key)) return inflight.get(key);
+    const seen = missing.get(key);
+    if (seen && Date.now() - seen < IMG_MISSING_TTL_MS) return Promise.resolve(null);
+
+    const p = dlGate(async () => {
+      const token = App.data.userToken;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        let res;
+        try {
+          const headers = await Auth._authHeaders('GET', token, '');
+          res = await fetch(urlFor(key), { headers });
+        } catch { return null; }
+        if (res.status === 429) { await sleep(retryAfterMs(res)); continue; }
+        if (res.status === 404) { missing.set(key, Date.now()); return null; }
+        if (!res.ok) return null;
+        try { return await blobToDataUrl(await res.blob()); } catch { return null; }
+      }
+      return null;
+    }).finally(() => inflight.delete(key));
+    inflight.set(key, p);
+    return p;
+  }
+
+  // Fetch `key` for recipe `id` and cache it locally. Several recipes can
+  // share one key (merged duplicates); the download happens once.
+  async function fetchFor(id, key) {
+    const dataUrl = await fetchKey(key);
+    if (!dataUrl) return null;
+    // The recipe may have moved on while we waited.
+    if (getRecipe(id)?.imageKey !== key) return dataUrl;
+    try { await ImageStore.set(id, dataUrl); setSrc(id, key); } catch { /* display anyway */ }
+    return dataUrl;
+  }
+
+  // ── Upload ──
+  // Returns 'done' | 'drop' (nothing to do, remove from queue) |
+  //         'again' (photo changed mid-upload, keep queued) |
+  //         'retry' (transient — stop draining, try later)
+  async function upload(id) {
+    const rec = getRecipe(id);
+    if (!rec) return 'drop';
+
+    let dataUrl;
+    try { dataUrl = await ImageStore.get(id); } catch { return 'retry'; }
+    if (!dataUrl || !dataUrl.startsWith('data:')) return 'drop';
+
+    let blob  = dataUrlToBlob(dataUrl);
+    let bytes = await blob.arrayBuffer();
+    let ext   = sniff(bytes);
+
+    // Bring it into line before it leaves the device: anything over the max
+    // edge, or in a format the bucket doesn't take, is re-encoded — and the
+    // smaller copy replaces the local one, so every device holds the same bytes.
+    let oversize = false;
+    try { oversize = (await longestEdge(blob)) > EDITOR_IMAGE_MAX_DIM; }
+    catch { return 'drop'; }   // undecodable — nothing sensible to upload
+    if (oversize || !ext) {
+      try {
+        const smaller = await resizeImageFile(blob);
+        await ImageStore.set(id, smaller);
+        dataUrl = smaller;
+        blob    = dataUrlToBlob(smaller);
+        bytes   = await blob.arrayBuffer();
+        ext     = sniff(bytes);
+      } catch { return 'drop'; }
+      if (!ext) return 'drop';
+    }
+
+    const key  = `${await sha256Hex(bytes)}.${ext}`;
+    const mime = ext === 'jpg' ? 'image/jpeg' : 'image/webp';
+    const token = App.data.userToken;
+
+    for (let attempt = 0; ; attempt++) {
+      let res;
+      try {
+        const headers = await Auth._authHeaders('PUT', token, bytes);
+        res = await fetch(urlFor(key), {
+          method: 'PUT',
+          headers: { 'Content-Type': mime, ...headers },
+          body: bytes,
+        });
+      } catch { return 'retry'; }
+
+      if (res.status === 429 && attempt < 2) { await sleep(retryAfterMs(res)); continue; }
+      if (res.status === 400 || res.status === 413) {
+        console.warn(`[Refectory] photo upload rejected for ${id} (${res.status}):`, await res.text().catch(() => ''));
+        return 'drop';
+      }
+      if (!res.ok) return 'retry';
+      break;
+    }
+
+    // Uploaded. Make sure it's still the photo she wants before pointing the
+    // recipe at it — she may have replaced or removed it meanwhile.
+    let now = null;
+    try { now = await ImageStore.get(id); } catch {}
+    const cur = getRecipe(id);
+    if (!cur || !now) { release(key); return 'drop'; }
+    if (now !== dataUrl) return 'again';
+
+    setSrc(id, key);
+    if (cur.imageKey !== key) {
+      const old = cur.imageKey;
+      saveRecipe({ ...cur, imageKey: key });
+      release(old);
+    }
+    return 'done';
+  }
+
+  let draining = null;
+  // Upload everything queued. One pass over a snapshot of the queue; a
+  // transient failure stops the pass and leaves the rest for next time.
+  function drain(onProgress) {
+    if (draining) return draining;
+    if (!enabled() || !pendList().length) return Promise.resolve({ done: 0, total: 0 });
+
+    draining = (async () => {
+      const queue = pendList().slice();
+      const total = queue.length;
+      let done = 0, stop = false, again = false;
+      const worker = async () => {
+        while (!stop && queue.length) {
+          const id = queue.shift();
+          let r;
+          try { r = await upload(id); } catch (e) { console.warn('[Refectory] photo upload error:', e); r = 'retry'; }
+          if (r === 'done' || r === 'drop') delPending(id);
+          if (r === 'retry') stop = true;
+          if (r === 'again') again = true;
+          done++;
+          onProgress?.(done, total);
+        }
+      };
+      await Promise.all(Array.from({ length: IMG_UL_CONCURRENCY }, worker));
+      return { done, total, stopped: stop, again };
+    })().finally(() => { draining = null; });
+    // A photo replaced mid-upload is still queued; go round once more for it.
+    draining.then(r => { if (r.again && !r.stopped) kick(); });
+    return draining;
+  }
+
+  let kickTimer = null;
+  function kick() {
+    clearTimeout(kickTimer);
+    kickTimer = setTimeout(() => { drain(); }, 800);
+  }
+
+  // ── Lifecycle hooks for the rest of the app ──
+
+  // New bytes for this recipe originated on this device (picker, paste).
+  // Always uploads: it's an explicit choice of photo.
+  function enqueue(id) {
+    if (!id || id.startsWith('_')) return;
+    delSrc(id);
+    addPending(id);
+    kick();
+  }
+
+  // Bytes arrived from an import or restore. They become this recipe's cloud
+  // photo only if it has never had one — an import shouldn't silently replace
+  // a photo another device chose.
+  function adopt(ids) {
+    let any = false;
+    for (const id of ids || []) {
+      if (!id || id.startsWith('_')) continue;
+      delSrc(id);
+      const rec = getRecipe(id);
+      if (rec && rec.imageKey === undefined) { addPending(id); any = true; }
+    }
+    if (any) kick();
+  }
+
+  // Local photo gone (recipe deleted, photo removed, data wiped).
+  function forget(id) { delSrc(id); delPending(id); }
+  function forgetAll() { ls.remove(IMG_SRC_KEY); ls.remove(IMG_PENDING_KEY); }
+
+  // Best-effort delete of a cloud object nothing references any more. Names
+  // are content hashes, so two recipes can share one (merged duplicates) —
+  // never delete while any recipe still points at it.
+  function release(key) {
+    if (!key || !enabled()) return;
+    const used = Object.values(App.data?.recipes || {}).some(r => r?.imageKey === key);
+    if (used) return;
+    (async () => {
+      try {
+        const headers = await Auth._authHeaders('DELETE', App.data.userToken, '');
+        await fetch(urlFor(key), { method: 'DELETE', headers });
+      } catch { /* an orphan costs nothing */ }
+    })();
+  }
+
+  // Queue every photo on this device the cloud doesn't have, then upload.
+  async function backfill(onProgress) {
+    const ids = [];
+    for (const [id, r] of Object.entries(App.data?.recipes || {})) {
+      if (r.imageKey !== undefined || srcOf(id)) continue;
+      let v = null;
+      try { v = await ImageStore.get(id); } catch {}
+      if (v && v.startsWith('data:')) ids.push(id);
+    }
+    ids.forEach(addPending);
+    if (draining) await draining;     // let any running pass finish first
+    return drain(onProgress);
+  }
+
+  // Counts for Settings.
+  async function stats() {
+    const recipes = Object.entries(App.data?.recipes || {});
+    const synced  = recipes.filter(([, r]) => typeof r.imageKey === 'string' && r.imageKey).length;
+    const pending = pendList().length;
+    let localOnly = 0;
+    for (const [id, r] of recipes) {
+      if (r.imageKey !== undefined || srcOf(id) || isPending(id)) continue;
+      let v = null;
+      try { v = await ImageStore.get(id); } catch {}
+      if (v && v.startsWith('data:')) localOnly++;
+    }
+    return { synced, pending, localOnly };
+  }
+
+  return {
+    enabled, srcOf, isPending, pendingCount: () => pendList().length,
+    fetchFor, drain, kick, enqueue, adopt, forget, forgetAll, release,
+    backfill, stats,
+  };
+})();
 
 function saveRecipe(recipe) {
   recipe.updatedAt = Date.now();
@@ -1119,8 +1490,11 @@ function saveRecipe(recipe) {
 function deleteRecipe(id) {
   // A deleted recipe must not linger as a group tab pointing at nothing.
   removeFromGroup(id);
+  const imageKey = App.data.recipes[id]?.imageKey;
   delete App.data.recipes[id];
   ImageStore.delete(id);
+  ImgSync.forget(id);
+  ImgSync.release(imageKey);
   // Remove from meal plan too
   for (const wk of Object.keys(App.data.mealplan)) {
     for (const day of Object.keys(App.data.mealplan[wk])) {
@@ -2202,7 +2576,7 @@ function openRecipeEditor(id = null, prefill = null) {
   const imgHint = document.getElementById('editor-image-hint');
   if (imgHint) {
     imgHint.style.color = '';
-    imgHint.textContent = 'Photos you add here stay on this device \u2014 they won\u2019t sync to your other devices or appear on shared meal plan links.';
+    imgHint.textContent = editorImageHintDefault();
   }
   if (id) resolveImage(id).then(url => { if (View.editingId === id && _editorImageDraft === null) renderEditorImage(url); });
   else if (recipe.image?.startsWith('data:')) { _editorImageDraft = recipe.image; renderEditorImage(recipe.image); }
@@ -2233,14 +2607,19 @@ function openRecipeEditor(id = null, prefill = null) {
 }
 
 // ─── Recipe photo (device-local) ─────────────────────────────────
-// Bytes chosen here go to IndexedDB, never to localStorage or the worker —
-// the same place Mealie-imported images land. That makes them per-device by
-// nature: a photo added on the laptop can't appear on her phone and can't
-// render on a share page, because Cloudflare has no way to reach it. The URL
-// field below the picker is the syncing alternative, and the hint under the
-// control says so rather than letting her find out later.
+// Bytes chosen here go to IndexedDB, never to localStorage or the KV profile —
+// the same place Mealie-imported images land. Without photo sync that makes
+// them per-device: a photo added on the laptop can't appear on her phone or a
+// share page. With photo sync (an R2 bucket bound on the worker) they're also
+// uploaded and reach every device; see ImgSync. The hint under the control
+// says which of the two is true rather than letting her find out later.
+//
+// 960px on the long edge: the largest place a photo renders is the detail
+// hero (720px modal on desktop, full width on a phone), so this covers a
+// 3x phone screen comfortably at roughly half the bytes of 1200px.
 
-const EDITOR_IMAGE_MAX_DIM   = 1200;
+const EDITOR_IMAGE_MAX_DIM   = 960;
+const EDITOR_IMAGE_FALLBACK_DIM = 720;  // when a busy photo still comes out too big
 const EDITOR_IMAGE_QUALITY   = 0.8;
 const EDITOR_IMAGE_MAX_INPUT = 25 * 1024 * 1024;   // reject before decoding
 const EDITOR_IMAGE_MAX_OUT   = 1.5 * 1024 * 1024;  // one photo shouldn't bloat the store
@@ -2252,7 +2631,8 @@ let _editorImageDraft = null;
 
 // Re-encode to WebP at a capped long edge. Same output shape the Mealie
 // importer produces (`data:image/webp;base64,…`), so the backup zip and its
-// re-import path keep working with no change.
+// re-import path keep working with no change. Takes a File or any image Blob
+// (photo sync re-encodes oversized stored photos through here).
 async function resizeImageFile(file, maxDim = EDITOR_IMAGE_MAX_DIM) {
   if (!file || !file.type?.startsWith('image/')) throw new Error('That file isn\u2019t an image.');
   if (file.size > EDITOR_IMAGE_MAX_INPUT) throw new Error('That image is too large — try one under 25 MB.');
@@ -2271,11 +2651,18 @@ async function resizeImageFile(file, maxDim = EDITOR_IMAGE_MAX_DIM) {
     // Safari has historically ignored the webp request and handed back a PNG,
     // which is far bigger. Fall back to JPEG rather than storing that.
     if (!out.startsWith('data:image/webp')) out = canvas.toDataURL('image/jpeg', EDITOR_IMAGE_QUALITY);
-    if (out.length > EDITOR_IMAGE_MAX_OUT && maxDim > 600) return resizeImageFile(file, 800);
+    if (out.length > EDITOR_IMAGE_MAX_OUT && maxDim > EDITOR_IMAGE_FALLBACK_DIM)
+      return resizeImageFile(file, EDITOR_IMAGE_FALLBACK_DIM);
     return out;
   } finally {
     bitmap.close?.();
   }
+}
+
+function editorImageHintDefault() {
+  return ImgSync.enabled()
+    ? 'Photos you add here sync to your other devices and appear on shared meal plan links.'
+    : 'Photos you add here stay on this device \u2014 they won\u2019t sync to your other devices or appear on shared meal plan links.';
 }
 
 function renderEditorImage(dataUrl) {
@@ -2304,7 +2691,9 @@ async function setEditorImageFromFile(file) {
     const dataUrl = await resizeImageFile(file);
     _editorImageDraft = dataUrl;
     renderEditorImage(dataUrl);
-    say(`Photo ready (${Math.round(dataUrl.length / 1024)} KB). It stays on this device — it won\u2019t sync or appear on shared links.`);
+    say(`Photo ready (${Math.round(dataUrl.length / 1024)} KB). ${ImgSync.enabled()
+      ? 'It will sync to your other devices and show on shared links.'
+      : 'It stays on this device \u2014 it won\u2019t sync or appear on shared links.'}`);
   } catch (e) {
     say(e.message || 'That photo could not be read.', true);
   }
@@ -2404,8 +2793,14 @@ function saveEditorRecipe() {
   // Remote image links live on the recipe record so they sync across devices.
   // A pasted data: URL is raw bytes — those stay in IndexedDB, never in
   // localStorage and never pushed to the worker.
+  //
+  // New bytes from either route are queued for photo sync once they're
+  // safely in IndexedDB (a no-op when sync is off). A removal clears the
+  // recipe's imageKey to null — not undefined — so the removal propagates
+  // instead of being grafted back from another device's copy.
+  let releaseKey = null;
   if (data.imageUrl.startsWith('data:')) {
-    ImageStore.set(id, data.imageUrl);
+    ImageStore.set(id, data.imageUrl).then(() => ImgSync.enqueue(id));
     data.imageUrl = '';
   }
 
@@ -2413,11 +2808,18 @@ function saveEditorRecipe() {
   // else is new bytes. Only an explicit removal deletes — closing the editor
   // without touching the picker must never drop a stored photo.
   if (_editorImageDraft !== null) {
-    if (_editorImageDraft) ImageStore.set(id, _editorImageDraft);
-    else                   ImageStore.delete(id);
+    if (_editorImageDraft) {
+      ImageStore.set(id, _editorImageDraft).then(() => ImgSync.enqueue(id));
+    } else {
+      ImageStore.delete(id);
+      ImgSync.forget(id);
+      releaseKey  = existing.imageKey || null;
+      data.imageKey = null;
+    }
   }
   _editorImageDraft = null;
   saveRecipe({ ...existing, ...data, id });
+  ImgSync.release(releaseKey);
   View.editingId = null;
   if (btn) btn.disabled = false;
   renderRecipes();
@@ -5416,6 +5818,7 @@ function mergeDuplicateRecipes(dupes) {
       const keep = App.data.recipes[g.keep.id];
       if (keep) {
         if (!keep.imageUrl && d.imageUrl)     keep.imageUrl = d.imageUrl;
+        if (!keep.imageKey && d.imageKey)     keep.imageKey = d.imageKey;
         if (!keep.nutrition && d.nutrition)   keep.nutrition = d.nutrition;
         if (!keep.rating && d.rating)         keep.rating = d.rating;
         if (!keep.favorite && d.favorite)     keep.favorite = true;
@@ -5426,6 +5829,9 @@ function mergeDuplicateRecipes(dupes) {
       }
       delete App.data.recipes[d.id];
       ImageStore.delete(d.id);
+      ImgSync.forget(d.id);
+      // Skipped automatically when the survivor took this photo over.
+      ImgSync.release(d.imageKey);
       removed++;
     }
   }
@@ -6419,14 +6825,19 @@ async function importFromRefectoryBackup(file) {
   // ── Restore images ───────────────────────────────────────────────
   if (imgFiles.length) {
     status(`Restoring ${imgFiles.length} images…`);
+    const restored = [];
     for (const path of imgFiles) {
       try {
         const id  = path.replace('images/', '').replace('.webp', '');
         const b64 = await zip.file(path).async('base64');
         await ImageStore.set(id, `data:image/webp;base64,${b64}`);
+        restored.push(id);
         imgCount++;
       } catch { /* skip bad image */ }
     }
+    // Restored photos sync only for recipes with no cloud photo yet; an old
+    // backup shouldn't overwrite a photo chosen since on another device.
+    ImgSync.adopt(restored);
   }
 
   if (recipeCount) { scheduleSave(); }
@@ -7124,6 +7535,7 @@ async function importFromMealieBackup(file, embedImages, importExtras = true) {
   // reference Mealie ids, so this is what lets the plan import resolve them
   // without persisting a source id on every recipe.
   const idMap = {};
+  const imageIds = [];   // recipes that received a photo, for photo sync
 
   // Group relational tables by recipe_id
   const ingrByRecipe = {}, instrByRecipe = {}, notesByRecipe = {};
@@ -7249,6 +7661,7 @@ ${t}`;
             const b64     = await imgFile.async('base64');
             const dataUrl = `data:image/webp;base64,${b64}`;
             await ImageStore.set(newId, dataUrl);
+            imageIds.push(newId);
             break;
           }
         }
@@ -7327,6 +7740,8 @@ ${t}`;
   }
 
   scheduleSave();
+  // After the records exist — adopt() only queues recipes it can find.
+  ImgSync.adopt(imageIds);
   return { ok: true, count, skipped, plans, favCount, rateCount, nutriCount };
 }
 
@@ -7474,6 +7889,7 @@ function openSettings() {
   }
   renderSnapshotList();
   renderDiagnostics();
+  renderPhotoSyncSettings();
   openModal('modal-settings');
 }
 
@@ -7500,6 +7916,8 @@ function renderDiagnostics() {
     ['Account key',    d.userToken || '(none)'],
     ['Worker URL',     getWorkerUrl() || '(not set)'],
     ['Signing key',    Auth.isGoogleAccount() ? (Auth.getWriteKey() ? 'present' : 'none — using Bearer') : 'n/a (token account)'],
+    ['Photo sync',     !App.imageSync ? 'off — not configured on worker'
+                       : ImgSync.enabled() ? `on · ${ImgSync.pendingCount()} waiting to upload` : 'available — needs a signed-in account'],
     ['Unsynced work',  isDirty() ? `yes — since ${when(dirtySince())}` : 'no'],
     ['Last push',      `${App.lastPushResult} · ${when(App.lastPushAt)}`],
     ['Last pull',      `${App.lastPullResult} · ${when(App.lastPullAt)}`],
@@ -7509,6 +7927,52 @@ function renderDiagnostics() {
 
   el.innerHTML = `<div class="diag-grid">` + rows.map(([k, v]) =>
     `<div class="diag-k">${esc(k)}</div><div class="diag-v">${esc(String(v))}</div>`).join('') + `</div>`;
+}
+
+// Photo sync status and the one-time upload of photos that predate it.
+async function renderPhotoSyncSettings() {
+  const el = document.getElementById('settings-photos');
+  if (!el) return;
+
+  if (!App.imageSync) {
+    el.innerHTML = `<div class="settings-row-sub">Not set up on the worker, so photos stay on the
+      device they were added on. Bind an R2 bucket to the worker as <code>IMAGES</code> to turn it on.</div>`;
+    return;
+  }
+  if (!ImgSync.enabled()) {
+    el.innerHTML = `<div class="settings-row-sub">Available on the worker. Sign in to an account to sync photos.</div>`;
+    return;
+  }
+
+  el.innerHTML = `<div class="settings-row-sub">Checking photos\u2026</div>`;
+  const st = await ImgSync.stats();
+  const todo = st.localOnly + st.pending;
+  el.innerHTML = `
+    <div class="settings-row">
+      <div>
+        <div class="settings-row-label">Photos sync across your devices</div>
+        <div class="settings-row-sub">${st.synced} synced \u00b7 ${st.pending} waiting to upload \u00b7
+          ${st.localOnly} only on this device</div>
+      </div>
+      <button class="btn btn-sm btn-outline" id="photo-sync-upload"
+              style="white-space:nowrap;flex-shrink:0;" ${todo ? '' : 'disabled'}>Upload photos</button>
+    </div>
+    <div class="settings-row-sub photo-sync-progress" id="photo-sync-progress"></div>`;
+
+  el.querySelector('#photo-sync-upload')?.addEventListener('click', async e => {
+    const btn  = e.currentTarget;
+    const prog = el.querySelector('#photo-sync-progress');
+    btn.disabled = true;
+    if (prog) prog.textContent = 'Preparing\u2026';
+    const res = await ImgSync.backfill((n, total) => {
+      if (prog) prog.textContent = `Uploading ${n} of ${total}\u2026`;
+    });
+    if (res.stopped)        showToast('Some photos didn\u2019t upload \u2014 they\u2019ll retry automatically.');
+    else if (res.total)     showToast(`Uploaded ${res.total} photo${res.total === 1 ? '' : 's'} \u2713`);
+    else                    showToast('Nothing to upload \u2014 all photos are synced.');
+    renderPhotoSyncSettings();
+    renderDiagnostics();
+  });
 }
 
 function copyDiagnostics() {
@@ -7555,6 +8019,9 @@ function clearImportedRecipes() {
     .map(([id]) => id);
   toRemove.forEach(id => delete App.data.recipes[id]);
   ImageStore.deleteMany(toRemove);
+  // Local bookkeeping only. Cloud copies are left alone: this doesn't push,
+  // so those recipes can come back from the worker, and their photos with them.
+  toRemove.forEach(id => ImgSync.forget(id));
   saveLocal();
   renderAll();
   closeModal('modal-settings');
@@ -7565,6 +8032,7 @@ function wipeAllRecipes() {
   App.data.recipes  = {};
   App.data.mealplan = {};
   ImageStore.clear();
+  ImgSync.forgetAll();   // local only — see clearImportedRecipes
   saveLocal();
   renderAll();
   closeModal('modal-settings');
@@ -7656,14 +8124,18 @@ function renderAll() {
 
 // ─── Boot ─────────────────────────────────────────────────────────
 
-// Fetch Google Client ID from the worker (never stored in frontend source)
+// Fetch Google Client ID from the worker (never stored in frontend source).
+// The same response says whether photo sync is available, which is recorded
+// on App as a side effect — the worker's R2 binding is the switch.
 async function fetchGoogleClientId() {
+  App.imageSync = false;
   const base = getWorkerUrl().replace(/\/+$/, '');
   if (!base) return '';
   try {
     const res = await fetch(`${base}/auth/config`);
     if (!res.ok) return '';
     const data = await res.json();
+    App.imageSync = data.imageSync === true;
     return data.googleClientId || '';
   } catch { return ''; }
 }
@@ -7784,6 +8256,8 @@ async function boot() {
     // 4. This device was holding unsynced work. Get it onto the worker now
     //    rather than waiting up to a minute for the first tick.
     if (wasDirty || isDirty()) syncToWorker(true);
+    // 5. Photos queued in an earlier session (offline, auth hiccup, closed tab).
+    ImgSync.kick();
   }
 }
 

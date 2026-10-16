@@ -148,8 +148,12 @@ const Auth = (() => {
   async function _signRequest(method, token, body, secret) {
     const enc       = new TextEncoder();
     const timestamp = String(Date.now());
+    // Text bodies hash as UTF-8; binary bodies (photo uploads) hash as-is.
+    // Must match verifyHmac() in worker.js.
+    const bodyBytes = (body instanceof ArrayBuffer || ArrayBuffer.isView(body))
+      ? body : enc.encode(body || '');
     const bodyHash  = Array.from(
-      new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(body || '')))
+      new Uint8Array(await crypto.subtle.digest('SHA-256', bodyBytes))
     ).map(b => b.toString(16).padStart(2,'0')).join('');
     const message  = `${method.toUpperCase()}:${token}:${timestamp}:${bodyHash}`;
     const key      = await _deriveHmacKey(secret || token);
