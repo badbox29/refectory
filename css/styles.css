@@ -1363,6 +1363,8 @@ body.plan-dragging .plan-recipe { cursor: grabbing; }
 }
 .settings-row-label { font-size: .875rem; font-weight: 500; }
 .settings-row-sub   { font-size: .78rem; color: var(--muted); }
+.settings-row-sub code { font-size: .74rem; padding: 0 .25rem; border-radius: 4px; background: var(--cream-dark); }
+.photo-sync-progress { min-height: 1.1em; margin-top: .35rem; }
 
 /* ── Toast ───────────────────────────────────────────────────── */
 #toast {
