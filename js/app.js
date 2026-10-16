@@ -28,7 +28,7 @@ const STORAGE_DISMISS_KEY= 'ref_token_upgrade_dismissed';
 // glance whether a device is actually running the build you think it is —
 // mobile browsers cache JS hard, and a phone silently running last week's
 // app.js looks exactly like a sync bug.
-const APP_BUILD = '1.8.0';
+const APP_BUILD = '1.8.1';
 
 const SYNC_INTERVAL_MS   = 60_000; // 1 minute
 
@@ -346,16 +346,37 @@ const ls = {
 // Durable answer to "does this device hold work the worker hasn't got?".
 // Set on every local write, cleared only by a *verified* push success.
 
+// `seq` counts local changes. A push snapshots it before sending and clears
+// the flag only if it hasn't moved — otherwise a change made while the push
+// was in flight (not in its payload) would be marked synced when it wasn't.
+// That stranded 42 photo links on the laptop: the in-memory pendingSync still
+// knew, but once the tab was hidden or reloaded, nothing did.
 function markDirty() {
   try {
     const cur = ls.get(DIRTY_KEY);
-    if (cur?.dirty) return;                       // keep the original `since`
-    ls.set(DIRTY_KEY, { dirty: true, since: Date.now() });
+    ls.set(DIRTY_KEY, {
+      dirty: true,
+      since: cur?.dirty ? cur.since : Date.now(),   // keep the original `since`
+      seq:   (cur?.seq || 0) + 1,
+    });
   } catch {}
 }
 
-function clearDirty() {
-  try { ls.remove(DIRTY_KEY); } catch {}
+function dirtySeq() {
+  try { return ls.get(DIRTY_KEY)?.seq || 0; } catch { return 0; }
+}
+
+// With `ifSeq`, clears only if nothing has changed since that snapshot.
+// Returns whether the flag was cleared.
+function clearDirty(ifSeq) {
+  try {
+    if (ifSeq !== undefined) {
+      const cur = ls.get(DIRTY_KEY);
+      if (cur?.dirty && (cur.seq || 0) !== ifSeq) return false;
+    }
+    ls.remove(DIRTY_KEY);
+    return true;
+  } catch { return false; }
 }
 
 function isDirty() {
@@ -750,12 +771,18 @@ async function syncToWorker(force = false) {
   if (!force && !App.pendingSync && !isDirty()) return false;
   App.pendingSync = false;
 
+  // Snapshot before the payload is built. A change between here and the
+  // serialisation lands in the payload *and* bumps seq — one harmless extra
+  // push. The reverse order could lose it.
+  const seqAtPush = dirtySeq();
   const res = await pushToWorker();
   if (res?.ok) {
     // Only a verified success clears the flag. Not an attempt, not a
-    // response we couldn't read — a 2xx we actually saw.
+    // response we couldn't read — a 2xx we actually saw. And only if nothing
+    // changed mid-flight; if something did, the flag stays up so the next
+    // tick, the on-hide push and the next boot all still see it.
     App.syncFailures = 0;
-    clearDirty();
+    if (!clearDirty(seqAtPush)) App.pendingSync = true;
     if (App.syncState === 'push-failed') setSyncState(null);
     // A working push means a working connection — a good moment to retry any
     // photo uploads a previous pass gave up on. No-op when the queue is empty.
