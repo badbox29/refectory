@@ -33,7 +33,7 @@ const STORAGE_DISMISS_KEY= 'ref_token_upgrade_dismissed';
 // auth.js, app.js). They can't be set from here — they're what loads this
 // file — and they're the only signal a browser gets that a file changed.
 // The header version is filled from APP_BUILD at boot.
-const APP_BUILD = '1.9.0';
+const APP_BUILD = '1.9.1';
 
 const SYNC_INTERVAL_MS   = 60_000; // 1 minute
 
@@ -121,6 +121,10 @@ function defaultData() {
     // still carries proof of when it was emptied, which is what lets a merge
     // tell "she cleared Tuesday" from "this device hasn't seen Tuesday yet".
     planStamps:  {},
+    // Recipe deletions: { [recipeId]: deletedAtMs }. Without these a deletion
+    // never synced — the merge keeps any recipe either side has, so another
+    // device's copy put it straight back. Kept RECIPE_TOMBSTONE_DAYS.
+    recipeTombstones: {},
     // Cookbooks: { [id]: { id, name, description, recipeIds: [] } }
     cookbooks:   {},
     // Recipe groups: { [id]: { id, name, members: [{ id, label }], createdAt, updatedAt } }
@@ -170,6 +174,7 @@ function mergeData(raw) {
     recipes:   (raw.recipes   && typeof raw.recipes   === 'object') ? raw.recipes   : d.recipes,
     mealplan:  (raw.mealplan  && typeof raw.mealplan  === 'object') ? raw.mealplan  : d.mealplan,
     planStamps: (raw.planStamps && typeof raw.planStamps === 'object') ? raw.planStamps : d.planStamps,
+    recipeTombstones: (raw.recipeTombstones && typeof raw.recipeTombstones === 'object') ? raw.recipeTombstones : d.recipeTombstones,
     pantry:     (raw.pantry && typeof raw.pantry === 'object') ? raw.pantry : d.pantry,
     cookbooks: (raw.cookbooks && typeof raw.cookbooks === 'object') ? raw.cookbooks : d.cookbooks,
     templates: (raw.templates && typeof raw.templates === 'object') ? raw.templates : d.templates,
@@ -186,10 +191,37 @@ function mergeData(raw) {
 // remote copy was stale, that silently destroyed local work. Every collection
 // now gets an explicit rule, and anything without one keeps the local value.
 
+// Union of both sides' recipe tombstones, latest deletion per id, minus any
+// older than RECIPE_TOMBSTONE_DAYS — by then every device has merged them.
+const RECIPE_TOMBSTONE_DAYS = 180;
+function mergeTombstones(a, b) {
+  const out = {};
+  const cutoff = Date.now() - RECIPE_TOMBSTONE_DAYS * 86400000;
+  for (const src of [a || {}, b || {}]) {
+    for (const [id, ts] of Object.entries(src)) {
+      if (typeof ts !== 'number' || ts < cutoff) continue;
+      if (!out[id] || ts > out[id]) out[id] = ts;
+    }
+  }
+  return out;
+}
+
+// After a merge, recipes removed by a tombstone still have photo bytes and
+// photo-sync bookkeeping on this device. Clear those. (The device that did
+// the delete already released the cloud copy.)
+function cleanupMergedDeletions(beforeRecipes, after) {
+  for (const id of Object.keys(beforeRecipes || {})) {
+    if (after.recipes?.[id] || !after.recipeTombstones?.[id]) continue;
+    ImageStore.delete(id);
+    ImgSync.forget(id);
+  }
+}
+
 // Per-day meal plan merge. Resolution, in order:
 //   stamped both sides  → later stamp wins, day taken whole
 //   stamped one side    → that side wins
-//   neither stamped     → local wins (pre-migration data; first write stamps)
+//   neither stamped     → remote wins if it has the day, else local
+//                         (see the comment on that branch for why)
 //   local stamped, remote day absent → local wins, *including when local's
 //     day is empty* — that's a deletion propagating correctly rather than the
 //     remote copy resurrecting it
@@ -226,9 +258,18 @@ function mergePlanStamped(localPlan, localStamps, remotePlan, remoteStamps) {
         // from ever reaching another.
         takeLocal = lHas;
       } else {
-        // Neither stamped, both hold something (or neither does) — genuinely
-        // ambiguous, so prefer local as agreed.
-        takeLocal = true;
+        // Neither stamped, and both hold something (or neither does). This
+        // used to prefer local, and that was the bug behind a phone that
+        // never showed the plan she built on her notebook: template loads
+        // weren't stamped, so those days were unstamped on both sides, and a
+        // device that only ever *views* the plan kept its old copy forever.
+        //
+        // Remote wins now. That's safe because of two things that are true as
+        // of 1.9.1 and weren't before: every plan write on this device stamps
+        // its day (so an unstamped day is never fresh local work), and every
+        // push merges with the worker first (so the worker's copy is the
+        // merged result, never one stale device's whole document).
+        takeLocal = !rHas;
       }
 
       const day = takeLocal ? lWeek[d] : rWeek[d];
@@ -292,7 +333,16 @@ function mergeProfiles(local, remote) {
       ? graft(localR, remoteR)
       : graft(remoteR, localR);
   }
+
+  // Deletions. A tombstone beats any copy last edited before it; a copy
+  // edited *after* the deletion survives, because that's a deliberate change
+  // made on another device and losing it silently is the worse mistake.
+  const tombs = mergeTombstones(L.recipeTombstones, R.recipeTombstones);
+  for (const [id, deletedAt] of Object.entries(tombs)) {
+    if (recipes[id] && (recipes[id].updatedAt || 0) <= deletedAt) delete recipes[id];
+  }
   out.recipes = recipes;
+  out.recipeTombstones = tombs;
 
   const plan = mergePlanStamped(L.mealplan, L.planStamps, R.mealplan, R.planStamps);
   out.mealplan   = plan.mealplan;
@@ -327,7 +377,7 @@ function mergeProfiles(local, remote) {
   // decide how it merges. Defaulting to "remote wins" is exactly the mistake
   // that cost an evening of meal planning, so an undecided field fails safe.
   const handled = new Set([
-    'recipes', 'mealplan', 'planStamps', 'templates', 'cookbooks', 'groups',
+    'recipes', 'recipeTombstones', 'mealplan', 'planStamps', 'templates', 'cookbooks', 'groups',
     'shoppingStores', 'itemStoreAssignments', 'pantry', 'pantryUpdatedAt',
     'staples', 'lastModified', ...LOCAL_ONLY,
   ]);
@@ -477,6 +527,11 @@ async function restoreSnapshot(key) {
     App.data.planStamps[wk] = App.data.planStamps[wk] || {};
     for (const dayIdx of Object.keys(week || {})) App.data.planStamps[wk][dayIdx] = now;
   }
+  // Same for recipes: the restored copies become the newest version, so a
+  // deletion recorded since (here or on another device) can't remove them
+  // again at the next merge.
+  for (const r of Object.values(App.data.recipes || {})) r.updatedAt = now;
+  App.data.recipeTombstones = {};
 
   scheduleSave();
   renderAll();
@@ -768,9 +823,59 @@ async function pullFromWorker() {
   }
 }
 
+// Merge a pulled remote copy into this device and save it. Returns whether
+// anything a screen shows changed, so callers can re-render only when needed.
+const FOREGROUND_PULL_MS = 3 * 60 * 1000;   // hidden this long → pull on return
+
+function planSignature(d) {
+  const r = Object.values(d?.recipes || {});
+  return `${r.length}:${r.reduce((n, x) => n + (x.updatedAt || 0), 0)}:` +
+         JSON.stringify(d?.mealplan || {});
+}
+
+function applyRemote(remote) {
+  const before = App.data;
+  const sig    = planSignature(before);
+  const merged = mergeProfiles(before, remote);
+  cleanupMergedDeletions(before.recipes, merged);
+  App.data = merged;
+  saveLocal();
+  return planSignature(merged) !== sig;
+}
+
+// Pull and merge without pushing — used when the app comes back to the
+// foreground. If this device has unsynced work, a full sync does the same
+// merge and then pushes the result.
+async function refreshFromWorker() {
+  if (Auth.isGuest() || !getWorkerUrl() || !App.bootPullDone) return false;
+  if (isDirty() || App.pendingSync) {
+    const ok = await syncToWorker(true);
+    renderAll();
+    return ok;
+  }
+  const remote = await pullFromWorker();
+  if (!remote) return false;
+  if (applyRemote(remote)) renderAll();
+  return true;
+}
+
+// The Sync button. Two-way: pull, merge, push, re-render.
+async function manualSync() {
+  const ok = await syncToWorker(true);
+  renderAll();
+  showToast(ok ? 'Synced \u2713' : 'Could not sync \u2014 your work is safe on this device.');
+  return ok;
+}
+
 // Push if there is anything to push. `force` bypasses the in-memory fast path
 // — used at boot and after re-auth, where the durable flag is the only thing
 // that knows this device is ahead.
+//
+// Every push merges with the worker's copy first. A push replaces the whole
+// stored profile, so without this a device that had fallen behind — a phone
+// left open since yesterday — wrote its old plan over everything newer the
+// moment it pushed. Pull, merge, then push the merged result, and the worker
+// only ever moves forward.
 async function syncToWorker(force = false) {
   if (Auth.isGuest()) return false;
   if (!force && !App.pendingSync && !isDirty()) return false;
@@ -780,6 +885,22 @@ async function syncToWorker(force = false) {
   // serialisation lands in the payload *and* bumps seq — one harmless extra
   // push. The reverse order could lose it.
   const seqAtPush = dirtySeq();
+
+  const remote = await pullFromWorker();
+  if (remote) {
+    if (applyRemote(remote)) renderAll();
+  } else if (App.lastPullResult !== 'HTTP 404') {
+    // Couldn't read the worker's copy (offline, auth, server error). Pushing
+    // blind is exactly what this guards against, so don't — keep the work
+    // flagged and try again on the next tick. A 404 is different: nothing is
+    // stored yet, so there is nothing to merge with and the push goes ahead.
+    App.pendingSync = true;
+    App.syncFailures++;
+    markDirty();
+    if (App.syncFailures >= 2 && App.syncState !== 'session-expired') setSyncState('push-failed');
+    return false;
+  }
+
   const res = await pushToWorker();
   if (res?.ok) {
     // Only a verified success clears the flag. Not an attempt, not a
@@ -1965,6 +2086,7 @@ function deleteRecipe(id) {
   removeFromGroup(id);
   const imageKey = App.data.recipes[id]?.imageKey;
   delete App.data.recipes[id];
+  markRecipeDeleted(id);
   ImageStore.delete(id);
   ImgSync.forget(id);
   ImgSync.release(imageKey);
@@ -1981,10 +2103,24 @@ function deleteRecipe(id) {
         const packed = packSlot(kept);
         if (packed === null) delete App.data.mealplan[wk][day][slot];
         else App.data.mealplan[wk][day][slot] = packed;
+        // The day changed, so it needs an edit time — or another device's
+        // copy of the day, still listing the deleted recipe, wins the merge.
+        stampPlanDay(wk, day);
       }
+      // Don't leave an emptied day behind; render paths test days for truthiness.
+      if (!Object.keys(App.data.mealplan[wk][day] || {}).length) delete App.data.mealplan[wk][day];
     }
+    if (!Object.keys(App.data.mealplan[wk] || {}).length) delete App.data.mealplan[wk];
   }
   scheduleSave();
+}
+
+// Record a deletion so it syncs. Used by every path that removes a recipe on
+// purpose (single delete, bulk delete, duplicate cleanup) — but not by "wipe
+// all" or "clear imported", which are local resets by design.
+function markRecipeDeleted(id) {
+  if (!App.data.recipeTombstones) App.data.recipeTombstones = {};
+  App.data.recipeTombstones[id] = Date.now();
 }
 
 // ─── Recipe rendering ─────────────────────────────────────────────
@@ -6386,6 +6522,9 @@ function remapRecipeReferences(map) {
   for (const wk of Object.keys(App.data.mealplan || {})) {
     for (const d of Object.keys(App.data.mealplan[wk] || {})) {
       const day = App.data.mealplan[wk][d];
+      // Stamp any day the repointing changes, or the other device's copy of
+      // that day (still pointing at the dropped duplicate) wins the merge.
+      const dayBefore = JSON.stringify(day);
       for (const slot of Object.keys(day)) {
         // De-duplicate after remapping: a day that held both copies of the
         // same recipe would otherwise end up listing one dish twice.
@@ -6399,6 +6538,7 @@ function remapRecipeReferences(map) {
         }));
         if (next === null) delete day[slot]; else day[slot] = next;
       }
+      if (JSON.stringify(day) !== dayBefore) stampPlanDay(wk, d);
     }
   }
 
@@ -6453,6 +6593,7 @@ function mergeDuplicateRecipes(dupes) {
         keep.updatedAt = Date.now();
       }
       delete App.data.recipes[d.id];
+      markRecipeDeleted(d.id);
       ImageStore.delete(d.id);
       ImgSync.forget(d.id);
       // Skipped automatically when the survivor took this photo over.
@@ -6881,6 +7022,9 @@ function applyTemplate(id, startWeek, mode = 'replace') {
     const packed = packSlot(kept);
     if (packed === null) continue;
     day[s.slot] = packed;
+    // Loading a template is an edit to that day like any other. Unstamped,
+    // these days never reached her other devices.
+    stampPlanDay(c.weekKey, c.dayIdx);
     applied += kept.length;
   }
 
@@ -8082,6 +8226,7 @@ function importMealieMealPlans(data, idMap) {
         const packed = packSlot(entries);
         if (packed === null) continue;
         App.data.mealplan[wk][day][slot] = packed;
+        stampPlanDay(wk, day);
         slots++;
       }
     }
@@ -8559,6 +8704,36 @@ function renderDiagnostics() {
     `<div class="diag-k">${esc(k)}</div><div class="diag-v">${esc(String(v))}</div>`).join('') + `</div>`;
 }
 
+// One-time repair for plans built before every write was stamped: make this
+// device's plan the newest version of every day it has, then sync. Run on
+// the device whose plan is right.
+async function claimMealPlanEverywhere() {
+  const days = Object.values(App.data.mealplan || {})
+    .reduce((n, wk) => n + Object.keys(wk || {}).length, 0);
+  if (!await appConfirm({
+    title: 'Use this device\u2019s meal plan everywhere?',
+    message: `Every planned day on this device (${days}) becomes the newest version, and your other devices take it the next time they open the app.\n\nOnly do this on the device whose meal plan is correct. Any different plan on your other devices for those days is replaced. A backup is taken first.`,
+    confirmLabel: 'Use this plan', danger: true,
+  })) return;
+
+  writeSnapshot(App.data);
+  const now = Date.now();
+  for (const [wk, week] of Object.entries(App.data.mealplan || {})) {
+    for (const d of Object.keys(week || {})) {
+      if (!App.data.planStamps) App.data.planStamps = {};
+      if (!App.data.planStamps[wk]) App.data.planStamps[wk] = {};
+      App.data.planStamps[wk][d] = now;
+    }
+  }
+  scheduleSave();
+  const ok = await syncToWorker(true);
+  renderAll();
+  renderDiagnostics();
+  showToast(ok
+    ? 'Done \u2014 reopen the app on your other devices.'
+    : 'Saved here, but couldn\u2019t reach the worker yet \u2014 it will sync automatically.');
+}
+
 // Photo sync status and the one-time upload of photos that predate it.
 async function renderPhotoSyncSettings() {
   const el = document.getElementById('settings-photos');
@@ -8863,8 +9038,7 @@ async function boot() {
   const remote   = await pullFromWorker();
 
   if (remote) {
-    App.data = mergeProfiles(App.data, remote);
-    saveLocal();
+    applyRemote(remote);
   } else {
     // No remote copy came back. Change nothing — but say so, because it means
     // this device is diverging from the others and silence is what caused
@@ -9410,10 +9584,20 @@ document.addEventListener('DOMContentLoaded', () => {
   // These used to save locally and stop there, which left a gap: an edit made
   // 59 seconds before the laptop lid closes would sit on one device until the
   // next visit, invisible. Pushing here too closes it.
+  // Hidden: save and push. Visible again after a while: pull and merge, so a
+  // phone tab left open for days shows today's plan instead of the one it
+  // loaded — and can't push that old plan back over anything newer.
+  let hiddenAt = 0;
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState !== 'hidden' || !App.data) return;
-    saveLocal();
-    if (!Auth.isGuest() && isDirty()) syncToWorker(true);
+    if (!App.data) return;
+    if (document.visibilityState === 'hidden') {
+      hiddenAt = Date.now();
+      saveLocal();
+      if (!Auth.isGuest() && isDirty()) syncToWorker(true);
+      return;
+    }
+    if (hiddenAt && Date.now() - hiddenAt >= FOREGROUND_PULL_MS) refreshFromWorker();
+    hiddenAt = 0;
   });
   window.addEventListener('pagehide', () => {
     if (!App.data) return;
