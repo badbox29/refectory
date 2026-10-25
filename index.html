@@ -16,7 +16,7 @@
   <script src="https://accounts.google.com/gsi/client" async
           onload="window.gisReady=true;window.dispatchEvent(new Event('gis-ready'))"></script>
 
-  <link rel="stylesheet" href="css/styles.css?v=1.9.0"/>
+  <link rel="stylesheet" href="css/styles.css?v=1.9.1"/>
 
   <!-- Google Client ID is served by the Cloudflare Worker (/auth/config) —
        no frontend configuration needed. -->
@@ -725,7 +725,7 @@
           <div id="settings-sync-controls" style="display:none;">
             <div class="settings-row">
               <span class="settings-row-label">Sync now</span>
-              <button class="btn btn-outline btn-sm" onclick="syncToWorker(true).then(ok=>showToast(ok ? 'Synced ✓' : 'Could not sync — your work is safe on this device.'))">Sync</button>
+              <button class="btn btn-outline btn-sm" onclick="manualSync()">Sync</button>
             </div>
           </div>
 
@@ -771,6 +771,14 @@
           </div>
           <div id="settings-diagnostics"></div>
           <button class="btn btn-outline btn-sm" id="diag-copy-btn" style="margin-top:.6rem;">Copy</button>
+          <div class="settings-row" style="margin-top:.75rem;">
+            <div>
+              <div class="settings-row-label">Use this device's meal plan everywhere</div>
+              <div class="settings-row-sub">One-time repair if another device keeps showing an older plan.
+                Run it on the device whose plan is right.</div>
+            </div>
+            <button class="btn btn-outline btn-sm" onclick="claimMealPlanEverywhere()" style="white-space:nowrap;flex-shrink:0;">Use this plan</button>
+          </div>
         </div>
       </div>
 
@@ -1314,8 +1322,8 @@
 </svg>
 
 <script src="js/imageStore.js"></script>
-<script src="js/auth.js?v=1.9.0"></script>
-<script src="js/app.js?v=1.9.0"></script>
+<script src="js/auth.js?v=1.9.1"></script>
+<script src="js/app.js?v=1.9.1"></script>
 
 
 <!-- ── Print area (only visible during window.print()) ─────── -->
